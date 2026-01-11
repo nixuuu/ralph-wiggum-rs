@@ -3,6 +3,7 @@ use regex::Regex;
 use std::time::Instant;
 
 use crate::claude::{ClaudeEvent, ContentBlock, Usage};
+use crate::markdown;
 use crate::ui::StatusData;
 
 /// Type of the last content block for grouping output
@@ -75,10 +76,12 @@ impl OutputFormatter {
         }
     }
 
+    #[allow(dead_code)]
     pub fn total_input_tokens(&self) -> u64 {
         self.total_input_tokens
     }
 
+    #[allow(dead_code)]
     pub fn total_output_tokens(&self) -> u64 {
         self.total_output_tokens
     }
@@ -106,6 +109,11 @@ impl OutputFormatter {
         let mut lines = Vec::new();
         match event {
             ClaudeEvent::Assistant { message } => {
+                // Extract usage from assistant message
+                if let Some(u) = &message.usage {
+                    self.add_usage(u);
+                }
+
                 for block in &message.content {
                     match block {
                         ContentBlock::Text { text } => {
@@ -115,8 +123,9 @@ impl OutputFormatter {
                             }
                             self.last_block_type = BlockType::Text;
 
-                            // Split text into lines
-                            for line in text.lines() {
+                            // Render markdown formatted text
+                            let rendered = markdown::render_markdown(text);
+                            for line in rendered.lines() {
                                 lines.push(line.to_string());
                             }
                         }
@@ -148,7 +157,9 @@ impl OutputFormatter {
                     }
                 }
             }
-            ClaudeEvent::Result { cost_usd, usage, .. } => {
+            ClaudeEvent::Result {
+                cost_usd, usage, ..
+            } => {
                 if let Some(cost) = cost_usd {
                     self.add_cost(*cost);
                 }
@@ -164,10 +175,7 @@ impl OutputFormatter {
     /// Format final statistics and return lines
     pub fn format_stats(&self, iterations: u32, found_promise: bool, promise: &str) -> Vec<String> {
         let elapsed = self.start_time.elapsed();
-        let mut lines = vec![
-            String::new(),
-            format!("{}", "━".repeat(60).dark_grey()),
-        ];
+        let mut lines = vec![String::new(), format!("{}", "━".repeat(60).dark_grey())];
 
         if found_promise {
             lines.push(format!(
@@ -335,11 +343,7 @@ fn format_edit_diff(path: &str, old: &str, new: &str) -> String {
     if old_lines.len() + new_lines.len() <= 5 {
         let mut parts = vec![path.to_string()];
         for line in &old_lines {
-            parts.push(format!(
-                "\n    {} {}",
-                "-".red(),
-                truncate_string(line, 60)
-            ));
+            parts.push(format!("\n    {} {}", "-".red(), truncate_string(line, 60)));
         }
         for line in &new_lines {
             parts.push(format!(
@@ -395,18 +399,12 @@ fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
             }
         }
         "Glob" => {
-            let pattern = input
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             return format!("{} in {}", pattern, path);
         }
         "Grep" => {
-            let pattern = input
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             return format!("\"{}\" in {}", truncate_string(pattern, 30), path);
         }
@@ -490,7 +488,10 @@ mod tests {
     #[test]
     fn test_find_promise_exact() {
         assert!(find_promise("<promise>done</promise>", "done"));
-        assert!(find_promise("Some text <promise>done</promise> more text", "done"));
+        assert!(find_promise(
+            "Some text <promise>done</promise> more text",
+            "done"
+        ));
     }
 
     #[test]
@@ -516,6 +517,9 @@ mod tests {
     #[test]
     fn test_find_promise_special_chars() {
         assert!(find_promise("<promise>done!</promise>", "done!"));
-        assert!(find_promise("<promise>task (done)</promise>", "task (done)"));
+        assert!(find_promise(
+            "<promise>task (done)</promise>",
+            "task (done)"
+        ));
     }
 }

@@ -32,3 +32,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # TUI for status bar
 ratatui = "0.29"
 crossterm = "0.28"
+
+# Markdown rendering in terminal
+termimad = "0.30"

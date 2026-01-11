@@ -1,5 +1,7 @@
 use serde::Deserialize;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -13,8 +15,10 @@ pub struct Usage {
     #[serde(default)]
     pub output_tokens: u64,
     #[serde(default)]
+    #[allow(dead_code)]
     pub cache_read_input_tokens: u64,
     #[serde(default)]
+    #[allow(dead_code)]
     pub cache_creation_input_tokens: u64,
 }
 
@@ -61,6 +65,8 @@ pub enum ClaudeEvent {
 pub struct AssistantMessage {
     pub role: String,
     pub content: Vec<ContentBlock>,
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,7 +122,8 @@ impl ClaudeRunner {
     /// Run claude and stream output
     /// Calls on_event for each JSON event
     /// Returns last assistant text message
-    pub async fn run<F>(&self, mut on_event: F) -> Result<Option<String>>
+    /// If shutdown flag is set, stops reading and returns early
+    pub async fn run<F>(&self, shutdown: Arc<AtomicBool>, mut on_event: F) -> Result<Option<String>>
     where
         F: FnMut(&ClaudeEvent),
     {
@@ -145,39 +152,70 @@ impl ClaudeRunner {
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());
+        // Kill child process when dropped (e.g., on Ctrl+C)
+        cmd.kill_on_drop(true);
 
-        let mut child = cmd.spawn().map_err(|e| {
-            RalphError::ClaudeProcess(format!("Failed to spawn claude: {}", e))
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| RalphError::ClaudeProcess(format!("Failed to spawn claude: {}", e)))?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            RalphError::ClaudeProcess("Failed to capture stdout".into())
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| RalphError::ClaudeProcess("Failed to capture stdout".into()))?;
 
         let mut reader = BufReader::new(stdout).lines();
         let mut last_assistant_text: Option<String> = None;
 
-        while let Some(line) = reader.next_line().await? {
-            if line.is_empty() {
-                continue;
+        // Create a future that completes when shutdown is requested
+        let shutdown_check = async {
+            loop {
+                if shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
+        };
+        tokio::pin!(shutdown_check);
 
-            match serde_json::from_str::<ClaudeEvent>(&line) {
-                Ok(event) => {
-                    // Extract text from assistant messages
-                    if let ClaudeEvent::Assistant { ref message } = event {
-                        for block in &message.content {
-                            if let ContentBlock::Text { text } = block {
-                                last_assistant_text = Some(text.clone());
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = &mut shutdown_check => {
+                    // Shutdown requested - kill child and return
+                    child.kill().await.ok();
+                    return Err(RalphError::Interrupted);
+                }
+
+                line_result = reader.next_line() => {
+                    match line_result? {
+                        Some(line) => {
+                            if line.is_empty() {
+                                continue;
+                            }
+
+                            match serde_json::from_str::<ClaudeEvent>(&line) {
+                                Ok(event) => {
+                                    // Extract text from assistant messages
+                                    if let ClaudeEvent::Assistant { ref message } = event {
+                                        for block in &message.content {
+                                            if let ContentBlock::Text { text } = block {
+                                                last_assistant_text = Some(text.clone());
+                                            }
+                                        }
+                                    }
+
+                                    on_event(&event);
+                                }
+                                Err(e) => {
+                                    eprintln!("Warning: Failed to parse JSON line: {}", e);
+                                    eprintln!("Line: {}", line);
+                                }
                             }
                         }
+                        None => break, // EOF - child process finished
                     }
-
-                    on_event(&event);
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to parse JSON line: {}", e);
-                    eprintln!("Line: {}", line);
                 }
             }
         }

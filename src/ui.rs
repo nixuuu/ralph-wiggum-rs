@@ -2,12 +2,12 @@ use std::io::{self, Stdout};
 
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::{
+    Terminal, Viewport,
     backend::CrosstermBackend,
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Terminal, Viewport,
 };
 
 use crate::error::Result;
@@ -17,6 +17,7 @@ use crate::error::Result;
 pub struct StatusData {
     pub iteration: u32,
     pub max_iterations: u32,
+    #[allow(dead_code)]
     pub elapsed_secs: f64,
     pub iteration_elapsed_secs: f64,
     pub input_tokens: u64,

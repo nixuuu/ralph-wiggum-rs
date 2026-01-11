@@ -48,9 +48,8 @@ impl StateManager {
     /// Parse markdown file with YAML frontmatter
     /// Returns (state, prompt)
     pub fn load_from_file(path: &Path) -> Result<(LoopState, String)> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            RalphError::StateFile(format!("Failed to read state file: {}", e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| RalphError::StateFile(format!("Failed to read state file: {}", e)))?;
 
         // Find frontmatter boundaries
         let lines: Vec<&str> = content.lines().collect();
