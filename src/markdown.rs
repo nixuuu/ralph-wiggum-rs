@@ -1,4 +1,4 @@
-use termimad::{MadSkin, crossterm::style::Color::*};
+use termimad::{FmtText, MadSkin, crossterm::style::Color::*};
 
 /// Create a custom skin for markdown rendering
 pub fn create_skin() -> MadSkin {
@@ -51,12 +51,11 @@ pub fn render_markdown(text: &str) -> String {
     let skin = create_skin();
     let terminal_width = termimad::terminal_size().0 as usize;
     // Use a reasonable width, capped at terminal width
-    let _width = terminal_width.min(100);
+    let width = terminal_width.min(100);
 
-    // Use termimad to format the text
-    let formatted = skin.term_text(text);
+    // Use FmtText with explicit width to properly wrap text
+    let formatted = FmtText::from(&skin, text, Some(width));
 
-    // Convert to string, respecting the width
     formatted.to_string()
 }
 

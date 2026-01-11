@@ -16,6 +16,9 @@ serde_json = "1.0"
 # YAML frontmatter parsing
 serde_yaml = "0.9"
 
+# TOML config file parsing
+toml = "0.8"
+
 # Async runtime
 tokio = { version = "1.40", features = ["full", "signal"] }
 

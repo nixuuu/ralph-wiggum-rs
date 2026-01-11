@@ -1,6 +1,7 @@
 mod claude;
 mod config;
 mod error;
+mod file_config;
 mod markdown;
 mod output;
 mod prompt;
