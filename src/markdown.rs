@@ -1,4 +1,10 @@
+use crossterm::terminal;
 use termimad::{FmtText, MadSkin, crossterm::style::Color::*};
+
+/// Get terminal width using crossterm (more reliable in raw mode)
+fn get_terminal_width() -> usize {
+    terminal::size().map(|(w, _)| w as usize).unwrap_or(120) // fallback to 120 columns
+}
 
 /// Create a custom skin for markdown rendering
 pub fn create_skin() -> MadSkin {
@@ -49,7 +55,7 @@ pub fn create_skin() -> MadSkin {
 /// Render markdown text to a styled string for terminal output
 pub fn render_markdown(text: &str) -> String {
     let skin = create_skin();
-    let terminal_width = termimad::terminal_size().0 as usize;
+    let terminal_width = get_terminal_width();
     // Use full terminal width (minimum 80 for readability)
     let width = terminal_width.max(80);
 
