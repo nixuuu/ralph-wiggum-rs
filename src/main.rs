@@ -4,8 +4,11 @@ mod error;
 mod output;
 mod prompt;
 mod state;
+mod ui;
 
 use clap::Parser;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::signal;
@@ -16,6 +19,7 @@ use error::{RalphError, Result};
 use output::{find_promise, OutputFormatter};
 use prompt::build_wrapped_prompt;
 use state::StateManager;
+use ui::StatusTerminal;
 
 #[tokio::main]
 async fn main() {
@@ -57,7 +61,11 @@ async fn run() -> Result<()> {
     });
 
     // Initialize output formatter
-    let mut formatter = OutputFormatter::new();
+    let formatter = Rc::new(RefCell::new(OutputFormatter::new()));
+    formatter.borrow_mut().set_max_iterations(config.max_iterations);
+
+    // Initialize status terminal
+    let status_terminal = Rc::new(RefCell::new(StatusTerminal::new()?));
 
     // Save initial state
     state_manager.save().await?;
@@ -67,17 +75,21 @@ async fn run() -> Result<()> {
         // Check shutdown signal
         if shutdown.load(Ordering::SeqCst) {
             state_manager.save().await?;
-            formatter.print_interrupted(state_manager.iteration());
+            status_terminal.borrow_mut().cleanup()?;
+            let lines = formatter.borrow().format_interrupted(state_manager.iteration());
+            status_terminal.borrow_mut().print_lines(&lines)?;
             return Err(RalphError::Interrupted);
         }
 
         // Check max iterations (before incrementing)
         if state_manager.is_max_reached() {
-            formatter.print_stats(
+            status_terminal.borrow_mut().cleanup()?;
+            let lines = formatter.borrow().format_stats(
                 state_manager.iteration(),
                 false,
                 state_manager.completion_promise(),
             );
+            status_terminal.borrow_mut().print_lines(&lines)?;
             // Cleanup state file on max iterations
             state_manager.cleanup().await?;
             return Err(RalphError::MaxIterations(state_manager.iteration()));
@@ -85,8 +97,15 @@ async fn run() -> Result<()> {
 
         // Increment iteration
         state_manager.increment_iteration().await?;
-        formatter.set_iteration(state_manager.iteration());
-        formatter.print_iteration_header();
+        formatter.borrow_mut().set_iteration(state_manager.iteration());
+        formatter.borrow_mut().start_iteration();
+
+        // Print iteration header
+        let header_lines = formatter.borrow().format_iteration_header();
+        status_terminal.borrow_mut().print_lines(&header_lines)?;
+
+        // Update status bar at iteration start
+        status_terminal.borrow_mut().update(&formatter.borrow().get_status())?;
 
         // Build prompt with current iteration number
         let prompt = build_wrapped_prompt(
@@ -102,32 +121,46 @@ async fn run() -> Result<()> {
             ClaudeRunner::for_continuation(prompt)
         };
 
+        // Clone Rc for use in closure
+        let formatter_clone = formatter.clone();
+        let status_terminal_clone = status_terminal.clone();
+
         // Run claude
         let last_message = runner
             .run(|event| {
-                formatter.print_event(event);
+                let lines = formatter_clone.borrow_mut().format_event(event);
+                for line in lines {
+                    let _ = status_terminal_clone.borrow_mut().print_line(&line);
+                }
+                let _ = status_terminal_clone.borrow_mut().update(&formatter_clone.borrow().get_status());
             })
             .await?;
+
+        // Update status bar after iteration completes
+        status_terminal.borrow_mut().update(&formatter.borrow().get_status())?;
 
         // Check for completion promise in last message
         if let Some(text) = last_message {
             if find_promise(&text, state_manager.completion_promise()) {
                 if state_manager.can_accept_promise() {
-                    formatter.print_stats(
+                    status_terminal.borrow_mut().cleanup()?;
+                    let lines = formatter.borrow().format_stats(
                         state_manager.iteration(),
                         true,
                         state_manager.completion_promise(),
                     );
+                    status_terminal.borrow_mut().print_lines(&lines)?;
                     // Cleanup state file on successful completion
                     state_manager.cleanup().await?;
                     return Ok(());
                 } else {
                     // Promise found but min iterations not reached - continue
-                    println!(
+                    let msg = format!(
                         "\n[Promise found but ignoring - need {} more iteration(s) to reach minimum of {}]",
                         state_manager.min_iterations() - state_manager.iteration(),
                         state_manager.min_iterations()
                     );
+                    status_terminal.borrow_mut().print_line(&msg)?;
                 }
             }
         }
@@ -135,7 +168,9 @@ async fn run() -> Result<()> {
         // Check shutdown after iteration
         if shutdown.load(Ordering::SeqCst) {
             state_manager.save().await?;
-            formatter.print_interrupted(state_manager.iteration());
+            status_terminal.borrow_mut().cleanup()?;
+            let lines = formatter.borrow().format_interrupted(state_manager.iteration());
+            status_terminal.borrow_mut().print_lines(&lines)?;
             return Err(RalphError::Interrupted);
         }
     }

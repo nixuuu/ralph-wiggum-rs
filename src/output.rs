@@ -1,20 +1,41 @@
+use crossterm::style::Stylize;
 use regex::Regex;
 use std::time::Instant;
 
-use crate::claude::{ClaudeEvent, ContentBlock};
+use crate::claude::{ClaudeEvent, ContentBlock, Usage};
+use crate::ui::StatusData;
+
+/// Type of the last content block for grouping output
+#[derive(PartialEq, Clone, Copy)]
+enum BlockType {
+    None,
+    Text,
+    Tool,
+}
 
 pub struct OutputFormatter {
     iteration: u32,
+    max_iterations: u32,
     start_time: Instant,
+    iteration_start_time: Instant,
     total_cost_usd: f64,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
+    last_block_type: BlockType,
 }
 
 impl OutputFormatter {
     pub fn new() -> Self {
+        let now = Instant::now();
         Self {
             iteration: 0,
-            start_time: Instant::now(),
+            max_iterations: 0,
+            start_time: now,
+            iteration_start_time: now,
             total_cost_usd: 0.0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            last_block_type: BlockType::None,
         }
     }
 
@@ -22,39 +43,102 @@ impl OutputFormatter {
         self.iteration = iteration;
     }
 
+    pub fn set_max_iterations(&mut self, max: u32) {
+        self.max_iterations = max;
+    }
+
+    /// Start a new iteration - reset iteration timer and block type
+    pub fn start_iteration(&mut self) {
+        self.iteration_start_time = Instant::now();
+        self.last_block_type = BlockType::None;
+    }
+
     pub fn add_cost(&mut self, cost: f64) {
         self.total_cost_usd += cost;
     }
 
-    /// Print iteration header
-    pub fn print_iteration_header(&self) {
-        let elapsed = self.start_time.elapsed();
-        println!();
-        println!("{}", "=".repeat(60));
-        println!(
-            "Iteration {} | Elapsed: {:.1}s",
-            self.iteration,
-            elapsed.as_secs_f64()
-        );
-        println!("{}", "=".repeat(60));
-        println!();
+    pub fn add_usage(&mut self, usage: &Usage) {
+        self.total_input_tokens += usage.input_tokens;
+        self.total_output_tokens += usage.output_tokens;
     }
 
-    /// Format and print a claude event
-    pub fn print_event(&mut self, event: &ClaudeEvent) {
+    /// Get current status data for the status bar
+    pub fn get_status(&self) -> StatusData {
+        StatusData {
+            iteration: self.iteration,
+            max_iterations: self.max_iterations,
+            elapsed_secs: self.start_time.elapsed().as_secs_f64(),
+            iteration_elapsed_secs: self.iteration_start_time.elapsed().as_secs_f64(),
+            input_tokens: self.total_input_tokens,
+            output_tokens: self.total_output_tokens,
+            cost_usd: self.total_cost_usd,
+        }
+    }
+
+    pub fn total_input_tokens(&self) -> u64 {
+        self.total_input_tokens
+    }
+
+    pub fn total_output_tokens(&self) -> u64 {
+        self.total_output_tokens
+    }
+
+    /// Format iteration header and return lines
+    pub fn format_iteration_header(&self) -> Vec<String> {
+        let elapsed = self.start_time.elapsed();
+        vec![
+            String::new(),
+            format!("{}", "━".repeat(60).dark_grey()),
+            format!(
+                "{} {} {} {} {:.1}s",
+                "▶".cyan(),
+                "Iteration".bold(),
+                self.iteration.to_string().cyan().bold(),
+                "│ Elapsed:".dark_grey(),
+                elapsed.as_secs_f64()
+            ),
+            format!("{}", "━".repeat(60).dark_grey()),
+        ]
+    }
+
+    /// Format a claude event and return lines to print
+    pub fn format_event(&mut self, event: &ClaudeEvent) -> Vec<String> {
+        let mut lines = Vec::new();
         match event {
             ClaudeEvent::Assistant { message } => {
                 for block in &message.content {
                     match block {
                         ContentBlock::Text { text } => {
-                            println!("{}", text);
+                            // Add empty line if switching from tool to text
+                            if self.last_block_type == BlockType::Tool {
+                                lines.push(String::new());
+                            }
+                            self.last_block_type = BlockType::Text;
+
+                            // Split text into lines
+                            for line in text.lines() {
+                                lines.push(line.to_string());
+                            }
                         }
                         ContentBlock::ToolUse { name, input, .. } => {
+                            // Add empty line if switching from text to tool
+                            if self.last_block_type == BlockType::Text {
+                                lines.push(String::new());
+                            }
+                            self.last_block_type = BlockType::Tool;
+
                             let details = format_tool_details(name, input);
+                            let tool_icon = get_tool_icon(name);
+                            let colored_name = colorize_tool_name(name);
                             if details.is_empty() {
-                                println!("[Tool: {}]", name);
+                                lines.push(format!("  {} {}", tool_icon, colored_name));
                             } else {
-                                println!("[Tool: {}] {}", name, details);
+                                lines.push(format!(
+                                    "  {} {} {}",
+                                    tool_icon,
+                                    colored_name,
+                                    details.dark_grey()
+                                ));
                             }
                         }
                         ContentBlock::ToolResult { .. } => {
@@ -64,48 +148,129 @@ impl OutputFormatter {
                     }
                 }
             }
-            ClaudeEvent::Result { cost_usd, .. } => {
+            ClaudeEvent::Result { cost_usd, usage, .. } => {
                 if let Some(cost) = cost_usd {
                     self.add_cost(*cost);
+                }
+                if let Some(u) = usage {
+                    self.add_usage(u);
                 }
             }
             _ => {}
         }
+        lines
     }
 
-    /// Print final statistics
-    pub fn print_stats(&self, iterations: u32, found_promise: bool, promise: &str) {
+    /// Format final statistics and return lines
+    pub fn format_stats(&self, iterations: u32, found_promise: bool, promise: &str) -> Vec<String> {
         let elapsed = self.start_time.elapsed();
-        println!();
-        println!("{}", "=".repeat(60));
+        let mut lines = vec![
+            String::new(),
+            format!("{}", "━".repeat(60).dark_grey()),
+        ];
+
         if found_promise {
-            println!("COMPLETED - Promise found: <promise>{}</promise>", promise);
+            lines.push(format!(
+                "{} {} {}",
+                "✓".green().bold(),
+                "COMPLETED".green().bold(),
+                format!("- Promise found: <promise>{}</promise>", promise).dark_grey()
+            ));
         } else {
-            println!("STOPPED - Promise not found");
+            lines.push(format!(
+                "{} {}",
+                "✗".red().bold(),
+                "STOPPED - Promise not found".red()
+            ));
         }
-        println!("{}", "=".repeat(60));
-        println!("Total iterations: {}", iterations);
-        println!("Total time: {:.2}s", elapsed.as_secs_f64());
+
+        lines.push(format!("{}", "━".repeat(60).dark_grey()));
+        lines.push(format!(
+            "  {} {}",
+            "Iterations:".dark_grey(),
+            iterations.to_string().white().bold()
+        ));
+        lines.push(format!(
+            "  {}      {:.2}s",
+            "Time:".dark_grey(),
+            elapsed.as_secs_f64()
+        ));
+
+        if self.total_input_tokens > 0 || self.total_output_tokens > 0 {
+            lines.push(format!(
+                "  {}    {} {} {} {}",
+                "Tokens:".dark_grey(),
+                format_tokens(self.total_input_tokens).green(),
+                "in /".dark_grey(),
+                format_tokens(self.total_output_tokens).magenta(),
+                "out".dark_grey()
+            ));
+        }
+
         if self.total_cost_usd > 0.0 {
-            println!("Total cost: ${:.4}", self.total_cost_usd);
+            lines.push(format!(
+                "  {}      {}",
+                "Cost:".dark_grey(),
+                format!("${:.4}", self.total_cost_usd).yellow()
+            ));
         }
-        println!("{}", "=".repeat(60));
+
+        lines.push(format!("{}", "━".repeat(60).dark_grey()));
+        lines
     }
 
-    /// Print interruption message
-    pub fn print_interrupted(&self, iterations: u32) {
+    /// Format interruption message and return lines
+    pub fn format_interrupted(&self, iterations: u32) -> Vec<String> {
         let elapsed = self.start_time.elapsed();
-        println!();
-        println!("{}", "=".repeat(60));
-        println!("INTERRUPTED - State saved");
-        println!("{}", "=".repeat(60));
-        println!("Iterations completed: {}", iterations);
-        println!("Time elapsed: {:.2}s", elapsed.as_secs_f64());
-        if self.total_cost_usd > 0.0 {
-            println!("Cost so far: ${:.4}", self.total_cost_usd);
+        let mut lines = vec![
+            String::new(),
+            format!("{}", "━".repeat(60).dark_grey()),
+            format!(
+                "{} {} {}",
+                "⏸".yellow().bold(),
+                "INTERRUPTED".yellow().bold(),
+                "- State saved".dark_grey()
+            ),
+            format!("{}", "━".repeat(60).dark_grey()),
+            format!(
+                "  {} {}",
+                "Iterations:".dark_grey(),
+                iterations.to_string().white().bold()
+            ),
+            format!(
+                "  {}      {:.2}s",
+                "Time:".dark_grey(),
+                elapsed.as_secs_f64()
+            ),
+        ];
+
+        if self.total_input_tokens > 0 || self.total_output_tokens > 0 {
+            lines.push(format!(
+                "  {}    {} {} {} {}",
+                "Tokens:".dark_grey(),
+                format_tokens(self.total_input_tokens).green(),
+                "in /".dark_grey(),
+                format_tokens(self.total_output_tokens).magenta(),
+                "out".dark_grey()
+            ));
         }
-        println!("Resume with: ralph-wiggum --resume");
-        println!("{}", "=".repeat(60));
+
+        if self.total_cost_usd > 0.0 {
+            lines.push(format!(
+                "  {}      {}",
+                "Cost:".dark_grey(),
+                format!("${:.4}", self.total_cost_usd).yellow()
+            ));
+        }
+
+        lines.push(String::new());
+        lines.push(format!(
+            "  {} {}",
+            "Resume:".dark_grey(),
+            "ralph-wiggum --resume".cyan()
+        ));
+        lines.push(format!("{}", "━".repeat(60).dark_grey()));
+        lines
     }
 }
 
@@ -115,7 +280,86 @@ impl Default for OutputFormatter {
     }
 }
 
+/// Format tokens for display (e.g., 1234 -> "1.2k")
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Get icon for a tool
+fn get_tool_icon(name: &str) -> &'static str {
+    match name {
+        "Read" => "📖",
+        "Write" => "📝",
+        "Edit" => "✏️",
+        "Bash" => "💻",
+        "Glob" => "🔍",
+        "Grep" => "🔎",
+        "Task" => "🤖",
+        "WebFetch" => "🌐",
+        "WebSearch" => "🔍",
+        "TodoWrite" => "📋",
+        "AskUserQuestion" => "❓",
+        _ => "🔧",
+    }
+}
+
+/// Colorize tool name based on tool type
+fn colorize_tool_name(name: &str) -> String {
+    use crossterm::style::Stylize;
+    match name {
+        "Read" | "Glob" | "Grep" => name.cyan().to_string(),
+        "Write" | "Edit" => name.yellow().to_string(),
+        "Bash" => name.magenta().to_string(),
+        "Task" => name.blue().to_string(),
+        "WebFetch" | "WebSearch" => name.green().to_string(),
+        "TodoWrite" => name.white().to_string(),
+        _ => name.white().to_string(),
+    }
+}
+
 /// Format tool details for display
+/// Format Edit tool as colored diff
+fn format_edit_diff(path: &str, old: &str, new: &str) -> String {
+    use crossterm::style::Stylize;
+
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+
+    // If diff is small (≤5 lines total), show inline diff
+    if old_lines.len() + new_lines.len() <= 5 {
+        let mut parts = vec![path.to_string()];
+        for line in &old_lines {
+            parts.push(format!(
+                "\n    {} {}",
+                "-".red(),
+                truncate_string(line, 60)
+            ));
+        }
+        for line in &new_lines {
+            parts.push(format!(
+                "\n    {} {}",
+                "+".green(),
+                truncate_string(line, 60)
+            ));
+        }
+        parts.join("")
+    } else {
+        // For larger diffs, show summary
+        format!(
+            "{} | {} {}",
+            path,
+            format!("-{}", old_lines.len()).red(),
+            format!("+{}", new_lines.len()).green()
+        )
+    }
+}
+
 fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
     match name {
         "Read" => {
@@ -133,14 +377,12 @@ fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
                 let old = input
                     .get("old_string")
                     .and_then(|v| v.as_str())
-                    .map(|s| truncate_string(s, 30))
-                    .unwrap_or_default();
+                    .unwrap_or("");
                 let new = input
                     .get("new_string")
                     .and_then(|v| v.as_str())
-                    .map(|s| truncate_string(s, 30))
-                    .unwrap_or_default();
-                return format!("{} | \"{}\" -> \"{}\"", path, old, new);
+                    .unwrap_or("");
+                return format_edit_diff(path, old, new);
             }
         }
         "Bash" => {

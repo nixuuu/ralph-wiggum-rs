@@ -28,3 +28,7 @@ anyhow = "1.0"
 
 # Time formatting
 chrono = { version = "0.4", features = ["serde"] }
+
+# TUI for status bar
+ratatui = "0.29"
+crossterm = "0.28"

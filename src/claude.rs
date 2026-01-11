@@ -5,6 +5,19 @@ use tokio::process::Command;
 
 use crate::error::{RalphError, Result};
 
+/// Token usage information from claude
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Usage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+}
+
 /// Events from claude JSON output
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -29,12 +42,14 @@ pub enum ClaudeEvent {
     Result {
         #[serde(default)]
         subtype: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "total_cost_usd")]
         cost_usd: Option<f64>,
         #[serde(default)]
         duration_ms: Option<u64>,
         #[serde(default)]
         duration_api_ms: Option<u64>,
+        #[serde(default)]
+        usage: Option<Usage>,
     },
 
     #[serde(other)]
