@@ -123,6 +123,11 @@ impl ClaudeRunner {
     /// Calls on_event for each JSON event
     /// Returns last assistant text message
     /// If shutdown flag is set, stops reading and returns early
+    ///
+    /// Note: If claude exits with non-zero status but we already received
+    /// a complete response, we return the response instead of an error.
+    /// This handles cases where claude CLI exits with code 1 after
+    /// delivering complete output (e.g., during cleanup or due to warnings).
     pub async fn run<F>(&self, shutdown: Arc<AtomicBool>, mut on_event: F) -> Result<Option<String>>
     where
         F: FnMut(&ClaudeEvent),
@@ -222,6 +227,12 @@ impl ClaudeRunner {
 
         let status = child.wait().await?;
         if !status.success() {
+            // If we already received assistant's response, return it despite non-zero exit code.
+            // Claude CLI may exit with code 1 after delivering complete response
+            // (e.g., during cleanup or due to internal warnings).
+            if last_assistant_text.is_some() {
+                return Ok(last_assistant_text);
+            }
             return Err(RalphError::ClaudeProcess(format!(
                 "claude exited with status: {}",
                 status
