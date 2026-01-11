@@ -38,3 +38,6 @@ crossterm = "0.28"
 
 # Markdown rendering in terminal
 termimad = "0.30"
+
+# Convert ANSI escape codes to ratatui Text
+ansi-to-tui = "7"

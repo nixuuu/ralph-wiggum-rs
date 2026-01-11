@@ -1,5 +1,6 @@
 use std::io::{self, Stdout};
 
+use ansi_to_tui::IntoText;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::{
     Terminal, Viewport,
@@ -7,7 +8,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
 };
 
 use crate::error::Result;
@@ -127,9 +128,12 @@ impl StatusTerminal {
             return Ok(());
         }
 
+        // Convert ANSI escape codes to ratatui Text
+        let ratatui_text = text.into_text().unwrap_or_default();
+
         self.terminal.insert_before(1, |buf| {
             let area = Rect::new(0, 0, buf.area.width, 1);
-            let paragraph = Paragraph::new(text.to_string());
+            let paragraph = Paragraph::new(ratatui_text.clone());
             paragraph.render(area, buf);
         })?;
 
@@ -145,13 +149,31 @@ impl StatusTerminal {
             return Ok(());
         }
 
-        let height = lines.len() as u16;
+        // Convert all lines to ratatui Text, properly handling ANSI escape codes
+        let combined = lines.join("\n");
+        let ratatui_text = combined.into_text().unwrap_or_default();
+        let text_height = ratatui_text.lines.len() as u16;
+
+        // Calculate required height with wrapping
+        let terminal_width = self.terminal.size()?.width;
+        let mut total_height = 0u16;
+        for line in &ratatui_text.lines {
+            let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            let wrapped_lines = if line_width == 0 {
+                1
+            } else {
+                ((line_width as u16).saturating_sub(1) / terminal_width + 1).max(1)
+            };
+            total_height += wrapped_lines;
+        }
+
+        // Use the larger of actual lines or calculated wrapped height
+        let height = total_height.max(text_height);
+
         self.terminal.insert_before(height, |buf| {
-            for (i, line) in lines.iter().enumerate() {
-                let area = Rect::new(0, i as u16, buf.area.width, 1);
-                let paragraph = Paragraph::new(line.clone());
-                paragraph.render(area, buf);
-            }
+            let area = Rect::new(0, 0, buf.area.width, height);
+            let paragraph = Paragraph::new(ratatui_text.clone()).wrap(Wrap { trim: false });
+            paragraph.render(area, buf);
         })?;
 
         Ok(())
