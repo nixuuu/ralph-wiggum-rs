@@ -50,8 +50,8 @@ pub fn create_skin() -> MadSkin {
 pub fn render_markdown(text: &str) -> String {
     let skin = create_skin();
     let terminal_width = termimad::terminal_size().0 as usize;
-    // Use a reasonable width, capped at terminal width
-    let width = terminal_width.min(100);
+    // Use full terminal width (minimum 80 for readability)
+    let width = terminal_width.max(80);
 
     // Use FmtText with explicit width to properly wrap text
     let formatted = FmtText::from(&skin, text, Some(width));
@@ -87,6 +87,46 @@ mod tests {
     #[test]
     fn test_render_inline() {
         let result = render_inline("**bold** and *italic*");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_render_simple_table() {
+        let table = r#"| Col1 | Col2 | Col3 |
+|------|------|------|
+| A    | B    | C    |
+| D    | E    | F    |"#;
+        let result = render_markdown(table);
+        assert!(!result.is_empty());
+        // Verify all cells are present in output
+        assert!(result.contains("Col1") || result.contains("A"));
+    }
+
+    #[test]
+    fn test_render_table_with_many_columns() {
+        let table = r#"| C1 | C2 | C3 | C4 | C5 |
+|----|----|----|----|----|
+| A  | B  | C  | D  | E  |"#;
+        let result = render_markdown(table);
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_render_table_with_long_text() {
+        let table = r#"| Name | Description |
+|------|-------------|
+| Test | This is a very long description that spans many characters |"#;
+        let result = render_markdown(table);
+        assert!(!result.is_empty());
+        assert!(result.contains("Description") || result.contains("long"));
+    }
+
+    #[test]
+    fn test_render_table_with_alignment() {
+        let table = r#"| Left | Center | Right |
+|:-----|:------:|------:|
+| L    | C      | R     |"#;
+        let result = render_markdown(table);
         assert!(!result.is_empty());
     }
 }

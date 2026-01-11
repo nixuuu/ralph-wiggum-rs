@@ -30,13 +30,11 @@ impl FileConfig {
             return Ok(Self::default());
         }
 
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            RalphError::Config(format!("Failed to read {}: {}", path.display(), e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| RalphError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
-        toml::from_str(&content).map_err(|e| {
-            RalphError::Config(format!("Failed to parse {}: {}", path.display(), e))
-        })
+        toml::from_str(&content)
+            .map_err(|e| RalphError::Config(format!("Failed to parse {}: {}", path.display(), e)))
     }
 
     /// Apply prefix and suffix to user prompt
@@ -124,7 +122,10 @@ prefix = "Kryteria akceptacji:"
 suffix = "Śledź progres"
 "#;
         let config: FileConfig = toml::from_str(toml_content).unwrap();
-        assert_eq!(config.prompt.prefix.as_deref(), Some("Kryteria akceptacji:"));
+        assert_eq!(
+            config.prompt.prefix.as_deref(),
+            Some("Kryteria akceptacji:")
+        );
         assert_eq!(config.prompt.suffix.as_deref(), Some("Śledź progres"));
     }
 
