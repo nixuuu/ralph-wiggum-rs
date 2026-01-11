@@ -37,6 +37,11 @@ pub struct CliArgs {
     /// Path to config file (default: .ralph.toml)
     #[arg(short, long, default_value = ".ralph.toml")]
     pub config: PathBuf,
+
+    /// Disable --continue flag for subsequent iterations
+    /// (each iteration starts a fresh conversation instead of continuing)
+    #[arg(long)]
+    pub no_continue: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +52,8 @@ pub struct Config {
     pub completion_promise: String,
     pub state_file: PathBuf,
     pub starting_iteration: u32,
+    /// When true, disables --continue flag for subsequent iterations
+    pub no_continue: bool,
 }
 
 impl Config {
@@ -91,6 +98,7 @@ impl Config {
                 completion_promise,
                 state_file: args.state_file,
                 starting_iteration: state.iteration,
+                no_continue: args.no_continue,
             });
         }
 
@@ -111,6 +119,46 @@ impl Config {
             completion_promise: args.promise,
             state_file: args.state_file,
             starting_iteration: 0,
+            no_continue: args.no_continue,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_args_no_continue_default() {
+        // Without --no-continue flag, it should be false
+        let args = CliArgs::parse_from(["ralph-wiggum", "--prompt", "test"]);
+        assert!(!args.no_continue);
+    }
+
+    #[test]
+    fn test_cli_args_no_continue_enabled() {
+        // With --no-continue flag, it should be true
+        let args = CliArgs::parse_from(["ralph-wiggum", "--prompt", "test", "--no-continue"]);
+        assert!(args.no_continue);
+    }
+
+    #[test]
+    fn test_cli_args_all_flags_together() {
+        // Test that --no-continue works with other flags
+        let args = CliArgs::parse_from([
+            "ralph-wiggum",
+            "--prompt",
+            "test prompt",
+            "--min-iterations",
+            "3",
+            "--max-iterations",
+            "10",
+            "--no-continue",
+        ]);
+        assert!(args.no_continue);
+        assert_eq!(args.min_iterations, 3);
+        assert_eq!(args.max_iterations, 10);
+        assert_eq!(args.prompt, Some("test prompt".to_string()));
     }
 }
