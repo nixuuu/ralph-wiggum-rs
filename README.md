@@ -38,7 +38,7 @@ ralph-wiggum --prompt "Your task description here"
 | `--resume` | `-r` | | Resume from state file |
 | `--state-file` | | `.claude/ralph-loop.local.md` | Path to state file |
 | `--config` | `-c` | `.ralph.toml` | Path to config file |
-| `--no-continue` | | | Start fresh conversation each iteration |
+| `--continue-session` | | | Continue conversation from previous iteration |
 
 ### Examples
 
@@ -82,7 +82,7 @@ suffix = "Update CHANGELOG.md with your changes."
 2. **Loop Execution**: Ralph Wiggum runs `claude` with your prompt. After each iteration:
    - It checks for the completion promise in Claude's response
    - If found and minimum iterations reached, the loop ends successfully
-   - Otherwise, it continues to the next iteration (using `--continue` by default)
+   - Otherwise, it continues to the next iteration (starts fresh by default, use `--continue-session` to maintain conversation)
 
 3. **State Management**: Progress is saved to a state file, allowing you to resume interrupted sessions.
 

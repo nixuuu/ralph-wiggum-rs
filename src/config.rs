@@ -38,10 +38,10 @@ pub struct CliArgs {
     #[arg(short, long, default_value = ".ralph.toml")]
     pub config: PathBuf,
 
-    /// Disable --continue flag for subsequent iterations
-    /// (each iteration starts a fresh conversation instead of continuing)
+    /// Continue conversation from previous iteration
+    /// (by default each iteration starts a fresh conversation)
     #[arg(long)]
-    pub no_continue: bool,
+    pub continue_session: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -52,8 +52,8 @@ pub struct Config {
     pub completion_promise: String,
     pub state_file: PathBuf,
     pub starting_iteration: u32,
-    /// When true, disables --continue flag for subsequent iterations
-    pub no_continue: bool,
+    /// When true, enables --continue flag for subsequent iterations
+    pub continue_session: bool,
 }
 
 impl Config {
@@ -98,7 +98,7 @@ impl Config {
                 completion_promise,
                 state_file: args.state_file,
                 starting_iteration: state.iteration,
-                no_continue: args.no_continue,
+                continue_session: args.continue_session,
             });
         }
 
@@ -119,7 +119,7 @@ impl Config {
             completion_promise: args.promise,
             state_file: args.state_file,
             starting_iteration: 0,
-            no_continue: args.no_continue,
+            continue_session: args.continue_session,
         })
     }
 }
@@ -130,22 +130,22 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn test_cli_args_no_continue_default() {
-        // Without --no-continue flag, it should be false
+    fn test_cli_args_continue_session_default() {
+        // Without --continue-session flag, it should be false (default: no continuation)
         let args = CliArgs::parse_from(["ralph-wiggum", "--prompt", "test"]);
-        assert!(!args.no_continue);
+        assert!(!args.continue_session);
     }
 
     #[test]
-    fn test_cli_args_no_continue_enabled() {
-        // With --no-continue flag, it should be true
-        let args = CliArgs::parse_from(["ralph-wiggum", "--prompt", "test", "--no-continue"]);
-        assert!(args.no_continue);
+    fn test_cli_args_continue_session_enabled() {
+        // With --continue-session flag, it should be true
+        let args = CliArgs::parse_from(["ralph-wiggum", "--prompt", "test", "--continue-session"]);
+        assert!(args.continue_session);
     }
 
     #[test]
     fn test_cli_args_all_flags_together() {
-        // Test that --no-continue works with other flags
+        // Test that --continue-session works with other flags
         let args = CliArgs::parse_from([
             "ralph-wiggum",
             "--prompt",
@@ -154,9 +154,9 @@ mod tests {
             "3",
             "--max-iterations",
             "10",
-            "--no-continue",
+            "--continue-session",
         ]);
-        assert!(args.no_continue);
+        assert!(args.continue_session);
         assert_eq!(args.min_iterations, 3);
         assert_eq!(args.max_iterations, 10);
         assert_eq!(args.prompt, Some("test prompt".to_string()));

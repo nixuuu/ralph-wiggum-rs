@@ -127,9 +127,9 @@ async fn run() -> Result<()> {
             state_manager.iteration(),
         );
 
-        // Create runner - first iteration starts new session, others continue
-        // When no_continue is set, all iterations start fresh conversations
-        let runner = if state_manager.iteration() == 1 || config.no_continue {
+        // Create runner - first iteration starts new session, others may continue
+        // When continue_session is set, subsequent iterations continue the conversation
+        let runner = if state_manager.iteration() == 1 || !config.continue_session {
             ClaudeRunner::with_prompt(prompt)
         } else {
             ClaudeRunner::for_continuation(prompt)
