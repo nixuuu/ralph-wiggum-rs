@@ -456,12 +456,16 @@ fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
 }
 
 /// Truncate string and add ellipsis if too long
+/// Uses character count instead of byte count to properly handle Unicode (including emoji)
 fn truncate_string(s: &str, max_len: usize) -> String {
     let s = s.replace('\n', "\\n").replace('\r', "");
-    if s.len() <= max_len {
+    let char_count = s.chars().count();
+    if char_count <= max_len {
         s
     } else {
-        format!("{}...", &s[..max_len])
+        // Collect first max_len characters to avoid byte boundary issues
+        let truncated: String = s.chars().take(max_len).collect();
+        format!("{}...", truncated)
     }
 }
 
@@ -521,5 +525,46 @@ mod tests {
             "<promise>task (done)</promise>",
             "task (done)"
         ));
+    }
+
+    #[test]
+    fn test_truncate_string_ascii() {
+        assert_eq!(truncate_string("hello", 10), "hello");
+        assert_eq!(truncate_string("hello world", 5), "hello...");
+        assert_eq!(truncate_string("abc", 3), "abc");
+    }
+
+    #[test]
+    fn test_truncate_string_with_emoji() {
+        // Emoji like 🔍 takes 4 bytes but is 1 character
+        let s = "| 🔍 Do dodania |";
+        // Should not panic - this was the original bug
+        let result = truncate_string(s, 10);
+        assert_eq!(result.chars().count(), 13); // 10 chars + "..."
+
+        // Test with multiple emoji
+        let emoji_str = "✅ ⚠️ 🔍 test";
+        let truncated = truncate_string(emoji_str, 5);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_string_unicode_boundary() {
+        // This is the exact case from the bug report
+        let s = "| popover, calendar, radio-group, sheet | ✅ | ⚠️ | 🔍 Do dodania |";
+        // Should not panic even with small max_len
+        let result = truncate_string(s, 60);
+        assert!(result.len() > 0);
+
+        // Test truncation at various points
+        for max_len in 1..=s.chars().count() {
+            let _ = truncate_string(s, max_len); // Should not panic
+        }
+    }
+
+    #[test]
+    fn test_truncate_string_newlines() {
+        assert_eq!(truncate_string("hello\nworld", 20), "hello\\nworld");
+        assert_eq!(truncate_string("a\rb\nc", 10), "ab\\nc");
     }
 }
