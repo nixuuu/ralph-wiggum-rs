@@ -98,23 +98,26 @@ pub enum ContentBlock {
 }
 
 pub struct ClaudeRunner {
-    prompt: Option<String>,
+    user_prompt: String,
+    system_prompt: Option<String>,
     continue_conversation: bool,
 }
 
 impl ClaudeRunner {
-    /// Create runner for first iteration (with prompt)
-    pub fn with_prompt(prompt: String) -> Self {
+    /// Create runner for first iteration (with user prompt and system prompt)
+    pub fn new(user_prompt: String, system_prompt: String) -> Self {
         Self {
-            prompt: Some(prompt),
+            user_prompt,
+            system_prompt: Some(system_prompt),
             continue_conversation: false,
         }
     }
 
-    /// Create runner for continuation with verification prompt
-    pub fn for_continuation(verification_prompt: String) -> Self {
+    /// Create runner for continuation with user prompt and system prompt
+    pub fn for_continuation(user_prompt: String, system_prompt: String) -> Self {
         Self {
-            prompt: Some(verification_prompt),
+            user_prompt,
+            system_prompt: Some(system_prompt),
             continue_conversation: true,
         }
     }
@@ -146,14 +149,13 @@ impl ClaudeRunner {
             cmd.arg("--continue");
         }
 
-        // Add prompt as positional argument
-        if let Some(prompt) = &self.prompt {
-            cmd.arg(prompt);
-        } else {
-            return Err(RalphError::Config(
-                "ClaudeRunner: Prompt is required".into(),
-            ));
+        // Add system prompt via --append-system-prompt
+        if let Some(system_prompt) = &self.system_prompt {
+            cmd.arg("--append-system-prompt").arg(system_prompt);
         }
+
+        // Add user prompt as positional argument
+        cmd.arg(&self.user_prompt);
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());

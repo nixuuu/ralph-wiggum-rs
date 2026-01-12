@@ -18,7 +18,7 @@ use claude::ClaudeRunner;
 use config::{CliArgs, Config};
 use error::{RalphError, Result};
 use output::{OutputFormatter, find_promise};
-use prompt::build_wrapped_prompt;
+use prompt::build_system_prompt;
 use state::StateManager;
 use ui::StatusTerminal;
 
@@ -120,19 +120,19 @@ async fn run() -> Result<()> {
             .unwrap()
             .update(&formatter.lock().unwrap().get_status())?;
 
-        // Build prompt with current iteration number
-        let prompt = build_wrapped_prompt(
-            &config.prompt,
+        // Build system prompt with loop instructions
+        let system_prompt = build_system_prompt(
             &config.completion_promise,
             state_manager.iteration(),
         );
 
         // Create runner - first iteration starts new session, others may continue
         // When continue_session is set, subsequent iterations continue the conversation
+        // User prompt is passed as positional argument, system prompt via --append-system-prompt
         let runner = if state_manager.iteration() == 1 || !config.continue_session {
-            ClaudeRunner::with_prompt(prompt)
+            ClaudeRunner::new(config.prompt.clone(), system_prompt)
         } else {
-            ClaudeRunner::for_continuation(prompt)
+            ClaudeRunner::for_continuation(config.prompt.clone(), system_prompt)
         };
 
         // Clone Arc for use in closure and background task
