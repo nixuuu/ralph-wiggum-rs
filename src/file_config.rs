@@ -20,6 +20,11 @@ pub struct PromptConfig {
     /// Text to append after user's prompt
     #[serde(default)]
     pub suffix: Option<String>,
+
+    /// Custom system prompt prefix with placeholder support
+    /// Available placeholders: {iteration}, {promise}, {min_iterations}, {max_iterations}
+    #[serde(default)]
+    pub system: Option<String>,
 }
 
 impl FileConfig {
@@ -81,6 +86,7 @@ mod tests {
             prompt: PromptConfig {
                 prefix: Some("PREFIX:".to_string()),
                 suffix: None,
+                system: None,
             },
         };
         let result = config.wrap_user_prompt("My prompt");
@@ -93,6 +99,7 @@ mod tests {
             prompt: PromptConfig {
                 prefix: None,
                 suffix: Some("SUFFIX".to_string()),
+                system: None,
             },
         };
         let result = config.wrap_user_prompt("My prompt");
@@ -105,6 +112,7 @@ mod tests {
             prompt: PromptConfig {
                 prefix: Some("Kryteria akceptacji:".to_string()),
                 suffix: Some("Śledź progres zmian w pliku TODO.md".to_string()),
+                system: None,
             },
         };
         let result = config.wrap_user_prompt("Napisz testy");
@@ -145,5 +153,25 @@ prefix = "Only prefix"
         let config: FileConfig = toml::from_str("").unwrap();
         assert!(config.prompt.prefix.is_none());
         assert!(config.prompt.suffix.is_none());
+        assert!(config.prompt.system.is_none());
+    }
+
+    #[test]
+    fn test_parse_toml_with_system_prompt() {
+        let toml_content = r#"
+[prompt]
+system = "Iteration {iteration} of {max_iterations}"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            config.prompt.system.as_deref(),
+            Some("Iteration {iteration} of {max_iterations}")
+        );
+    }
+
+    #[test]
+    fn test_default_system_is_none() {
+        let config = FileConfig::default();
+        assert!(config.prompt.system.is_none());
     }
 }

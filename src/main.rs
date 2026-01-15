@@ -120,10 +120,13 @@ async fn run() -> Result<()> {
             .unwrap()
             .update(&formatter.lock().unwrap().get_status())?;
 
-        // Build system prompt with loop instructions
+        // Build system prompt with optional custom prefix
         let system_prompt = build_system_prompt(
-            &config.completion_promise,
+            config.system_prompt_template.as_deref(),
             state_manager.iteration(),
+            &config.completion_promise,
+            config.min_iterations,
+            config.max_iterations,
         );
 
         // Create runner - first iteration starts new session, others may continue

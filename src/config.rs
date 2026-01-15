@@ -54,6 +54,8 @@ pub struct Config {
     pub starting_iteration: u32,
     /// When true, enables --continue flag for subsequent iterations
     pub continue_session: bool,
+    /// Custom system prompt prefix from .ralph.toml
+    pub system_prompt_template: Option<String>,
 }
 
 impl Config {
@@ -99,6 +101,7 @@ impl Config {
                 state_file: args.state_file,
                 starting_iteration: state.iteration,
                 continue_session: args.continue_session,
+                system_prompt_template: file_config.prompt.system.clone(),
             });
         }
 
@@ -120,6 +123,7 @@ impl Config {
             state_file: args.state_file,
             starting_iteration: 0,
             continue_session: args.continue_session,
+            system_prompt_template: file_config.prompt.system.clone(),
         })
     }
 }
