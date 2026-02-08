@@ -61,7 +61,7 @@ fn create_skin() -> MadSkin {
 pub fn render_markdown(text: &str) -> String {
     let terminal_width = get_terminal_width();
     // Use full terminal width (minimum 80 for readability)
-    let width = terminal_width.max(80);
+    let width = terminal_width.clamp(80, 120);
 
     // Use FmtText with explicit width to properly wrap text
     let formatted = FmtText::from(&SKIN, text, Some(width));

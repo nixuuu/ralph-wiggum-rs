@@ -5,6 +5,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::{
     Terminal, Viewport,
     backend::CrosstermBackend,
+    buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -174,6 +175,7 @@ impl StatusTerminal {
             let area = Rect::new(0, 0, buf.area.width, 1);
             let paragraph = Paragraph::new(ratatui_text.clone());
             paragraph.render(area, buf);
+            strip_trailing_spaces(buf);
         })?;
 
         Ok(())
@@ -213,8 +215,20 @@ impl StatusTerminal {
             let area = Rect::new(0, 0, buf.area.width, height);
             let paragraph = Paragraph::new(ratatui_text.clone()).wrap(Wrap { trim: false });
             paragraph.render(area, buf);
+            strip_trailing_spaces(buf);
         })?;
 
+        Ok(())
+    }
+
+    /// Handle terminal resize by clearing viewport and redrawing status bar
+    pub fn handle_resize(&mut self, status: &StatusData) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        self.terminal.clear()?;
+        self.update(status)?;
         Ok(())
     }
 
@@ -273,3 +287,25 @@ mod atty {
 }
 
 use ratatui::widgets::Widget;
+
+/// Mark trailing space cells as skip to prevent terminal wrapping on resize.
+///
+/// ratatui's Paragraph fills the entire buffer width with spaces.
+/// When the terminal is resized smaller, those trailing spaces cause line wrapping
+/// and garbled output. Marking them as skip prevents the backend from writing them.
+fn strip_trailing_spaces(buf: &mut Buffer) {
+    for y in 0..buf.area.height {
+        for x in (0..buf.area.width).rev() {
+            let cell = &buf[(x, y)];
+            if cell.symbol() == " "
+                && cell.fg == Color::Reset
+                && cell.bg == Color::Reset
+                && cell.modifier.is_empty()
+            {
+                buf[(x, y)].set_skip(true);
+            } else {
+                break;
+            }
+        }
+    }
+}

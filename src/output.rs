@@ -5,6 +5,9 @@ use crate::claude::{ClaudeEvent, ContentBlock, Usage};
 use crate::markdown;
 use crate::ui::StatusData;
 
+/// Maximum width for tool detail strings (paths, descriptions, etc.)
+const MAX_DETAIL_WIDTH: usize = 100;
+
 /// Type of the last content block for grouping output
 #[derive(PartialEq, Clone, Copy)]
 enum BlockType {
@@ -336,12 +339,13 @@ fn colorize_tool_name(name: &str) -> String {
 fn format_edit_diff(path: &str, old: &str, new: &str) -> String {
     use crossterm::style::Stylize;
 
+    let truncated_path = truncate_string(path, MAX_DETAIL_WIDTH);
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
 
     // If diff is small (≤5 lines total), show inline diff
     if old_lines.len() + new_lines.len() <= 5 {
-        let mut parts = vec![path.to_string()];
+        let mut parts = vec![truncated_path];
         for line in &old_lines {
             parts.push(format!("\n    {} {}", "-".red(), truncate_string(line, 60)));
         }
@@ -357,7 +361,7 @@ fn format_edit_diff(path: &str, old: &str, new: &str) -> String {
         // For larger diffs, show summary
         format!(
             "{} | {} {}",
-            path,
+            truncated_path,
             format!("-{}", old_lines.len()).red(),
             format!("+{}", new_lines.len()).green()
         )
@@ -368,12 +372,12 @@ fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
     match name {
         "Read" => {
             if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
-                return path.to_string();
+                return truncate_string(path, MAX_DETAIL_WIDTH);
             }
         }
         "Write" => {
             if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
-                return path.to_string();
+                return truncate_string(path, MAX_DETAIL_WIDTH);
             }
         }
         "Edit" => {
@@ -393,20 +397,23 @@ fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
             let desc = input.get("description").and_then(|v| v.as_str());
             let cmd = input.get("command").and_then(|v| v.as_str());
             match (desc, cmd) {
-                (Some(d), _) => return d.to_string(),
-                (None, Some(c)) => return truncate_string(c, 60),
+                (Some(d), _) => return truncate_string(d, MAX_DETAIL_WIDTH),
+                (None, Some(c)) => return truncate_string(c, MAX_DETAIL_WIDTH),
                 _ => {}
             }
         }
         "Glob" => {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            return format!("{} in {}", pattern, path);
+            return truncate_string(&format!("{} in {}", pattern, path), MAX_DETAIL_WIDTH);
         }
         "Grep" => {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            return format!("\"{}\" in {}", truncate_string(pattern, 30), path);
+            return truncate_string(
+                &format!("\"{}\" in {}", truncate_string(pattern, 30), path),
+                MAX_DETAIL_WIDTH,
+            );
         }
         "Task" => {
             if let Some(desc) = input.get("description").and_then(|v| v.as_str()) {
@@ -414,22 +421,27 @@ fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
                     .get("subagent_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("agent");
-                return format!("[{}] {}", agent, desc);
+                return truncate_string(&format!("[{}] {}", agent, desc), MAX_DETAIL_WIDTH);
             }
         }
         "WebFetch" => {
             let desc = input.get("prompt").and_then(|v| v.as_str());
             let url = input.get("url").and_then(|v| v.as_str());
             match (desc, url) {
-                (Some(d), Some(u)) => return format!("{} ({})", d, truncate_string(u, 40)),
-                (None, Some(u)) => return truncate_string(u, 60),
-                (Some(d), None) => return d.to_string(),
+                (Some(d), Some(u)) => {
+                    return truncate_string(
+                        &format!("{} ({})", d, truncate_string(u, 40)),
+                        MAX_DETAIL_WIDTH,
+                    );
+                }
+                (None, Some(u)) => return truncate_string(u, MAX_DETAIL_WIDTH),
+                (Some(d), None) => return truncate_string(d, MAX_DETAIL_WIDTH),
                 _ => {}
             }
         }
         "WebSearch" => {
             if let Some(query) = input.get("query").and_then(|v| v.as_str()) {
-                return format!("\"{}\"", query);
+                return truncate_string(&format!("\"{}\"", query), MAX_DETAIL_WIDTH);
             }
         }
         "TodoWrite" => {
@@ -448,7 +460,7 @@ fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
         _ => {
             // Fallback: check for common description field
             if let Some(desc) = input.get("description").and_then(|v| v.as_str()) {
-                return desc.to_string();
+                return truncate_string(desc, MAX_DETAIL_WIDTH);
             }
         }
     }

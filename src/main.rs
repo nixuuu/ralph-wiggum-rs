@@ -86,8 +86,11 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
     // Initialize status terminal (enables raw mode)
     let status_terminal = Arc::new(Mutex::new(StatusTerminal::new()?));
 
+    // Resize flag for terminal resize detection
+    let resize_flag = Arc::new(AtomicBool::new(false));
+
     // Spawn dedicated OS thread for keyboard input (after raw mode is enabled)
-    let input_thread = InputThread::spawn(shutdown.clone());
+    let input_thread = InputThread::spawn(shutdown.clone(), resize_flag.clone());
 
     // Save initial state
     state_manager.save().await?;
@@ -175,6 +178,7 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
         let status_terminal_clone = status_terminal.clone();
         let shutdown_for_callback = shutdown.clone();
         let update_info_clone = update_info.clone();
+        let resize_flag_clone = resize_flag.clone();
 
         // Run claude with consolidated lock acquisitions in callback
         let run_result = runner
@@ -190,6 +194,10 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
                 // Lock terminal once: print all lines + update status bar
                 {
                     let mut term = status_terminal_clone.lock().unwrap();
+                    // Handle resize: clear viewport and redraw status bar
+                    if resize_flag_clone.swap(false, Ordering::SeqCst) {
+                        let _ = term.handle_resize(&status);
+                    }
                     for line in &lines {
                         let _ = term.print_line(line);
                     }

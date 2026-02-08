@@ -16,8 +16,8 @@ impl InputThread {
     /// Spawn a dedicated OS thread for keyboard input.
     ///
     /// The thread polls crossterm events with a 100ms timeout and sets
-    /// the `shutdown` flag on 'q' or Ctrl+C.
-    pub fn spawn(shutdown: Arc<AtomicBool>) -> Self {
+    /// the `shutdown` flag on 'q' or Ctrl+C, and the `resize_flag` on terminal resize.
+    pub fn spawn(shutdown: Arc<AtomicBool>, resize_flag: Arc<AtomicBool>) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
 
@@ -29,23 +29,29 @@ impl InputThread {
                         break;
                     }
 
-                    if event::poll(Duration::from_millis(100)).unwrap_or(false)
-                        && let Ok(Event::Key(key_event)) = event::read()
-                    {
-                        let should_quit = matches!(
-                            key_event,
-                            KeyEvent {
-                                code: KeyCode::Char('q'),
-                                ..
-                            } | KeyEvent {
-                                code: KeyCode::Char('c'),
-                                modifiers: KeyModifiers::CONTROL,
-                                ..
+                    if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                        match event::read() {
+                            Ok(Event::Key(key_event)) => {
+                                let should_quit = matches!(
+                                    key_event,
+                                    KeyEvent {
+                                        code: KeyCode::Char('q'),
+                                        ..
+                                    } | KeyEvent {
+                                        code: KeyCode::Char('c'),
+                                        modifiers: KeyModifiers::CONTROL,
+                                        ..
+                                    }
+                                );
+                                if should_quit {
+                                    shutdown.store(true, Ordering::SeqCst);
+                                    break;
+                                }
                             }
-                        );
-                        if should_quit {
-                            shutdown.store(true, Ordering::SeqCst);
-                            break;
+                            Ok(Event::Resize(_, _)) => {
+                                resize_flag.store(true, Ordering::SeqCst);
+                            }
+                            _ => {}
                         }
                     }
                 }
