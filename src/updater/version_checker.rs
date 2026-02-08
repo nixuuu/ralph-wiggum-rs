@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -9,6 +9,35 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPO_OWNER: &str = "nixuuu";
 const REPO_NAME: &str = "ralph-wiggum-rs";
 const CHECK_INTERVAL_SECS: u64 = 300;
+
+/// State of the in-app update process, shared via Arc<AtomicU8>
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UpdateState {
+    /// No update available or not yet checked
+    #[default]
+    None = 0,
+    /// Update available, user can press Ctrl+U
+    Available = 1,
+    /// Download in progress
+    Downloading = 2,
+    /// Update completed, restart to apply
+    Completed = 3,
+    /// Update failed
+    Failed = 4,
+}
+
+impl UpdateState {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Available,
+            2 => Self::Downloading,
+            3 => Self::Completed,
+            4 => Self::Failed,
+            _ => Self::None,
+        }
+    }
+}
 
 /// Update information shared with the status bar
 #[derive(Debug, Clone)]
@@ -48,12 +77,14 @@ pub fn is_newer(current: &str, latest: &str) -> Result<bool> {
 /// Manages background version checking
 pub struct VersionChecker {
     update_info: Arc<Mutex<Option<UpdateInfo>>>,
+    update_state: Arc<AtomicU8>,
 }
 
 impl VersionChecker {
     pub fn new() -> Self {
         Self {
             update_info: Arc::new(Mutex::new(None)),
+            update_state: Arc::new(AtomicU8::new(UpdateState::None as u8)),
         }
     }
 
@@ -62,13 +93,28 @@ impl VersionChecker {
         self.update_info.clone()
     }
 
+    /// Get the shared update state handle
+    pub fn update_state(&self) -> Arc<AtomicU8> {
+        self.update_state.clone()
+    }
+
     /// Spawn a background task that checks for updates at startup
     /// and then periodically every CHECK_INTERVAL_SECS
     pub fn spawn_checker(&self, shutdown: Arc<AtomicBool>) {
         let info = self.update_info.clone();
+        let state = self.update_state.clone();
         tokio::spawn(async move {
             // Initial check at startup
             if let Ok(result) = check_latest_version().await {
+                if result.update_available {
+                    // Only set Available if state is still None
+                    let _ = state.compare_exchange(
+                        UpdateState::None as u8,
+                        UpdateState::Available as u8,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    );
+                }
                 *info.lock().unwrap() = Some(result);
             }
 
@@ -79,6 +125,14 @@ impl VersionChecker {
                     break;
                 }
                 if let Ok(result) = check_latest_version().await {
+                    if result.update_available {
+                        let _ = state.compare_exchange(
+                            UpdateState::None as u8,
+                            UpdateState::Available as u8,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        );
+                    }
                     *info.lock().unwrap() = Some(result);
                 }
             }

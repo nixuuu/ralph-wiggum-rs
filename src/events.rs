@@ -1,7 +1,9 @@
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
+
+use crate::updater::version_checker::UpdateState;
 
 /// Handle for managing the dedicated keyboard input thread.
 ///
@@ -17,7 +19,12 @@ impl InputThread {
     ///
     /// The thread polls crossterm events with a 100ms timeout and sets
     /// the `shutdown` flag on 'q' or Ctrl+C, and the `resize_flag` on terminal resize.
-    pub fn spawn(shutdown: Arc<AtomicBool>, resize_flag: Arc<AtomicBool>) -> Self {
+    pub fn spawn(
+        shutdown: Arc<AtomicBool>,
+        resize_flag: Arc<AtomicBool>,
+        update_state: Arc<AtomicU8>,
+        update_trigger: Arc<AtomicBool>,
+    ) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
 
@@ -46,6 +53,39 @@ impl InputThread {
                                 if should_quit {
                                     shutdown.store(true, Ordering::SeqCst);
                                     break;
+                                }
+
+                                // Ctrl+U: trigger background update
+                                if matches!(
+                                    key_event,
+                                    KeyEvent {
+                                        code: KeyCode::Char('u'),
+                                        modifiers: KeyModifiers::CONTROL,
+                                        ..
+                                    }
+                                ) {
+                                    // Try Available → Downloading
+                                    let triggered = update_state
+                                        .compare_exchange(
+                                            UpdateState::Available as u8,
+                                            UpdateState::Downloading as u8,
+                                            Ordering::SeqCst,
+                                            Ordering::SeqCst,
+                                        )
+                                        .is_ok();
+                                    // Or retry: Failed → Downloading
+                                    let retried = !triggered
+                                        && update_state
+                                            .compare_exchange(
+                                                UpdateState::Failed as u8,
+                                                UpdateState::Downloading as u8,
+                                                Ordering::SeqCst,
+                                                Ordering::SeqCst,
+                                            )
+                                            .is_ok();
+                                    if triggered || retried {
+                                        update_trigger.store(true, Ordering::SeqCst);
+                                    }
                                 }
                             }
                             Ok(Event::Resize(_, _)) => {

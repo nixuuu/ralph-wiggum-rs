@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::signal;
 
+use updater::UpdateState;
+
 use claude::ClaudeRunner;
 use config::{CliArgs, Config};
 use error::{RalphError, Result};
@@ -75,7 +77,11 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
     // Initialize background version checker (non-blocking)
     let version_checker = updater::VersionChecker::new();
     let update_info = version_checker.update_info();
+    let update_state = version_checker.update_state();
     version_checker.spawn_checker(shutdown.clone());
+
+    // Update trigger flag: set by InputThread on Ctrl+U, consumed by on_idle to spawn_blocking
+    let update_trigger = Arc::new(AtomicBool::new(false));
 
     // Initialize output formatter
     let formatter = Arc::new(Mutex::new(OutputFormatter::new(config.use_nerd_font)));
@@ -91,7 +97,12 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
     let resize_flag = Arc::new(AtomicBool::new(false));
 
     // Spawn dedicated OS thread for keyboard input (after raw mode is enabled)
-    let input_thread = InputThread::spawn(shutdown.clone(), resize_flag.clone());
+    let input_thread = InputThread::spawn(
+        shutdown.clone(),
+        resize_flag.clone(),
+        update_state.clone(),
+        update_trigger.clone(),
+    );
 
     // Save initial state
     state_manager.save().await?;
@@ -146,6 +157,7 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
             let header_lines = formatter.lock().unwrap().format_iteration_header();
             let mut status = formatter.lock().unwrap().get_status();
             status.update_info = update_info.lock().unwrap().clone();
+            status.update_state = UpdateState::from_u8(update_state.load(Ordering::SeqCst));
             let mut term = status_terminal.lock().unwrap();
             if resize_flag.swap(false, Ordering::SeqCst) {
                 let _ = term.handle_resize(&status);
@@ -183,12 +195,15 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
         let shutdown_for_callback = shutdown.clone();
         let update_info_clone = update_info.clone();
         let resize_flag_clone = resize_flag.clone();
+        let update_state_event = update_state.clone();
 
         // Clone Arc for use in idle closure
         let resize_flag_idle = resize_flag.clone();
         let formatter_idle = formatter.clone();
         let status_terminal_idle = status_terminal.clone();
         let update_info_idle = update_info.clone();
+        let update_state_idle = update_state.clone();
+        let update_trigger_idle = update_trigger.clone();
 
         // Run claude with consolidated lock acquisitions in callback
         let run_result = runner
@@ -203,6 +218,8 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
                         (lines, status)
                     };
                     status.update_info = update_info_clone.lock().unwrap().clone();
+                    status.update_state =
+                        UpdateState::from_u8(update_state_event.load(Ordering::SeqCst));
                     // Lock terminal once: print all lines + update status bar
                     {
                         let mut term = status_terminal_clone.lock().unwrap();
@@ -221,10 +238,20 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
                     }
                 },
                 || {
+                    // Check if Ctrl+U triggered an update
+                    if update_trigger_idle.swap(false, Ordering::SeqCst) {
+                        let state_for_task = update_state_idle.clone();
+                        tokio::task::spawn_blocking(move || {
+                            updater::update_in_background(state_for_task);
+                        });
+                    }
+
                     // Idle tick: handle resize between Claude events
                     if resize_flag_idle.swap(false, Ordering::SeqCst) {
                         let mut status = formatter_idle.lock().unwrap().get_status();
                         status.update_info = update_info_idle.lock().unwrap().clone();
+                        status.update_state =
+                            UpdateState::from_u8(update_state_idle.load(Ordering::SeqCst));
                         let mut term = status_terminal_idle.lock().unwrap();
                         let _ = term.handle_resize(&status);
                     }
@@ -257,6 +284,7 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
         {
             let mut status = formatter.lock().unwrap().get_status();
             status.update_info = update_info.lock().unwrap().clone();
+            status.update_state = UpdateState::from_u8(update_state.load(Ordering::SeqCst));
             let mut term = status_terminal.lock().unwrap();
             if resize_flag.swap(false, Ordering::SeqCst) {
                 let _ = term.handle_resize(&status);

@@ -14,7 +14,7 @@ use ratatui::{
 
 use crate::error::Result;
 use crate::icons;
-use crate::updater::version_checker::UpdateInfo;
+use crate::updater::version_checker::{UpdateInfo, UpdateState};
 
 /// Data for the status bar display
 #[derive(Debug, Clone, Default)]
@@ -28,6 +28,7 @@ pub struct StatusData {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub update_info: Option<UpdateInfo>,
+    pub update_state: UpdateState,
 }
 
 impl StatusData {
@@ -83,16 +84,47 @@ impl StatusData {
         if let Some(ref info) = self.update_info
             && info.update_available
         {
-            return vec![
+            let base = vec![
                 Span::styled(format!("v{current}"), Style::default().fg(Color::DarkGray)),
                 Span::styled(" -> ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    info.latest_version.clone(),
+            ];
+
+            let (version_style, suffix) = match self.update_state {
+                UpdateState::Downloading => (
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                    Some((" downloading...", Style::default().fg(Color::Yellow))),
+                ),
+                UpdateState::Completed => (
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
+                    Some((" restart to apply", Style::default().fg(Color::Green))),
                 ),
-            ];
+                UpdateState::Failed => (
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                    Some((
+                        " update failed [Ctrl+U]",
+                        Style::default().fg(Color::Red),
+                    )),
+                ),
+                _ => (
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                    Some((" [Ctrl+U]", Style::default().fg(Color::DarkGray))),
+                ),
+            };
+
+            let mut spans = base;
+            spans.push(Span::styled(info.latest_version.clone(), version_style));
+            if let Some((text, style)) = suffix {
+                spans.push(Span::styled(text, style));
+            }
+            return spans;
         }
 
         vec![Span::styled(

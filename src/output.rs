@@ -79,6 +79,7 @@ impl OutputFormatter {
             output_tokens: self.total_output_tokens,
             cost_usd: self.total_cost_usd,
             update_info: None,
+            update_state: Default::default(),
         }
     }
 
