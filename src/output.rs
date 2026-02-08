@@ -2,6 +2,7 @@ use crossterm::style::Stylize;
 use std::time::Instant;
 
 use crate::claude::{ClaudeEvent, ContentBlock, Usage};
+use crate::icons;
 use crate::markdown;
 use crate::ui::StatusData;
 
@@ -25,10 +26,11 @@ pub struct OutputFormatter {
     total_input_tokens: u64,
     total_output_tokens: u64,
     last_block_type: BlockType,
+    use_nerd_font: bool,
 }
 
 impl OutputFormatter {
-    pub fn new() -> Self {
+    pub fn new(use_nerd_font: bool) -> Self {
         let now = Instant::now();
         Self {
             iteration: 0,
@@ -39,6 +41,7 @@ impl OutputFormatter {
             total_input_tokens: 0,
             total_output_tokens: 0,
             last_block_type: BlockType::None,
+            use_nerd_font,
         }
     }
 
@@ -140,7 +143,7 @@ impl OutputFormatter {
                             self.last_block_type = BlockType::Tool;
 
                             let details = format_tool_details(name, input);
-                            let tool_icon = get_tool_icon(name);
+                            let tool_icon = icons::tool_icon(name, self.use_nerd_font);
                             let colored_name = colorize_tool_name(name);
                             if details.is_empty() {
                                 lines.push(format!("  {} {}", tool_icon, colored_name));
@@ -183,14 +186,14 @@ impl OutputFormatter {
         if found_promise {
             lines.push(format!(
                 "{} {} {}",
-                "✓".green().bold(),
+                icons::status_check(self.use_nerd_font).green().bold(),
                 "COMPLETED".green().bold(),
                 format!("- Promise found: <promise>{}</promise>", promise).dark_grey()
             ));
         } else {
             lines.push(format!(
                 "{} {}",
-                "✗".red().bold(),
+                icons::status_fail(self.use_nerd_font).red().bold(),
                 "STOPPED - Promise not found".red()
             ));
         }
@@ -238,7 +241,7 @@ impl OutputFormatter {
             format!("{}", "━".repeat(60).dark_grey()),
             format!(
                 "{} {} {}",
-                "⏸".yellow().bold(),
+                icons::status_pause(self.use_nerd_font).yellow().bold(),
                 "INTERRUPTED".yellow().bold(),
                 "- State saved".dark_grey()
             ),
@@ -287,7 +290,7 @@ impl OutputFormatter {
 
 impl Default for OutputFormatter {
     fn default() -> Self {
-        Self::new()
+        Self::new(true)
     }
 }
 
@@ -299,24 +302,6 @@ fn format_tokens(tokens: u64) -> String {
         format!("{:.1}k", tokens as f64 / 1_000.0)
     } else {
         tokens.to_string()
-    }
-}
-
-/// Get icon for a tool
-fn get_tool_icon(name: &str) -> &'static str {
-    match name {
-        "Read" => "📖",
-        "Write" => "📝",
-        "Edit" => "✏️",
-        "Bash" => "💻",
-        "Glob" => "🔍",
-        "Grep" => "🔎",
-        "Task" => "🤖",
-        "WebFetch" => "🌐",
-        "WebSearch" => "🔍",
-        "TodoWrite" => "📋",
-        "AskUserQuestion" => "❓",
-        _ => "🔧",
     }
 }
 

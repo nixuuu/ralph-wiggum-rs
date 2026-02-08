@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod events;
 mod file_config;
+mod icons;
 mod markdown;
 mod output;
 mod prompt;
@@ -77,14 +78,14 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
     version_checker.spawn_checker(shutdown.clone());
 
     // Initialize output formatter
-    let formatter = Arc::new(Mutex::new(OutputFormatter::new()));
+    let formatter = Arc::new(Mutex::new(OutputFormatter::new(config.use_nerd_font)));
     formatter
         .lock()
         .unwrap()
         .set_max_iterations(config.max_iterations);
 
     // Initialize status terminal (enables raw mode)
-    let status_terminal = Arc::new(Mutex::new(StatusTerminal::new()?));
+    let status_terminal = Arc::new(Mutex::new(StatusTerminal::new(config.use_nerd_font)?));
 
     // Resize flag for terminal resize detection
     let resize_flag = Arc::new(AtomicBool::new(false));

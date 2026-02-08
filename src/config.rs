@@ -46,6 +46,10 @@ pub struct CliArgs {
     /// Update to the latest version
     #[arg(long)]
     pub update: bool,
+
+    /// Disable Nerd Font icons (use ASCII fallback)
+    #[arg(long)]
+    pub no_nf: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -60,12 +64,21 @@ pub struct Config {
     pub continue_session: bool,
     /// Custom system prompt prefix from .ralph.toml
     pub system_prompt_template: Option<String>,
+    /// Use Nerd Font icons (false = ASCII fallback)
+    pub use_nerd_font: bool,
 }
 
 impl Config {
     pub fn build(args: CliArgs) -> Result<Self> {
         // Load file config (.ralph.toml)
         let file_config = FileConfig::load_from_path(&args.config)?;
+
+        // CLI --no-nf has priority, then .ralph.toml, default = true
+        let use_nerd_font = if args.no_nf {
+            false
+        } else {
+            file_config.ui.nerd_font
+        };
 
         // If resuming, load state from file
         if args.resume {
@@ -106,6 +119,7 @@ impl Config {
                 starting_iteration: state.iteration,
                 continue_session: args.continue_session,
                 system_prompt_template: file_config.prompt.system.clone(),
+                use_nerd_font,
             });
         }
 
@@ -128,6 +142,7 @@ impl Config {
             starting_iteration: 0,
             continue_session: args.continue_session,
             system_prompt_template: file_config.prompt.system.clone(),
+            use_nerd_font,
         })
     }
 }

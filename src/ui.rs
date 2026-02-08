@@ -13,6 +13,7 @@ use ratatui::{
 };
 
 use crate::error::Result;
+use crate::icons;
 use crate::updater::version_checker::UpdateInfo;
 
 /// Data for the status bar display
@@ -42,7 +43,7 @@ impl StatusData {
     }
 
     /// Build the status line spans
-    fn to_line(&self) -> Line<'static> {
+    fn to_line(&self, nerd_font: bool) -> Line<'static> {
         let iter_text = if self.max_iterations > 0 {
             format!("Iter {}/{}", self.iteration, self.max_iterations)
         } else {
@@ -57,7 +58,10 @@ impl StatusData {
         Line::from(vec![
             Span::styled(iter_text, Style::default().fg(Color::Cyan)),
             Span::raw(" │ "),
-            Span::styled("⏱ ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{} ", icons::status_clock(nerd_font)),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw(time_text),
             Span::raw(" │ "),
             Span::styled("↓", Style::default().fg(Color::Green)),
@@ -107,11 +111,12 @@ impl StatusData {
 pub struct StatusTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     enabled: bool,
+    use_nerd_font: bool,
 }
 
 impl StatusTerminal {
     /// Create a new status terminal with inline viewport (1 line)
-    pub fn new() -> Result<Self> {
+    pub fn new(use_nerd_font: bool) -> Result<Self> {
         // Check if we're in a TTY
         let enabled = atty::is(atty::Stream::Stdout);
 
@@ -124,7 +129,11 @@ impl StatusTerminal {
                     viewport: Viewport::Inline(0),
                 },
             )?;
-            return Ok(Self { terminal, enabled });
+            return Ok(Self {
+                terminal,
+                enabled,
+                use_nerd_font,
+            });
         }
 
         enable_raw_mode()?;
@@ -137,7 +146,11 @@ impl StatusTerminal {
             },
         )?;
 
-        Ok(Self { terminal, enabled })
+        Ok(Self {
+            terminal,
+            enabled,
+            use_nerd_font,
+        })
     }
 
     /// Update the status bar with new data
@@ -146,9 +159,10 @@ impl StatusTerminal {
             return Ok(());
         }
 
+        let nf = self.use_nerd_font;
         self.terminal.draw(|frame| {
             let area = frame.area();
-            let left_line = status.to_line();
+            let left_line = status.to_line(nf);
             let (right_line, right_width) = status.version_line();
 
             let chunks = Layout::horizontal([Constraint::Min(1), Constraint::Length(right_width)])
@@ -238,10 +252,14 @@ impl StatusTerminal {
             return Ok(());
         }
 
+        let nf = self.use_nerd_font;
         self.terminal.draw(|frame| {
             let area = frame.area();
             let line = Line::from(vec![
-                Span::styled("⏸ ", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{} ", icons::status_pause(nf)),
+                    Style::default().fg(Color::Yellow),
+                ),
                 Span::styled("Shutting down...", Style::default().fg(Color::Yellow)),
             ]);
             let paragraph = Paragraph::new(line);
