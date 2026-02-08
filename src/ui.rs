@@ -5,13 +5,14 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::{
     Terminal, Viewport,
     backend::CrosstermBackend,
-    layout::Rect,
-    style::{Color, Style},
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
 
 use crate::error::Result;
+use crate::updater::version_checker::UpdateInfo;
 
 /// Data for the status bar display
 #[derive(Debug, Clone, Default)]
@@ -24,6 +25,7 @@ pub struct StatusData {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
+    pub update_info: Option<UpdateInfo>,
 }
 
 impl StatusData {
@@ -65,6 +67,41 @@ impl StatusData {
             Span::styled("$", Style::default().fg(Color::Yellow)),
             Span::raw(cost_text.trim_start_matches('$').to_string()),
         ])
+    }
+
+    /// Build the right-side version line and its display width
+    fn version_line(&self) -> (Line<'static>, u16) {
+        let current = env!("CARGO_PKG_VERSION");
+
+        if let Some(ref info) = self.update_info
+            && info.update_available
+        {
+            let text = format!("v{current} -> {}", info.latest_version);
+            let width = text.len() as u16 + 1; // +1 for trailing space
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("v{current}"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(" -> ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    info.latest_version.clone(),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+            ]);
+            return (line, width);
+        }
+
+        let text = format!("v{current}");
+        let width = text.len() as u16 + 1;
+        let line = Line::from(vec![Span::styled(
+            format!("{text} "),
+            Style::default().fg(Color::DarkGray),
+        )]);
+        (line, width)
     }
 }
 
@@ -113,9 +150,17 @@ impl StatusTerminal {
 
         self.terminal.draw(|frame| {
             let area = frame.area();
-            let line = status.to_line();
-            let paragraph = Paragraph::new(line);
-            frame.render_widget(paragraph, area);
+            let left_line = status.to_line();
+            let (right_line, right_width) = status.version_line();
+
+            let chunks = Layout::horizontal([
+                Constraint::Min(1),
+                Constraint::Length(right_width),
+            ])
+            .split(area);
+
+            frame.render_widget(Paragraph::new(left_line), chunks[0]);
+            frame.render_widget(Paragraph::new(right_line), chunks[1]);
         })?;
 
         Ok(())

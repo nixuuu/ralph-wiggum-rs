@@ -8,6 +8,7 @@ mod output;
 mod prompt;
 mod state;
 mod ui;
+mod updater;
 
 use clap::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +26,18 @@ use ui::StatusTerminal;
 
 #[tokio::main]
 async fn main() {
-    if let Err(e) = run().await {
+    let args = CliArgs::parse();
+
+    // Handle --update before TUI setup
+    if args.update {
+        if let Err(e) = updater::update_self() {
+            eprintln!("Update failed: {e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
+    if let Err(e) = run_with_args(args).await {
         match e {
             RalphError::Interrupted => {
                 // Already handled, just exit
@@ -43,10 +55,7 @@ async fn main() {
     }
 }
 
-async fn run() -> Result<()> {
-    // Parse CLI args
-    let args = CliArgs::parse();
-
+async fn run_with_args(args: CliArgs) -> Result<()> {
     // Build config
     let config = Config::build(args)?;
 
@@ -61,6 +70,11 @@ async fn run() -> Result<()> {
         let _ = signal::ctrl_c().await;
         shutdown_clone.store(true, Ordering::SeqCst);
     });
+
+    // Initialize background version checker (non-blocking)
+    let version_checker = updater::VersionChecker::new();
+    let update_info = version_checker.update_info();
+    version_checker.spawn_checker(shutdown.clone());
 
     // Initialize output formatter
     let formatter = Arc::new(Mutex::new(OutputFormatter::new()));
@@ -126,7 +140,8 @@ async fn run() -> Result<()> {
         // Print iteration header and update status bar
         {
             let header_lines = formatter.lock().unwrap().format_iteration_header();
-            let status = formatter.lock().unwrap().get_status();
+            let mut status = formatter.lock().unwrap().get_status();
+            status.update_info = update_info.lock().unwrap().clone();
             let mut term = status_terminal.lock().unwrap();
             term.print_lines(&header_lines)?;
             term.update(&status)?;
@@ -159,17 +174,19 @@ async fn run() -> Result<()> {
         let formatter_clone = formatter.clone();
         let status_terminal_clone = status_terminal.clone();
         let shutdown_for_callback = shutdown.clone();
+        let update_info_clone = update_info.clone();
 
         // Run claude with consolidated lock acquisitions in callback
         let run_result = runner
             .run(shutdown.clone(), |event| {
                 // Lock formatter once: format event + get status
-                let (lines, status) = {
+                let (lines, mut status) = {
                     let mut fmt = formatter_clone.lock().unwrap();
                     let lines = fmt.format_event(event);
                     let status = fmt.get_status();
                     (lines, status)
                 };
+                status.update_info = update_info_clone.lock().unwrap().clone();
                 // Lock terminal once: print all lines + update status bar
                 {
                     let mut term = status_terminal_clone.lock().unwrap();
@@ -208,7 +225,8 @@ async fn run() -> Result<()> {
 
         // Update status bar after iteration completes
         {
-            let status = formatter.lock().unwrap().get_status();
+            let mut status = formatter.lock().unwrap().get_status();
+            status.update_info = update_info.lock().unwrap().clone();
             status_terminal.lock().unwrap().update(&status)?;
         }
 

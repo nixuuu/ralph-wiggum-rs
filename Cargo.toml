@@ -38,3 +38,6 @@ termimad = "0.34"
 
 # Convert ANSI escape codes to ratatui Text
 ansi-to-tui = "8"
+
+# HTTP client for update checking and self-update
+reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }

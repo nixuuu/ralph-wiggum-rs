@@ -10,16 +10,39 @@ Ralph Wiggum wraps the `claude` CLI and executes your prompt in a loop. Each ite
 
 ### Prerequisites
 
-- Rust 2024 edition
 - [Claude Code CLI](https://github.com/anthropics/claude-code) installed and configured
 
+### Quick install (recommended)
+
+**Linux / macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nixuuu/ralph-wiggum-rs/master/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/nixuuu/ralph-wiggum-rs/master/install.ps1 | iex
+```
+
+The scripts download the latest prebuilt binary for your platform and install it to `~/.local/bin/`. If a prebuilt binary is not available, they fall back to building from source.
+
 ### Building from source
+
+Requires Rust 1.85+ (edition 2024).
 
 ```bash
 cargo build --release
 ```
 
 The binary will be available at `target/release/ralph-wiggum`.
+
+### Updating
+
+```bash
+ralph-wiggum --update
+```
 
 ## Usage
 
@@ -39,6 +62,7 @@ ralph-wiggum --prompt "Your task description here"
 | `--state-file` | | `.claude/ralph-loop.local.md` | Path to state file |
 | `--config` | `-c` | `.ralph.toml` | Path to config file |
 | `--continue-session` | | | Continue conversation from previous iteration |
+| `--update` | | | Update to the latest version |
 
 ### Examples
 

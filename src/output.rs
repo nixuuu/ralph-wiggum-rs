@@ -72,6 +72,7 @@ impl OutputFormatter {
             input_tokens: self.total_input_tokens,
             output_tokens: self.total_output_tokens,
             cost_usd: self.total_cost_usd,
+            update_info: None,
         }
     }
 

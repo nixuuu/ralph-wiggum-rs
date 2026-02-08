@@ -42,6 +42,10 @@ pub struct CliArgs {
     /// (by default each iteration starts a fresh conversation)
     #[arg(long)]
     pub continue_session: bool,
+
+    /// Update to the latest version
+    #[arg(long)]
+    pub update: bool,
 }
 
 #[derive(Debug, Clone)]
