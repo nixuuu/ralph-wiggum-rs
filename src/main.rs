@@ -246,15 +246,16 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
                         });
                     }
 
-                    // Idle tick: handle resize between Claude events
+                    // Refresh status bar every idle tick (250ms)
+                    let mut status = formatter_idle.lock().unwrap().get_status();
+                    status.update_info = update_info_idle.lock().unwrap().clone();
+                    status.update_state =
+                        UpdateState::from_u8(update_state_idle.load(Ordering::SeqCst));
+                    let mut term = status_terminal_idle.lock().unwrap();
                     if resize_flag_idle.swap(false, Ordering::SeqCst) {
-                        let mut status = formatter_idle.lock().unwrap().get_status();
-                        status.update_info = update_info_idle.lock().unwrap().clone();
-                        status.update_state =
-                            UpdateState::from_u8(update_state_idle.load(Ordering::SeqCst));
-                        let mut term = status_terminal_idle.lock().unwrap();
                         let _ = term.handle_resize(&status);
                     }
+                    let _ = term.update(&status);
                 },
             )
             .await;
