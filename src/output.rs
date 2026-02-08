@@ -1,8 +1,9 @@
 use crossterm::style::Stylize;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use crate::claude::{ClaudeEvent, ContentBlock, Usage};
+use crate::claude::{ClaudeEvent, ContentBlock, ModelUsageEntry, Usage};
 use crate::icons;
 use crate::markdown;
 use crate::ui::StatusData;
@@ -49,12 +50,19 @@ enum BlockType {
 
 pub struct OutputFormatter {
     iteration: u32,
+    min_iterations: u32,
     max_iterations: u32,
     start_time: Instant,
     iteration_start_time: Instant,
     total_cost_usd: f64,
-    total_input_tokens: u64,
-    total_output_tokens: u64,
+    /// Finalized tokens from completed iterations (from modelUsage in result events)
+    finalized_input_tokens: u64,
+    finalized_output_tokens: u64,
+    /// Pending tokens from current iteration's assistant messages (live display)
+    pending_input_tokens: u64,
+    pending_output_tokens: u64,
+    /// Per-model cost breakdown
+    model_costs: HashMap<String, f64>,
     last_block_type: BlockType,
     use_nerd_font: bool,
 }
@@ -64,12 +72,16 @@ impl OutputFormatter {
         let now = Instant::now();
         Self {
             iteration: 0,
+            min_iterations: 0,
             max_iterations: 0,
             start_time: now,
             iteration_start_time: now,
             total_cost_usd: 0.0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
+            finalized_input_tokens: 0,
+            finalized_output_tokens: 0,
+            pending_input_tokens: 0,
+            pending_output_tokens: 0,
+            model_costs: HashMap::new(),
             last_block_type: BlockType::None,
             use_nerd_font,
         }
@@ -79,34 +91,72 @@ impl OutputFormatter {
         self.iteration = iteration;
     }
 
+    pub fn set_min_iterations(&mut self, min: u32) {
+        self.min_iterations = min;
+    }
+
     pub fn set_max_iterations(&mut self, max: u32) {
         self.max_iterations = max;
     }
 
-    /// Start a new iteration - reset iteration timer and block type
+    /// Start a new iteration - reset iteration timer, block type, and pending tokens
     pub fn start_iteration(&mut self) {
         self.iteration_start_time = Instant::now();
         self.last_block_type = BlockType::None;
+        self.pending_input_tokens = 0;
+        self.pending_output_tokens = 0;
     }
 
-    pub fn add_cost(&mut self, cost: f64) {
-        self.total_cost_usd += cost;
+    /// Add incremental tokens from assistant message (pending, for live display)
+    fn add_pending_usage(&mut self, usage: &Usage) {
+        self.pending_input_tokens += usage.input_tokens;
+        self.pending_output_tokens += usage.output_tokens;
     }
 
-    pub fn add_usage(&mut self, usage: &Usage) {
-        self.total_input_tokens += usage.input_tokens;
-        self.total_output_tokens += usage.output_tokens;
+    /// Finalize an iteration's usage from modelUsage (replaces pending tokens)
+    fn finalize_model_usage(&mut self, model_usage: &HashMap<String, ModelUsageEntry>) {
+        for (model_name, entry) in model_usage {
+            self.finalized_input_tokens += entry.input_tokens;
+            self.finalized_output_tokens += entry.output_tokens;
+            self.total_cost_usd += entry.cost_usd;
+            *self.model_costs.entry(model_name.clone()).or_insert(0.0) += entry.cost_usd;
+        }
+        self.pending_input_tokens = 0;
+        self.pending_output_tokens = 0;
+    }
+
+    /// Fallback finalization when modelUsage is absent (backwards compat)
+    fn finalize_legacy(&mut self, cost: Option<f64>) {
+        if let Some(c) = cost {
+            self.total_cost_usd += c;
+        }
+        // Promote pending tokens to finalized (don't add result.usage — it would double-count)
+        self.finalized_input_tokens += self.pending_input_tokens;
+        self.finalized_output_tokens += self.pending_output_tokens;
+        self.pending_input_tokens = 0;
+        self.pending_output_tokens = 0;
+    }
+
+    /// Total input tokens for display (finalized + pending from current iteration)
+    fn display_input_tokens(&self) -> u64 {
+        self.finalized_input_tokens + self.pending_input_tokens
+    }
+
+    /// Total output tokens for display (finalized + pending from current iteration)
+    fn display_output_tokens(&self) -> u64 {
+        self.finalized_output_tokens + self.pending_output_tokens
     }
 
     /// Get current status data for the status bar
     pub fn get_status(&self) -> StatusData {
         StatusData {
             iteration: self.iteration,
+            min_iterations: self.min_iterations,
             max_iterations: self.max_iterations,
             elapsed_secs: self.start_time.elapsed().as_secs_f64(),
             iteration_elapsed_secs: self.iteration_start_time.elapsed().as_secs_f64(),
-            input_tokens: self.total_input_tokens,
-            output_tokens: self.total_output_tokens,
+            input_tokens: self.display_input_tokens(),
+            output_tokens: self.display_output_tokens(),
             cost_usd: self.total_cost_usd,
             update_info: None,
             update_state: Default::default(),
@@ -115,12 +165,54 @@ impl OutputFormatter {
 
     #[allow(dead_code)]
     pub fn total_input_tokens(&self) -> u64 {
-        self.total_input_tokens
+        self.display_input_tokens()
     }
 
     #[allow(dead_code)]
     pub fn total_output_tokens(&self) -> u64 {
-        self.total_output_tokens
+        self.display_output_tokens()
+    }
+
+    /// Format token summary lines for stats display
+    fn format_token_lines(&self) -> Vec<String> {
+        let input = self.display_input_tokens();
+        let output = self.display_output_tokens();
+        if input > 0 || output > 0 {
+            vec![format!(
+                "  {}    {} {} {} {}",
+                "Tokens:".dark_grey(),
+                format_tokens(input).green(),
+                "in /".dark_grey(),
+                format_tokens(output).magenta(),
+                "out".dark_grey()
+            )]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Format cost lines with per-model breakdown for stats display
+    fn format_cost_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.total_cost_usd > 0.0 {
+            lines.push(format!(
+                "  {}      {}",
+                "Cost:".dark_grey(),
+                format!("${:.4}", self.total_cost_usd).yellow()
+            ));
+            if !self.model_costs.is_empty() {
+                let mut sorted: Vec<_> = self.model_costs.iter().collect();
+                sorted.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                for (model, cost) in &sorted {
+                    lines.push(format!(
+                        "            {} {}",
+                        format!("${:.4}", cost).dark_grey(),
+                        model.as_str().dark_grey()
+                    ));
+                }
+            }
+        }
+        lines
     }
 
     /// Format iteration header and return lines
@@ -146,9 +238,9 @@ impl OutputFormatter {
         let mut lines = Vec::new();
         match event {
             ClaudeEvent::Assistant { message } => {
-                // Extract usage from assistant message
+                // Add to pending tokens for live display during iteration
                 if let Some(u) = &message.usage {
-                    self.add_usage(u);
+                    self.add_pending_usage(u);
                 }
 
                 for block in &message.content {
@@ -196,13 +288,14 @@ impl OutputFormatter {
                 }
             }
             ClaudeEvent::Result {
-                cost_usd, usage, ..
+                cost_usd,
+                model_usage,
+                ..
             } => {
-                if let Some(cost) = cost_usd {
-                    self.add_cost(*cost);
-                }
-                if let Some(u) = usage {
-                    self.add_usage(u);
+                if let Some(mu) = model_usage {
+                    self.finalize_model_usage(mu);
+                } else {
+                    self.finalize_legacy(*cost_usd);
                 }
             }
             _ => {}
@@ -242,24 +335,8 @@ impl OutputFormatter {
             elapsed.as_secs_f64()
         ));
 
-        if self.total_input_tokens > 0 || self.total_output_tokens > 0 {
-            lines.push(format!(
-                "  {}    {} {} {} {}",
-                "Tokens:".dark_grey(),
-                format_tokens(self.total_input_tokens).green(),
-                "in /".dark_grey(),
-                format_tokens(self.total_output_tokens).magenta(),
-                "out".dark_grey()
-            ));
-        }
-
-        if self.total_cost_usd > 0.0 {
-            lines.push(format!(
-                "  {}      {}",
-                "Cost:".dark_grey(),
-                format!("${:.4}", self.total_cost_usd).yellow()
-            ));
-        }
+        lines.extend(self.format_token_lines());
+        lines.extend(self.format_cost_lines());
 
         lines.push(format!("{}", "━".repeat(60).dark_grey()));
         lines
@@ -290,24 +367,8 @@ impl OutputFormatter {
             ),
         ];
 
-        if self.total_input_tokens > 0 || self.total_output_tokens > 0 {
-            lines.push(format!(
-                "  {}    {} {} {} {}",
-                "Tokens:".dark_grey(),
-                format_tokens(self.total_input_tokens).green(),
-                "in /".dark_grey(),
-                format_tokens(self.total_output_tokens).magenta(),
-                "out".dark_grey()
-            ));
-        }
-
-        if self.total_cost_usd > 0.0 {
-            lines.push(format!(
-                "  {}      {}",
-                "Cost:".dark_grey(),
-                format!("${:.4}", self.total_cost_usd).yellow()
-            ));
-        }
+        lines.extend(self.format_token_lines());
+        lines.extend(self.format_cost_lines());
 
         lines.push(String::new());
         lines.push(format!(

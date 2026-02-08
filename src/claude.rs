@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +21,23 @@ pub struct Usage {
     #[serde(default)]
     #[allow(dead_code)]
     pub cache_creation_input_tokens: u64,
+}
+
+/// Per-model usage entry from Claude CLI result event
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct ModelUsageEntry {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default, rename = "costUSD")]
+    pub cost_usd: f64,
 }
 
 /// Events from claude JSON output
@@ -54,6 +72,8 @@ pub enum ClaudeEvent {
         duration_api_ms: Option<u64>,
         #[serde(default)]
         usage: Option<Usage>,
+        #[serde(default, rename = "modelUsage")]
+        model_usage: Option<HashMap<String, ModelUsageEntry>>,
     },
 
     #[serde(other)]

@@ -85,10 +85,11 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
 
     // Initialize output formatter
     let formatter = Arc::new(Mutex::new(OutputFormatter::new(config.use_nerd_font)));
-    formatter
-        .lock()
-        .unwrap()
-        .set_max_iterations(config.max_iterations);
+    {
+        let mut fmt = formatter.lock().unwrap();
+        fmt.set_min_iterations(config.min_iterations);
+        fmt.set_max_iterations(config.max_iterations);
+    }
 
     // Initialize status terminal (enables raw mode)
     let status_terminal = Arc::new(Mutex::new(StatusTerminal::new(config.use_nerd_font)?));

@@ -20,6 +20,7 @@ use crate::updater::version_checker::{UpdateInfo, UpdateState};
 #[derive(Debug, Clone, Default)]
 pub struct StatusData {
     pub iteration: u32,
+    pub min_iterations: u32,
     pub max_iterations: u32,
     #[allow(dead_code)]
     pub elapsed_secs: f64,
@@ -45,10 +46,14 @@ impl StatusData {
 
     /// Build the status line spans (version + metrics in single column)
     fn to_line(&self, nerd_font: bool) -> Line<'static> {
-        let iter_text = if self.max_iterations > 0 {
-            format!("Iter {}/{}", self.iteration, self.max_iterations)
-        } else {
-            format!("Iter {}", self.iteration)
+        let iter_text = match (self.min_iterations > 0, self.max_iterations > 0) {
+            (true, true) => format!(
+                "Iter {} ({}..{})",
+                self.iteration, self.min_iterations, self.max_iterations
+            ),
+            (true, false) => format!("Iter {} (min {})", self.iteration, self.min_iterations),
+            (false, true) => format!("Iter {}/{}", self.iteration, self.max_iterations),
+            (false, false) => format!("Iter {}", self.iteration),
         };
 
         let time_text = format!("{:.1}s", self.iteration_elapsed_secs);
