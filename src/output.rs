@@ -382,7 +382,10 @@ fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
             let desc = input.get("description").and_then(|v| v.as_str());
             let cmd = input.get("command").and_then(|v| v.as_str());
             match (desc, cmd) {
-                (Some(d), _) => return truncate_string(d, MAX_DETAIL_WIDTH),
+                (Some(d), Some(c)) => {
+                    return truncate_string(&format!("{}: {}", d, c), MAX_DETAIL_WIDTH);
+                }
+                (Some(d), None) => return truncate_string(d, MAX_DETAIL_WIDTH),
                 (None, Some(c)) => return truncate_string(c, MAX_DETAIL_WIDTH),
                 _ => {}
             }
