@@ -64,7 +64,7 @@ pub fn render_markdown(text: &str) -> String {
     let width = terminal_width.max(80);
 
     // Use FmtText with explicit width to properly wrap text
-    let formatted = FmtText::from(&*SKIN, text, Some(width));
+    let formatted = FmtText::from(&SKIN, text, Some(width));
 
     formatted.to_string()
 }

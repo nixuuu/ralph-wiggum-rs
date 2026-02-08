@@ -213,32 +213,32 @@ async fn run() -> Result<()> {
         }
 
         // Check for completion promise in last message
-        if let Some(text) = last_message {
-            if find_promise(&text, state_manager.completion_promise()) {
-                if state_manager.can_accept_promise() {
-                    {
-                        let mut term = status_terminal.lock().unwrap();
-                        term.cleanup()?;
-                        let lines = formatter.lock().unwrap().format_stats(
-                            state_manager.iteration(),
-                            true,
-                            state_manager.completion_promise(),
-                        );
-                        term.print_lines(&lines)?;
-                    }
-                    // Cleanup state file on successful completion
-                    state_manager.cleanup().await?;
-                    input_thread.stop();
-                    return Ok(());
-                } else {
-                    // Promise found but min iterations not reached - continue
-                    let msg = format!(
-                        "\n[Promise found but ignoring - need {} more iteration(s) to reach minimum of {}]",
-                        state_manager.min_iterations() - state_manager.iteration(),
-                        state_manager.min_iterations()
+        if let Some(text) = last_message
+            && find_promise(&text, state_manager.completion_promise())
+        {
+            if state_manager.can_accept_promise() {
+                {
+                    let mut term = status_terminal.lock().unwrap();
+                    term.cleanup()?;
+                    let lines = formatter.lock().unwrap().format_stats(
+                        state_manager.iteration(),
+                        true,
+                        state_manager.completion_promise(),
                     );
-                    status_terminal.lock().unwrap().print_line(&msg)?;
+                    term.print_lines(&lines)?;
                 }
+                // Cleanup state file on successful completion
+                state_manager.cleanup().await?;
+                input_thread.stop();
+                return Ok(());
+            } else {
+                // Promise found but min iterations not reached - continue
+                let msg = format!(
+                    "\n[Promise found but ignoring - need {} more iteration(s) to reach minimum of {}]",
+                    state_manager.min_iterations() - state_manager.iteration(),
+                    state_manager.min_iterations()
+                );
+                status_terminal.lock().unwrap().print_line(&msg)?;
             }
         }
 

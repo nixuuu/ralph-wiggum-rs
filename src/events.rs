@@ -29,23 +29,23 @@ impl InputThread {
                         break;
                     }
 
-                    if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                        if let Ok(Event::Key(key_event)) = event::read() {
-                            let should_quit = matches!(
-                                key_event,
-                                KeyEvent {
-                                    code: KeyCode::Char('q'),
-                                    ..
-                                } | KeyEvent {
-                                    code: KeyCode::Char('c'),
-                                    modifiers: KeyModifiers::CONTROL,
-                                    ..
-                                }
-                            );
-                            if should_quit {
-                                shutdown.store(true, Ordering::SeqCst);
-                                break;
+                    if event::poll(Duration::from_millis(100)).unwrap_or(false)
+                        && let Ok(Event::Key(key_event)) = event::read()
+                    {
+                        let should_quit = matches!(
+                            key_event,
+                            KeyEvent {
+                                code: KeyCode::Char('q'),
+                                ..
+                            } | KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
                             }
+                        );
+                        if should_quit {
+                            shutdown.store(true, Ordering::SeqCst);
+                            break;
                         }
                     }
                 }
