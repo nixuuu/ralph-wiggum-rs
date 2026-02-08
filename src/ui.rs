@@ -6,7 +6,7 @@ use ratatui::{
     Terminal, Viewport,
     backend::CrosstermBackend,
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
@@ -42,7 +42,7 @@ impl StatusData {
         }
     }
 
-    /// Build the status line spans
+    /// Build the status line spans (version + metrics in single column)
     fn to_line(&self, nerd_font: bool) -> Line<'static> {
         let iter_text = if self.max_iterations > 0 {
             format!("Iter {}/{}", self.iteration, self.max_iterations)
@@ -55,35 +55,35 @@ impl StatusData {
         let tokens_out = Self::format_tokens(self.output_tokens);
         let cost_text = format!("${:.4}", self.cost_usd);
 
-        Line::from(vec![
-            Span::styled(iter_text, Style::default().fg(Color::Cyan)),
-            Span::raw(" │ "),
-            Span::styled(
-                format!("{} ", icons::status_clock(nerd_font)),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(time_text),
-            Span::raw(" │ "),
-            Span::styled("↓", Style::default().fg(Color::Green)),
-            Span::raw(format!(" {} ", tokens_in)),
-            Span::styled("↑", Style::default().fg(Color::Magenta)),
-            Span::raw(format!(" {} ", tokens_out)),
-            Span::raw("│ "),
-            Span::styled("$", Style::default().fg(Color::Yellow)),
-            Span::raw(cost_text.trim_start_matches('$').to_string()),
-        ])
+        let mut spans = self.version_spans();
+        spans.push(Span::raw(" │ "));
+        spans.push(Span::styled(iter_text, Style::default().fg(Color::Cyan)));
+        spans.push(Span::raw(" │ "));
+        spans.push(Span::styled(
+            format!("{} ", icons::status_clock(nerd_font)),
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::raw(time_text));
+        spans.push(Span::raw(" │ "));
+        spans.push(Span::styled("↓", Style::default().fg(Color::Green)));
+        spans.push(Span::raw(format!(" {} ", tokens_in)));
+        spans.push(Span::styled("↑", Style::default().fg(Color::Magenta)));
+        spans.push(Span::raw(format!(" {} ", tokens_out)));
+        spans.push(Span::raw("│ "));
+        spans.push(Span::styled("$", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw(cost_text.trim_start_matches('$').to_string()));
+
+        Line::from(spans)
     }
 
-    /// Build the right-side version line and its display width
-    fn version_line(&self) -> (Line<'static>, u16) {
+    /// Build version spans for inline display
+    fn version_spans(&self) -> Vec<Span<'static>> {
         let current = env!("CARGO_PKG_VERSION");
 
         if let Some(ref info) = self.update_info
             && info.update_available
         {
-            let text = format!("v{current} -> {}", info.latest_version);
-            let width = text.len() as u16 + 1; // +1 for trailing space
-            let line = Line::from(vec![
+            return vec![
                 Span::styled(format!("v{current}"), Style::default().fg(Color::DarkGray)),
                 Span::styled(" -> ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
@@ -92,18 +92,13 @@ impl StatusData {
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" "),
-            ]);
-            return (line, width);
+            ];
         }
 
-        let text = format!("v{current}");
-        let width = text.len() as u16 + 1;
-        let line = Line::from(vec![Span::styled(
-            format!("{text} "),
+        vec![Span::styled(
+            format!("v{current}"),
             Style::default().fg(Color::DarkGray),
-        )]);
-        (line, width)
+        )]
     }
 }
 
@@ -162,14 +157,10 @@ impl StatusTerminal {
         let nf = self.use_nerd_font;
         self.terminal.draw(|frame| {
             let area = frame.area();
-            let left_line = status.to_line(nf);
-            let (right_line, right_width) = status.version_line();
-
-            let chunks = Layout::horizontal([Constraint::Min(1), Constraint::Length(right_width)])
-                .split(area);
-
-            frame.render_widget(Paragraph::new(left_line), chunks[0]);
-            frame.render_widget(Paragraph::new(right_line), chunks[1]);
+            let line = status.to_line(nf);
+            let paragraph = Paragraph::new(line);
+            frame.render_widget(paragraph, area);
+            strip_trailing_spaces(frame.buffer_mut());
         })?;
 
         Ok(())
@@ -264,6 +255,7 @@ impl StatusTerminal {
             ]);
             let paragraph = Paragraph::new(line);
             frame.render_widget(paragraph, area);
+            strip_trailing_spaces(frame.buffer_mut());
         })?;
 
         Ok(())
@@ -312,8 +304,9 @@ use ratatui::widgets::Widget;
 /// When the terminal is resized smaller, those trailing spaces cause line wrapping
 /// and garbled output. Marking them as skip prevents the backend from writing them.
 fn strip_trailing_spaces(buf: &mut Buffer) {
-    for y in 0..buf.area.height {
-        for x in (0..buf.area.width).rev() {
+    let area = buf.area;
+    for y in area.y..area.y + area.height {
+        for x in (area.x..area.x + area.width).rev() {
             let cell = &buf[(x, y)];
             if cell.symbol() == " "
                 && cell.fg == Color::Reset

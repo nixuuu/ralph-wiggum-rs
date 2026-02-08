@@ -131,9 +131,15 @@ impl ClaudeRunner {
     /// a complete response, we return the response instead of an error.
     /// This handles cases where claude CLI exits with code 1 after
     /// delivering complete output (e.g., during cleanup or due to warnings).
-    pub async fn run<F>(&self, shutdown: Arc<AtomicBool>, mut on_event: F) -> Result<Option<String>>
+    pub async fn run<F, I>(
+        &self,
+        shutdown: Arc<AtomicBool>,
+        mut on_event: F,
+        mut on_idle: I,
+    ) -> Result<Option<String>>
     where
         F: FnMut(&ClaudeEvent),
+        I: FnMut(),
     {
         let mut cmd = Command::new("claude");
         // -p for non-interactive print mode
@@ -186,6 +192,9 @@ impl ClaudeRunner {
         };
         tokio::pin!(shutdown_check);
 
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 biased;
@@ -224,6 +233,10 @@ impl ClaudeRunner {
                         }
                         None => break, // EOF - child process finished
                     }
+                }
+
+                _ = tick.tick() => {
+                    on_idle();
                 }
             }
         }

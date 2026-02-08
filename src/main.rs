@@ -147,6 +147,9 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
             let mut status = formatter.lock().unwrap().get_status();
             status.update_info = update_info.lock().unwrap().clone();
             let mut term = status_terminal.lock().unwrap();
+            if resize_flag.swap(false, Ordering::SeqCst) {
+                let _ = term.handle_resize(&status);
+            }
             term.print_lines(&header_lines)?;
             term.update(&status)?;
         }
@@ -174,41 +177,59 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
             continue; // Will be caught by shutdown check at top of loop
         }
 
-        // Clone Arc for use in closure
+        // Clone Arc for use in event closure
         let formatter_clone = formatter.clone();
         let status_terminal_clone = status_terminal.clone();
         let shutdown_for_callback = shutdown.clone();
         let update_info_clone = update_info.clone();
         let resize_flag_clone = resize_flag.clone();
 
+        // Clone Arc for use in idle closure
+        let resize_flag_idle = resize_flag.clone();
+        let formatter_idle = formatter.clone();
+        let status_terminal_idle = status_terminal.clone();
+        let update_info_idle = update_info.clone();
+
         // Run claude with consolidated lock acquisitions in callback
         let run_result = runner
-            .run(shutdown.clone(), |event| {
-                // Lock formatter once: format event + get status
-                let (lines, mut status) = {
-                    let mut fmt = formatter_clone.lock().unwrap();
-                    let lines = fmt.format_event(event);
-                    let status = fmt.get_status();
-                    (lines, status)
-                };
-                status.update_info = update_info_clone.lock().unwrap().clone();
-                // Lock terminal once: print all lines + update status bar
-                {
-                    let mut term = status_terminal_clone.lock().unwrap();
-                    // Handle resize: clear viewport and redraw status bar
-                    if resize_flag_clone.swap(false, Ordering::SeqCst) {
+            .run(
+                shutdown.clone(),
+                |event| {
+                    // Lock formatter once: format event + get status
+                    let (lines, mut status) = {
+                        let mut fmt = formatter_clone.lock().unwrap();
+                        let lines = fmt.format_event(event);
+                        let status = fmt.get_status();
+                        (lines, status)
+                    };
+                    status.update_info = update_info_clone.lock().unwrap().clone();
+                    // Lock terminal once: print all lines + update status bar
+                    {
+                        let mut term = status_terminal_clone.lock().unwrap();
+                        // Handle resize: clear viewport and redraw status bar
+                        if resize_flag_clone.swap(false, Ordering::SeqCst) {
+                            let _ = term.handle_resize(&status);
+                        }
+                        for line in &lines {
+                            let _ = term.print_line(line);
+                        }
+                        if shutdown_for_callback.load(Ordering::SeqCst) {
+                            let _ = term.show_shutting_down();
+                        } else {
+                            let _ = term.update(&status);
+                        }
+                    }
+                },
+                || {
+                    // Idle tick: handle resize between Claude events
+                    if resize_flag_idle.swap(false, Ordering::SeqCst) {
+                        let mut status = formatter_idle.lock().unwrap().get_status();
+                        status.update_info = update_info_idle.lock().unwrap().clone();
+                        let mut term = status_terminal_idle.lock().unwrap();
                         let _ = term.handle_resize(&status);
                     }
-                    for line in &lines {
-                        let _ = term.print_line(line);
-                    }
-                    if shutdown_for_callback.load(Ordering::SeqCst) {
-                        let _ = term.show_shutting_down();
-                    } else {
-                        let _ = term.update(&status);
-                    }
-                }
-            })
+                },
+            )
             .await;
 
         // Handle interrupted - do cleanup before returning error
@@ -236,7 +257,11 @@ async fn run_with_args(args: CliArgs) -> Result<()> {
         {
             let mut status = formatter.lock().unwrap().get_status();
             status.update_info = update_info.lock().unwrap().clone();
-            status_terminal.lock().unwrap().update(&status)?;
+            let mut term = status_terminal.lock().unwrap();
+            if resize_flag.swap(false, Ordering::SeqCst) {
+                let _ = term.handle_resize(&status);
+            }
+            term.update(&status)?;
         }
 
         // Check for completion promise in last message
