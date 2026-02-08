@@ -42,7 +42,7 @@ jobs:
         run: cargo test --verbose
 
   build:
-    needs: [lint, test]
+    needs: [test]
     strategy:
       fail-fast: false
       matrix:

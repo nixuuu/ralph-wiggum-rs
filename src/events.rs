@@ -1,6 +1,6 @@
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Handle for managing the dedicated keyboard input thread.

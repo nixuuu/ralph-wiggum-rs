@@ -79,10 +79,7 @@ impl StatusData {
             let text = format!("v{current} -> {}", info.latest_version);
             let width = text.len() as u16 + 1; // +1 for trailing space
             let line = Line::from(vec![
-                Span::styled(
-                    format!("v{current}"),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("v{current}"), Style::default().fg(Color::DarkGray)),
                 Span::styled(" -> ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     info.latest_version.clone(),
@@ -153,11 +150,8 @@ impl StatusTerminal {
             let left_line = status.to_line();
             let (right_line, right_width) = status.version_line();
 
-            let chunks = Layout::horizontal([
-                Constraint::Min(1),
-                Constraint::Length(right_width),
-            ])
-            .split(area);
+            let chunks = Layout::horizontal([Constraint::Min(1), Constraint::Length(right_width)])
+                .split(area);
 
             frame.render_widget(Paragraph::new(left_line), chunks[0]);
             frame.render_widget(Paragraph::new(right_line), chunks[1]);
