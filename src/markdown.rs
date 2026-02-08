@@ -1,5 +1,10 @@
+use std::sync::LazyLock;
+
 use crossterm::terminal;
 use termimad::{FmtText, MadSkin, crossterm::style::Color::*};
+
+/// Cached MadSkin — created once, reused for all markdown rendering.
+static SKIN: LazyLock<MadSkin> = LazyLock::new(create_skin);
 
 /// Get terminal width using crossterm (more reliable in raw mode)
 fn get_terminal_width() -> usize {
@@ -7,7 +12,7 @@ fn get_terminal_width() -> usize {
 }
 
 /// Create a custom skin for markdown rendering
-pub fn create_skin() -> MadSkin {
+fn create_skin() -> MadSkin {
     let mut skin = MadSkin::default();
 
     // Headers - bold and colored
@@ -54,13 +59,12 @@ pub fn create_skin() -> MadSkin {
 
 /// Render markdown text to a styled string for terminal output
 pub fn render_markdown(text: &str) -> String {
-    let skin = create_skin();
     let terminal_width = get_terminal_width();
     // Use full terminal width (minimum 80 for readability)
     let width = terminal_width.max(80);
 
     // Use FmtText with explicit width to properly wrap text
-    let formatted = FmtText::from(&skin, text, Some(width));
+    let formatted = FmtText::from(&*SKIN, text, Some(width));
 
     formatted.to_string()
 }
@@ -68,9 +72,7 @@ pub fn render_markdown(text: &str) -> String {
 /// Render a single line of markdown (inline formatting only)
 #[allow(dead_code)]
 pub fn render_inline(text: &str) -> String {
-    let skin = create_skin();
-    // For inline text, we just apply inline formatting
-    let formatted = skin.inline(text);
+    let formatted = SKIN.inline(text);
     formatted.to_string()
 }
 

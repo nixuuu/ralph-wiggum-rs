@@ -179,6 +179,25 @@ impl StatusTerminal {
         Ok(())
     }
 
+    /// Show "Shutting down..." on the status bar for immediate feedback
+    pub fn show_shutting_down(&mut self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        self.terminal.draw(|frame| {
+            let area = frame.area();
+            let line = Line::from(vec![
+                Span::styled("⏸ ", Style::default().fg(Color::Yellow)),
+                Span::styled("Shutting down...", Style::default().fg(Color::Yellow)),
+            ]);
+            let paragraph = Paragraph::new(line);
+            frame.render_widget(paragraph, area);
+        })?;
+
+        Ok(())
+    }
+
     /// Clear the status bar and restore terminal
     pub fn cleanup(&mut self) -> Result<()> {
         if !self.enabled {

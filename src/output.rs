@@ -1,5 +1,4 @@
 use crossterm::style::Stylize;
-use regex::Regex;
 use std::time::Instant;
 
 use crate::claude::{ClaudeEvent, ContentBlock, Usage};
@@ -471,18 +470,23 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 
 /// Check if text contains completion promise in <promise>...</promise> tags
 pub fn find_promise(text: &str, promise: &str) -> bool {
-    // Escape special regex characters in promise
-    let escaped_promise = regex::escape(promise);
-    // Allow whitespace around promise text
-    let pattern = format!(r"<promise>\s*{}\s*</promise>", escaped_promise);
+    let open_tag = "<promise>";
+    let close_tag = "</promise>";
 
-    match Regex::new(&pattern) {
-        Ok(re) => re.is_match(text),
-        Err(_) => {
-            // Fallback to simple string matching
-            text.contains(&format!("<promise>{}</promise>", promise))
+    let mut search_from = 0;
+    while let Some(start) = text[search_from..].find(open_tag) {
+        let content_start = search_from + start + open_tag.len();
+        if let Some(end) = text[content_start..].find(close_tag) {
+            let inner = &text[content_start..content_start + end];
+            if inner.trim() == promise {
+                return true;
+            }
+            search_from = content_start + end + close_tag.len();
+        } else {
+            break;
         }
     }
+    false
 }
 
 #[cfg(test)]

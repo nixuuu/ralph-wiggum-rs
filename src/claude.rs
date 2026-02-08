@@ -157,6 +157,7 @@ impl ClaudeRunner {
         // Add user prompt as positional argument
         cmd.arg(&self.user_prompt);
 
+        cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());
         // Kill child process when dropped (e.g., on Ctrl+C)

@@ -22,9 +22,6 @@ toml = "0.8"
 # Async runtime
 tokio = { version = "1.40", features = ["full", "signal"] }
 
-# Regex for promise matching
-regex = "1.10"
-
 # Error handling
 thiserror = "2.0"
 anyhow = "1.0"

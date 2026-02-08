@@ -786,7 +786,6 @@ dependencies = [
  "clap",
  "crossterm 0.28.1",
  "ratatui",
- "regex",
  "serde",
  "serde_json",
  "serde_yaml",

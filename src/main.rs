@@ -1,6 +1,7 @@
 mod claude;
 mod config;
 mod error;
+mod events;
 mod file_config;
 mod markdown;
 mod output;
@@ -11,12 +12,12 @@ mod ui;
 use clap::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::signal;
 
 use claude::ClaudeRunner;
 use config::{CliArgs, Config};
 use error::{RalphError, Result};
+use events::InputThread;
 use output::{OutputFormatter, find_promise};
 use prompt::build_system_prompt;
 use state::StateManager;
@@ -68,8 +69,11 @@ async fn run() -> Result<()> {
         .unwrap()
         .set_max_iterations(config.max_iterations);
 
-    // Initialize status terminal
+    // Initialize status terminal (enables raw mode)
     let status_terminal = Arc::new(Mutex::new(StatusTerminal::new()?));
+
+    // Spawn dedicated OS thread for keyboard input (after raw mode is enabled)
+    let input_thread = InputThread::spawn(shutdown.clone());
 
     // Save initial state
     state_manager.save().await?;
@@ -78,47 +82,55 @@ async fn run() -> Result<()> {
     loop {
         // Check shutdown signal
         if shutdown.load(Ordering::SeqCst) {
+            status_terminal.lock().unwrap().show_shutting_down()?;
             state_manager.save().await?;
-            status_terminal.lock().unwrap().cleanup()?;
-            let lines = formatter
-                .lock()
-                .unwrap()
-                .format_interrupted(state_manager.iteration());
-            status_terminal.lock().unwrap().print_lines(&lines)?;
+            {
+                let mut term = status_terminal.lock().unwrap();
+                term.cleanup()?;
+                let lines = formatter
+                    .lock()
+                    .unwrap()
+                    .format_interrupted(state_manager.iteration());
+                term.print_lines(&lines)?;
+            }
+            drop(input_thread);
             return Err(RalphError::Interrupted);
         }
 
         // Check max iterations (before incrementing)
         if state_manager.is_max_reached() {
-            status_terminal.lock().unwrap().cleanup()?;
-            let lines = formatter.lock().unwrap().format_stats(
-                state_manager.iteration(),
-                false,
-                state_manager.completion_promise(),
-            );
-            status_terminal.lock().unwrap().print_lines(&lines)?;
+            {
+                let mut term = status_terminal.lock().unwrap();
+                term.cleanup()?;
+                let lines = formatter.lock().unwrap().format_stats(
+                    state_manager.iteration(),
+                    false,
+                    state_manager.completion_promise(),
+                );
+                term.print_lines(&lines)?;
+            }
             // Cleanup state file on max iterations
             state_manager.cleanup().await?;
+            drop(input_thread);
             return Err(RalphError::MaxIterations(state_manager.iteration()));
         }
 
         // Increment iteration
         state_manager.increment_iteration().await?;
-        formatter
-            .lock()
-            .unwrap()
-            .set_iteration(state_manager.iteration());
-        formatter.lock().unwrap().start_iteration();
+        {
+            let mut fmt = formatter.lock().unwrap();
+            fmt.set_iteration(state_manager.iteration());
+            fmt.start_iteration();
+        }
 
-        // Print iteration header
-        let header_lines = formatter.lock().unwrap().format_iteration_header();
-        status_terminal.lock().unwrap().print_lines(&header_lines)?;
-
-        // Update status bar at iteration start
-        status_terminal
-            .lock()
-            .unwrap()
-            .update(&formatter.lock().unwrap().get_status())?;
+        // Print iteration header and update status bar
+        {
+            let header_lines = formatter.lock().unwrap().format_iteration_header();
+            let status = formatter.lock().unwrap().get_status();
+            let mut term = status_terminal.lock().unwrap();
+            term.print_lines(&header_lines)?;
+            term.update(&status)?;
+        }
 
         // Build system prompt with optional custom prefix
         let system_prompt = build_system_prompt(
@@ -138,119 +150,85 @@ async fn run() -> Result<()> {
             ClaudeRunner::for_continuation(config.prompt.clone(), system_prompt)
         };
 
-        // Clone Arc for use in closure and background task
+        // Check shutdown before spawning claude process
+        if shutdown.load(Ordering::SeqCst) {
+            continue; // Will be caught by shutdown check at top of loop
+        }
+
+        // Clone Arc for use in closure
         let formatter_clone = formatter.clone();
         let status_terminal_clone = status_terminal.clone();
+        let shutdown_for_callback = shutdown.clone();
 
-        // Start background task to refresh status bar and handle keyboard input
-        let refresh_running = Arc::new(AtomicBool::new(true));
-        let refresh_running_clone = refresh_running.clone();
-        let formatter_refresh = formatter.clone();
-        let status_terminal_refresh = status_terminal.clone();
-        let shutdown_for_keys = shutdown.clone();
-
-        let refresh_handle = tokio::spawn(async move {
-            use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            loop {
-                if !refresh_running_clone.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                // Check for keyboard input (non-blocking)
-                if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                    if let Ok(Event::Key(key_event)) = event::read() {
-                        match key_event {
-                            // 'q' to quit
-                            KeyEvent {
-                                code: KeyCode::Char('q'),
-                                ..
-                            } => {
-                                shutdown_for_keys.store(true, Ordering::SeqCst);
-                                break;
-                            }
-                            // Ctrl+C to quit
-                            KeyEvent {
-                                code: KeyCode::Char('c'),
-                                modifiers: KeyModifiers::CONTROL,
-                                ..
-                            } => {
-                                shutdown_for_keys.store(true, Ordering::SeqCst);
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Update status bar
-                tokio::select! {
-                    _ = interval.tick() => {
-                        if let (Ok(fmt), Ok(mut term)) = (
-                            formatter_refresh.lock(),
-                            status_terminal_refresh.lock(),
-                        ) {
-                            let _ = term.update(&fmt.get_status());
-                        }
-                    }
-                }
-            }
-        });
-
-        // Run claude
+        // Run claude with consolidated lock acquisitions in callback
         let run_result = runner
             .run(shutdown.clone(), |event| {
-                let lines = formatter_clone.lock().unwrap().format_event(event);
-                for line in lines {
-                    let _ = status_terminal_clone.lock().unwrap().print_line(&line);
+                // Lock formatter once: format event + get status
+                let (lines, status) = {
+                    let mut fmt = formatter_clone.lock().unwrap();
+                    let lines = fmt.format_event(event);
+                    let status = fmt.get_status();
+                    (lines, status)
+                };
+                // Lock terminal once: print all lines + update status bar
+                {
+                    let mut term = status_terminal_clone.lock().unwrap();
+                    for line in &lines {
+                        let _ = term.print_line(line);
+                    }
+                    if shutdown_for_callback.load(Ordering::SeqCst) {
+                        let _ = term.show_shutting_down();
+                    } else {
+                        let _ = term.update(&status);
+                    }
                 }
-                let _ = status_terminal_clone
-                    .lock()
-                    .unwrap()
-                    .update(&formatter_clone.lock().unwrap().get_status());
             })
             .await;
-
-        // Stop background refresh task
-        refresh_running.store(false, Ordering::SeqCst);
-        let _ = refresh_handle.await;
 
         // Handle interrupted - do cleanup before returning error
         let last_message = match run_result {
             Ok(msg) => msg,
             Err(RalphError::Interrupted) => {
+                status_terminal.lock().unwrap().show_shutting_down()?;
                 state_manager.save().await?;
-                status_terminal.lock().unwrap().cleanup()?;
-                let lines = formatter
-                    .lock()
-                    .unwrap()
-                    .format_interrupted(state_manager.iteration());
-                status_terminal.lock().unwrap().print_lines(&lines)?;
+                {
+                    let mut term = status_terminal.lock().unwrap();
+                    term.cleanup()?;
+                    let lines = formatter
+                        .lock()
+                        .unwrap()
+                        .format_interrupted(state_manager.iteration());
+                    term.print_lines(&lines)?;
+                }
+                drop(input_thread);
                 return Err(RalphError::Interrupted);
             }
             Err(e) => return Err(e),
         };
 
         // Update status bar after iteration completes
-        status_terminal
-            .lock()
-            .unwrap()
-            .update(&formatter.lock().unwrap().get_status())?;
+        {
+            let status = formatter.lock().unwrap().get_status();
+            status_terminal.lock().unwrap().update(&status)?;
+        }
 
         // Check for completion promise in last message
         if let Some(text) = last_message {
             if find_promise(&text, state_manager.completion_promise()) {
                 if state_manager.can_accept_promise() {
-                    status_terminal.lock().unwrap().cleanup()?;
-                    let lines = formatter.lock().unwrap().format_stats(
-                        state_manager.iteration(),
-                        true,
-                        state_manager.completion_promise(),
-                    );
-                    status_terminal.lock().unwrap().print_lines(&lines)?;
+                    {
+                        let mut term = status_terminal.lock().unwrap();
+                        term.cleanup()?;
+                        let lines = formatter.lock().unwrap().format_stats(
+                            state_manager.iteration(),
+                            true,
+                            state_manager.completion_promise(),
+                        );
+                        term.print_lines(&lines)?;
+                    }
                     // Cleanup state file on successful completion
                     state_manager.cleanup().await?;
+                    input_thread.stop();
                     return Ok(());
                 } else {
                     // Promise found but min iterations not reached - continue
@@ -266,13 +244,18 @@ async fn run() -> Result<()> {
 
         // Check shutdown after iteration
         if shutdown.load(Ordering::SeqCst) {
+            status_terminal.lock().unwrap().show_shutting_down()?;
             state_manager.save().await?;
-            status_terminal.lock().unwrap().cleanup()?;
-            let lines = formatter
-                .lock()
-                .unwrap()
-                .format_interrupted(state_manager.iteration());
-            status_terminal.lock().unwrap().print_lines(&lines)?;
+            {
+                let mut term = status_terminal.lock().unwrap();
+                term.cleanup()?;
+                let lines = formatter
+                    .lock()
+                    .unwrap()
+                    .format_interrupted(state_manager.iteration());
+                term.print_lines(&lines)?;
+            }
+            drop(input_thread);
             return Err(RalphError::Interrupted);
         }
     }
