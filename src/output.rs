@@ -1,10 +1,40 @@
 use crossterm::style::Stylize;
+use std::sync::LazyLock;
 use std::time::Instant;
 
 use crate::claude::{ClaudeEvent, ContentBlock, Usage};
 use crate::icons;
 use crate::markdown;
 use crate::ui::StatusData;
+
+/// Cached current working directory for path shortening
+static CWD: LazyLock<String> = LazyLock::new(|| {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+});
+
+/// Cached home directory for path shortening
+static HOME_DIR: LazyLock<String> = LazyLock::new(|| std::env::var("HOME").unwrap_or_default());
+
+/// Shorten absolute paths for display: CWD → relative, HOME → ~
+fn shorten_path(s: &str) -> String {
+    let cwd = &*CWD;
+    if !cwd.is_empty() {
+        let with_slash = format!("{}/", cwd);
+        if s.contains(with_slash.as_str()) {
+            return s.replace(with_slash.as_str(), "");
+        }
+        if s.contains(cwd.as_str()) {
+            return s.replace(cwd.as_str(), ".");
+        }
+    }
+    let home = &*HOME_DIR;
+    if !home.is_empty() && s.contains(home.as_str()) {
+        return s.replace(home.as_str(), "~");
+    }
+    s.to_string()
+}
 
 /// Maximum width for tool detail strings (paths, descriptions, etc.)
 const MAX_DETAIL_WIDTH: usize = 100;
@@ -130,8 +160,9 @@ impl OutputFormatter {
                             }
                             self.last_block_type = BlockType::Text;
 
-                            // Render markdown formatted text
-                            let rendered = markdown::render_markdown(text);
+                            // Shorten absolute paths and render markdown
+                            let text = shorten_path(text);
+                            let rendered = markdown::render_markdown(&text);
                             for line in rendered.lines() {
                                 lines.push(line.to_string());
                             }
@@ -325,7 +356,7 @@ fn colorize_tool_name(name: &str) -> String {
 fn format_edit_diff(path: &str, old: &str, new: &str) -> String {
     use crossterm::style::Stylize;
 
-    let truncated_path = truncate_string(path, MAX_DETAIL_WIDTH);
+    let truncated_path = truncate_string(&shorten_path(path), MAX_DETAIL_WIDTH);
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
 
@@ -358,12 +389,12 @@ fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
     match name {
         "Read" => {
             if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
-                return truncate_string(path, MAX_DETAIL_WIDTH);
+                return truncate_string(&shorten_path(path), MAX_DETAIL_WIDTH);
             }
         }
         "Write" => {
             if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
-                return truncate_string(path, MAX_DETAIL_WIDTH);
+                return truncate_string(&shorten_path(path), MAX_DETAIL_WIDTH);
             }
         }
         "Edit" => {
@@ -384,23 +415,37 @@ fn format_tool_details(name: &str, input: &serde_json::Value) -> String {
             let cmd = input.get("command").and_then(|v| v.as_str());
             match (desc, cmd) {
                 (Some(d), Some(c)) => {
-                    return truncate_string(&format!("{}: {}", d, c), MAX_DETAIL_WIDTH);
+                    return truncate_string(
+                        &shorten_path(&format!("{}: {}", d, c)),
+                        MAX_DETAIL_WIDTH,
+                    );
                 }
-                (Some(d), None) => return truncate_string(d, MAX_DETAIL_WIDTH),
-                (None, Some(c)) => return truncate_string(c, MAX_DETAIL_WIDTH),
+                (Some(d), None) => {
+                    return truncate_string(&shorten_path(d), MAX_DETAIL_WIDTH);
+                }
+                (None, Some(c)) => {
+                    return truncate_string(&shorten_path(c), MAX_DETAIL_WIDTH);
+                }
                 _ => {}
             }
         }
         "Glob" => {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            return truncate_string(&format!("{} in {}", pattern, path), MAX_DETAIL_WIDTH);
+            return truncate_string(
+                &format!("{} in {}", pattern, shorten_path(path)),
+                MAX_DETAIL_WIDTH,
+            );
         }
         "Grep" => {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             return truncate_string(
-                &format!("\"{}\" in {}", truncate_string(pattern, 30), path),
+                &format!(
+                    "\"{}\" in {}",
+                    truncate_string(pattern, 30),
+                    shorten_path(path)
+                ),
                 MAX_DETAIL_WIDTH,
             );
         }

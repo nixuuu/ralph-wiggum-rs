@@ -103,13 +103,8 @@ impl StatusData {
                     Some((" restart to apply", Style::default().fg(Color::Green))),
                 ),
                 UpdateState::Failed => (
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
-                    Some((
-                        " update failed [Ctrl+U]",
-                        Style::default().fg(Color::Red),
-                    )),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Some((" update failed [Ctrl+U]", Style::default().fg(Color::Red))),
                 ),
                 _ => (
                     Style::default()
