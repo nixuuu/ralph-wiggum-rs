@@ -6,6 +6,7 @@ use crate::commands::run::RunArgs;
 #[command(name = "ralph-wiggum")]
 #[command(version)]
 #[command(about = "Run claude in a loop until completion promise is found")]
+#[command(before_help = crate::shared::banner::COLORED.as_str())]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     #[command(subcommand)]
