@@ -73,8 +73,9 @@ fn parse_task_line(line: &str) -> Option<ProgressTask> {
     let id_end = after_status.find(' ')?;
     let id = after_status[..id_end].to_string();
 
-    // After ID, expect " [component] name"
+    // After ID, expect " [component] name" — strip optional backticks
     let after_id = after_status[id_end..].trim_start();
+    let after_id = after_id.trim_start_matches('`');
 
     // Extract [component]
     if !after_id.starts_with('[') {
@@ -83,8 +84,11 @@ fn parse_task_line(line: &str) -> Option<ProgressTask> {
     let bracket_end = after_id.find(']')?;
     let component = after_id[1..bracket_end].to_string();
 
-    // Rest is the task name
-    let name = after_id[bracket_end + 1..].trim().to_string();
+    // Rest is the task name — skip trailing backtick if present
+    let name = after_id[bracket_end + 1..]
+        .trim_start_matches('`')
+        .trim()
+        .to_string();
     if name.is_empty() {
         return None;
     }
@@ -286,6 +290,37 @@ Some random text here
         let summary = parse_progress(content);
         assert_eq!(summary.tasks[0].component, "backend-api");
         assert_eq!(summary.tasks[0].name, "Create REST endpoint");
+    }
+
+    #[test]
+    fn test_parse_backtick_component() {
+        let content = "\
+- [x] 0.0.1 `[infra]` Configure Playwright
+- [ ] 0.0.2 `[ui]` Build landing page
+- [~] 0.0.3 `[api]` Setup REST endpoints";
+
+        let summary = parse_progress(content);
+        assert_eq!(summary.tasks.len(), 3);
+        assert_eq!(summary.tasks[0].id, "0.0.1");
+        assert_eq!(summary.tasks[0].component, "infra");
+        assert_eq!(summary.tasks[0].name, "Configure Playwright");
+        assert_eq!(summary.done, 1);
+        assert_eq!(summary.tasks[1].component, "ui");
+        assert_eq!(summary.tasks[2].component, "api");
+        assert_eq!(summary.in_progress, 1);
+        assert_eq!(summary.todo, 1);
+    }
+
+    #[test]
+    fn test_parse_mixed_backtick_and_plain() {
+        let content = "\
+- [x] 1.1 [api] Plain component
+- [ ] 1.2 `[ui]` Backtick component";
+
+        let summary = parse_progress(content);
+        assert_eq!(summary.tasks.len(), 2);
+        assert_eq!(summary.tasks[0].component, "api");
+        assert_eq!(summary.tasks[1].component, "ui");
     }
 
     #[test]
