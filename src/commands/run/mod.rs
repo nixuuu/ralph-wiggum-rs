@@ -43,9 +43,6 @@ fn build_task_progress(
 }
 
 pub async fn execute(args: RunArgs) -> Result<()> {
-    // Print banner before raw mode
-    crate::shared::banner::print_banner();
-
     // Build config
     let config = Config::build(args)?;
 

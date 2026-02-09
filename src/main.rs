@@ -17,7 +17,10 @@ async fn main() {
             commands::update::execute();
             return;
         }
-        Some(Commands::Run(args)) => commands::run::execute(args).await,
+        Some(Commands::Run(args)) => {
+            shared::banner::print_banner();
+            commands::run::execute(args).await
+        }
         Some(Commands::Task { command }) => {
             match shared::file_config::FileConfig::load_from_path(&std::path::PathBuf::from(
                 ".ralph.toml",
@@ -26,7 +29,10 @@ async fn main() {
                 Err(e) => Err(e),
             }
         }
-        None => commands::run::execute(cli.run_args).await,
+        None => {
+            shared::banner::print_banner();
+            commands::run::execute(cli.run_args).await
+        }
     };
 
     if let Err(e) = result {
