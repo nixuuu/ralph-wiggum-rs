@@ -21,9 +21,9 @@ pub fn resolve_input(file: Option<&PathBuf>, prompt: Option<&str>) -> Result<Str
     // 3. Stdin if piped (not a terminal)
     if !io::stdin().is_terminal() {
         let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf).map_err(|e| {
-            RalphError::TaskSetup(format!("Failed to read stdin: {}", e))
-        })?;
+        io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| RalphError::TaskSetup(format!("Failed to read stdin: {}", e)))?;
         if !buf.trim().is_empty() {
             return Ok(buf);
         }

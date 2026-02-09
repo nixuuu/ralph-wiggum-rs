@@ -210,60 +210,72 @@ impl StatusTerminal {
             let area = frame.area();
 
             if height >= 3
-                && let Some(ref tp) = status.task_progress {
-                    // 3-line layout: metrics | current task | gauge
-                    let chunks = Layout::vertical([
-                        Constraint::Length(1),
-                        Constraint::Length(1),
-                        Constraint::Length(1),
-                    ])
-                    .split(area);
+                && let Some(ref tp) = status.task_progress
+            {
+                // 3-line layout: metrics | current task | gauge
+                let chunks = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
+                .split(area);
 
-                    // Line 1: existing status metrics
-                    let line1 = status.to_line(nf);
-                    let p1 = Paragraph::new(line1);
-                    frame.render_widget(p1, chunks[0]);
+                // Line 1: existing status metrics
+                let line1 = status.to_line(nf);
+                let p1 = Paragraph::new(line1);
+                frame.render_widget(p1, chunks[0]);
 
-                    // Line 2: current task info + speed/ETA
-                    let mut task_line = tp.to_status_line();
-                    if let Some(ref speed) = status.speed_text {
-                        task_line.spans.push(Span::raw(" │ "));
-                        task_line.spans.push(Span::styled(
-                            format!("{} {}", icons::status_speed(nf), speed),
-                            Style::default().fg(Color::Yellow),
-                        ));
-                    }
-                    if let Some(ref eta) = status.eta_text {
-                        task_line.spans.push(Span::raw(" "));
-                        task_line.spans.push(Span::styled(
-                            format!("ETA {}", eta),
-                            Style::default().fg(Color::Cyan),
-                        ));
-                    }
-                    let p2 = Paragraph::new(task_line);
-                    frame.render_widget(p2, chunks[1]);
-
-                    // Line 3: gauge progress bar
-                    let ratio = if tp.total > 0 {
-                        tp.done as f64 / tp.total as f64
-                    } else {
-                        0.0
-                    };
-                    let label = if let Some(ref eta) = status.eta_text {
-                        format!("{}/{} ({}%) | ETA {}", tp.done, tp.total, (ratio * 100.0).round() as u32, eta)
-                    } else {
-                        format!("{}/{} ({}%)", tp.done, tp.total, (ratio * 100.0).round() as u32)
-                    };
-                    let gauge = Gauge::default()
-                        .ratio(ratio)
-                        .label(label)
-                        .gauge_style(Style::default().fg(Color::Green).bg(Color::DarkGray))
-                        .style(Style::default().fg(Color::White));
-                    frame.render_widget(gauge, chunks[2]);
-
-                    strip_trailing_spaces(frame.buffer_mut());
-                    return;
+                // Line 2: current task info + speed/ETA
+                let mut task_line = tp.to_status_line();
+                if let Some(ref speed) = status.speed_text {
+                    task_line.spans.push(Span::raw(" │ "));
+                    task_line.spans.push(Span::styled(
+                        format!("{} {}", icons::status_speed(nf), speed),
+                        Style::default().fg(Color::Yellow),
+                    ));
                 }
+                if let Some(ref eta) = status.eta_text {
+                    task_line.spans.push(Span::raw(" "));
+                    task_line.spans.push(Span::styled(
+                        format!("ETA {}", eta),
+                        Style::default().fg(Color::Cyan),
+                    ));
+                }
+                let p2 = Paragraph::new(task_line);
+                frame.render_widget(p2, chunks[1]);
+
+                // Line 3: gauge progress bar
+                let ratio = if tp.total > 0 {
+                    tp.done as f64 / tp.total as f64
+                } else {
+                    0.0
+                };
+                let label = if let Some(ref eta) = status.eta_text {
+                    format!(
+                        "{}/{} ({}%) | ETA {}",
+                        tp.done,
+                        tp.total,
+                        (ratio * 100.0).round() as u32,
+                        eta
+                    )
+                } else {
+                    format!(
+                        "{}/{} ({}%)",
+                        tp.done,
+                        tp.total,
+                        (ratio * 100.0).round() as u32
+                    )
+                };
+                let gauge = Gauge::default()
+                    .ratio(ratio)
+                    .label(label)
+                    .gauge_style(Style::default().fg(Color::Green).bg(Color::DarkGray))
+                    .style(Style::default().fg(Color::White));
+                frame.render_widget(gauge, chunks[2]);
+
+                strip_trailing_spaces(frame.buffer_mut());
+                return;
+            }
 
             // Default: single line
             let line = status.to_line(nf);

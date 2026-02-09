@@ -37,7 +37,9 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
         .replace("{existing_claude_md}", &existing_claude_md);
 
     // Determine model
-    let model = args.model.or_else(|| file_config.task.default_model.clone());
+    let model = args
+        .model
+        .or_else(|| file_config.task.default_model.clone());
 
     // Run Claude with streaming output
     run_once(RunOnceOptions {
@@ -108,9 +110,15 @@ fn create_boilerplate_if_missing(
     file_config: &FileConfig,
 ) -> Result<()> {
     let files = [
-        (&file_config.task.files.changenotes, templates::CHANGENOTES_TEMPLATE),
+        (
+            &file_config.task.files.changenotes,
+            templates::CHANGENOTES_TEMPLATE,
+        ),
         (&file_config.task.files.issues, templates::ISSUES_TEMPLATE),
-        (&file_config.task.files.questions, templates::QUESTIONS_TEMPLATE),
+        (
+            &file_config.task.files.questions,
+            templates::QUESTIONS_TEMPLATE,
+        ),
     ];
 
     for (filename, content) in &files {

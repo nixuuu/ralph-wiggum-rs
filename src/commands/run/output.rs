@@ -215,10 +215,7 @@ impl OutputFormatter {
         if self.iteration_durations.is_empty() {
             return None;
         }
-        Some(
-            self.iteration_durations.iter().sum::<f64>()
-                / self.iteration_durations.len() as f64,
-        )
+        Some(self.iteration_durations.iter().sum::<f64>() / self.iteration_durations.len() as f64)
     }
 
     /// Get current status data for the status bar
@@ -288,11 +285,7 @@ impl OutputFormatter {
             rate
         )];
         if let Some(avg) = self.avg_iteration_secs() {
-            lines.push(format!(
-                "  {}   {:.0}s",
-                "Avg iter:".dark_grey(),
-                avg
-            ));
+            lines.push(format!("  {}   {:.0}s", "Avg iter:".dark_grey(), avg));
         }
         lines
     }

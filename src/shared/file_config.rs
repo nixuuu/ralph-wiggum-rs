@@ -400,15 +400,39 @@ issues = "ISSUES.md"
 questions = "QS.md"
 "#;
         let config: FileConfig = toml::from_str(toml_content).unwrap();
-        assert_eq!(config.task.progress_file, std::path::PathBuf::from("PROG.md"));
-        assert_eq!(config.task.system_prompt_file, std::path::PathBuf::from("SP.md"));
-        assert_eq!(config.task.current_task_file, std::path::PathBuf::from("CT.md"));
-        assert_eq!(config.task.output_dir, Some(std::path::PathBuf::from("output")));
-        assert_eq!(config.task.default_model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(
+            config.task.progress_file,
+            std::path::PathBuf::from("PROG.md")
+        );
+        assert_eq!(
+            config.task.system_prompt_file,
+            std::path::PathBuf::from("SP.md")
+        );
+        assert_eq!(
+            config.task.current_task_file,
+            std::path::PathBuf::from("CT.md")
+        );
+        assert_eq!(
+            config.task.output_dir,
+            Some(std::path::PathBuf::from("output"))
+        );
+        assert_eq!(
+            config.task.default_model.as_deref(),
+            Some("claude-opus-4-6")
+        );
         assert!(config.task.auto_continue);
         assert!(!config.task.adaptive_iterations);
-        assert_eq!(config.task.files.changenotes, std::path::PathBuf::from("CHANGES.md"));
-        assert_eq!(config.task.files.issues, std::path::PathBuf::from("ISSUES.md"));
-        assert_eq!(config.task.files.questions, std::path::PathBuf::from("QS.md"));
+        assert_eq!(
+            config.task.files.changenotes,
+            std::path::PathBuf::from("CHANGES.md")
+        );
+        assert_eq!(
+            config.task.files.issues,
+            std::path::PathBuf::from("ISSUES.md")
+        );
+        assert_eq!(
+            config.task.files.questions,
+            std::path::PathBuf::from("QS.md")
+        );
     }
 }

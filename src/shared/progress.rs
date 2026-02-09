@@ -137,12 +137,7 @@ pub fn current_task(summary: &ProgressSummary) -> Option<&ProgressTask> {
         .tasks
         .iter()
         .find(|t| t.status == TaskStatus::InProgress)
-        .or_else(|| {
-            summary
-                .tasks
-                .iter()
-                .find(|t| t.status == TaskStatus::Todo)
-        })
+        .or_else(|| summary.tasks.iter().find(|t| t.status == TaskStatus::Todo))
 }
 
 /// Load and parse PROGRESS.md from a file path.

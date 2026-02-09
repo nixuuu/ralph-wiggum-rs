@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use crate::shared::error::{RalphError, Result};
-use crate::shared::file_config::FileConfig;
 use super::args::RunArgs;
 use super::state::StateManager;
+use crate::shared::error::{RalphError, Result};
+use crate::shared::file_config::FileConfig;
 
 #[derive(Debug, Clone)]
 pub struct Config {

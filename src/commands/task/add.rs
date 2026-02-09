@@ -27,7 +27,9 @@ pub async fn execute(args: AddArgs, file_config: &FileConfig) -> Result<()> {
     let prompt = templates::ADD_PROMPT.replace("{requirements}", &input);
 
     // Determine model
-    let model = args.model.or_else(|| file_config.task.default_model.clone());
+    let model = args
+        .model
+        .or_else(|| file_config.task.default_model.clone());
 
     // Run Claude with streaming output
     run_once(RunOnceOptions {

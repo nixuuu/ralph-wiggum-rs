@@ -58,11 +58,7 @@ pub fn execute(file_config: &FileConfig) -> Result<()> {
         let bar_width = 40;
         let filled = (ratio * bar_width as f64).round() as usize;
         let empty = bar_width - filled;
-        let bar = format!(
-            "{}{}",
-            "█".repeat(filled),
-            "░".repeat(empty),
-        );
+        let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty),);
 
         println!();
         println!(

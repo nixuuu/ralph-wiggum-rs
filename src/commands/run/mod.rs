@@ -26,9 +26,7 @@ use runner::ClaudeRunner;
 use state::StateManager;
 use ui::StatusTerminal;
 
-fn build_task_progress(
-    summary: &crate::shared::progress::ProgressSummary,
-) -> output::TaskProgress {
+fn build_task_progress(summary: &crate::shared::progress::ProgressSummary) -> output::TaskProgress {
     let current = crate::shared::progress::current_task(summary);
     output::TaskProgress {
         total: summary.total(),
@@ -77,12 +75,13 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     // Pre-load task progress so progress bar is visible from first iteration
     if let Some(ref progress_file) = config.progress_file
-        && let Ok(summary) = crate::shared::progress::load_progress(progress_file) {
-            let tp = build_task_progress(&summary);
-            let mut fmt = formatter.lock().unwrap();
-            fmt.set_initial_done_count(summary.done);
-            fmt.set_task_progress(Some(tp));
-        }
+        && let Ok(summary) = crate::shared::progress::load_progress(progress_file)
+    {
+        let tp = build_task_progress(&summary);
+        let mut fmt = formatter.lock().unwrap();
+        fmt.set_initial_done_count(summary.done);
+        fmt.set_task_progress(Some(tp));
+    }
 
     // Initialize status terminal (enables raw mode)
     // Use 3-line height when progress_file is set (task continue mode)
@@ -289,21 +288,22 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
         // Adaptive iterations: re-read PROGRESS.md and adjust min/max + task progress
         if let Some(ref progress_file) = config.progress_file
-            && let Ok(summary) = crate::shared::progress::load_progress(progress_file) {
-                let remaining = summary.remaining() as u32;
-                let new_min = state_manager.iteration() + remaining;
-                state_manager.set_min_iterations(new_min);
-                state_manager.set_max_iterations(new_min + 5);
+            && let Ok(summary) = crate::shared::progress::load_progress(progress_file)
+        {
+            let remaining = summary.remaining() as u32;
+            let new_min = state_manager.iteration() + remaining;
+            state_manager.set_min_iterations(new_min);
+            state_manager.set_max_iterations(new_min + 5);
 
-                let tp = build_task_progress(&summary);
-                {
-                    let mut fmt = formatter.lock().unwrap();
-                    fmt.set_min_iterations(state_manager.min_iterations());
-                    fmt.set_max_iterations(new_min + 5);
-                    fmt.set_task_progress(Some(tp));
-                    fmt.record_iteration_end();
-                }
+            let tp = build_task_progress(&summary);
+            {
+                let mut fmt = formatter.lock().unwrap();
+                fmt.set_min_iterations(state_manager.min_iterations());
+                fmt.set_max_iterations(new_min + 5);
+                fmt.set_task_progress(Some(tp));
+                fmt.record_iteration_end();
             }
+        }
 
         // Update status bar after iteration completes
         {
