@@ -65,6 +65,7 @@ pub struct OutputFormatter {
     model_costs: HashMap<String, f64>,
     last_block_type: BlockType,
     use_nerd_font: bool,
+    task_progress: Option<TaskProgress>,
 }
 
 impl OutputFormatter {
@@ -84,6 +85,7 @@ impl OutputFormatter {
             model_costs: HashMap::new(),
             last_block_type: BlockType::None,
             use_nerd_font,
+            task_progress: None,
         }
     }
 
@@ -147,6 +149,10 @@ impl OutputFormatter {
         self.finalized_output_tokens + self.pending_output_tokens
     }
 
+    pub fn set_task_progress(&mut self, progress: Option<TaskProgress>) {
+        self.task_progress = progress;
+    }
+
     /// Get current status data for the status bar
     pub fn get_status(&self) -> StatusData {
         StatusData {
@@ -160,6 +166,7 @@ impl OutputFormatter {
             cost_usd: self.total_cost_usd,
             update_info: None,
             update_state: Default::default(),
+            task_progress: self.task_progress.clone(),
         }
     }
 
@@ -378,6 +385,72 @@ impl OutputFormatter {
         ));
         lines.push(format!("{}", "━".repeat(60).dark_grey()));
         lines
+    }
+}
+
+/// Task progress data for enhanced status bar
+#[derive(Debug, Clone, Default)]
+pub struct TaskProgress {
+    pub total: usize,
+    pub done: usize,
+    pub in_progress: usize,
+    pub blocked: usize,
+    pub todo: usize,
+    pub current_task_id: Option<String>,
+    pub current_task_name: Option<String>,
+    pub current_task_component: Option<String>,
+}
+
+impl TaskProgress {
+    /// Build a ratatui Line for the status bar (line 2 of 3)
+    pub fn to_status_line(&self) -> ratatui::text::Line<'static> {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::Span;
+
+        let mut spans = Vec::new();
+
+        if let (Some(id), Some(component)) = (&self.current_task_id, &self.current_task_component) {
+            spans.push(Span::styled("▶ ", Style::default().fg(Color::Cyan)));
+            spans.push(Span::styled(
+                id.clone(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" ["));
+            spans.push(Span::styled(
+                component.clone(),
+                Style::default().fg(Color::Yellow),
+            ));
+            spans.push(Span::raw("] "));
+        }
+
+        if let Some(name) = &self.current_task_name {
+            spans.push(Span::raw(name.clone()));
+        }
+
+        spans.push(Span::raw(" │ "));
+        spans.push(Span::styled(
+            format!("✓{}", self.done),
+            Style::default().fg(Color::Green),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("~{}", self.in_progress),
+            Style::default().fg(Color::Cyan),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("!{}", self.blocked),
+            Style::default().fg(Color::Red),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("○{}", self.todo),
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        ratatui::text::Line::from(spans)
     }
 }
 
@@ -666,7 +739,7 @@ mod tests {
         let s = "| popover, calendar, radio-group, sheet | ✅ | ⚠️ | 🔍 Do dodania |";
         // Should not panic even with small max_len
         let result = truncate_string(s, 60);
-        assert!(result.len() > 0);
+        assert!(!result.is_empty());
 
         // Test truncation at various points
         for max_len in 1..=s.chars().count() {

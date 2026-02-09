@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod shared;
+mod templates;
 mod updater;
 
 use clap::Parser;
@@ -17,6 +18,14 @@ async fn main() {
             return;
         }
         Some(Commands::Run(args)) => commands::run::execute(args).await,
+        Some(Commands::Task { command }) => {
+            match shared::file_config::FileConfig::load_from_path(&std::path::PathBuf::from(
+                ".ralph.toml",
+            )) {
+                Ok(file_config) => commands::task::execute(command, &file_config).await,
+                Err(e) => Err(e),
+            }
+        }
         None => commands::run::execute(cli.run_args).await,
     };
 

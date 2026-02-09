@@ -19,6 +19,8 @@ pub struct Config {
     pub system_prompt_template: Option<String>,
     /// Use Nerd Font icons (false = ASCII fallback)
     pub use_nerd_font: bool,
+    /// Path to PROGRESS.md for adaptive iterations (set by task continue)
+    pub progress_file: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -73,6 +75,7 @@ impl Config {
                 continue_session: args.continue_session,
                 system_prompt_template: file_config.prompt.system.clone(),
                 use_nerd_font,
+                progress_file: args.progress_file,
             });
         }
 
@@ -96,6 +99,7 @@ impl Config {
             continue_session: args.continue_session,
             system_prompt_template: file_config.prompt.system.clone(),
             use_nerd_font,
+            progress_file: args.progress_file,
         })
     }
 }

@@ -39,4 +39,8 @@ pub struct RunArgs {
     /// Disable Nerd Font icons (use ASCII fallback)
     #[arg(long)]
     pub no_nf: bool,
+
+    /// Path to PROGRESS.md for adaptive iterations (set programmatically by task continue)
+    #[arg(skip)]
+    pub progress_file: Option<std::path::PathBuf>,
 }

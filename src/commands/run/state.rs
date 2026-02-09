@@ -124,6 +124,14 @@ impl StateManager {
         self.state.iteration >= self.state.min_iterations
     }
 
+    pub fn set_min_iterations(&mut self, n: u32) {
+        self.state.min_iterations = n.max(self.state.iteration);
+    }
+
+    pub fn set_max_iterations(&mut self, n: u32) {
+        self.state.max_iterations = n;
+    }
+
     pub fn min_iterations(&self) -> u32 {
         self.state.min_iterations
     }

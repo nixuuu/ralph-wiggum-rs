@@ -4,7 +4,7 @@ mod events;
 mod output;
 mod prompt;
 mod runner;
-mod state;
+pub(crate) mod state;
 mod ui;
 
 pub use args::RunArgs;
@@ -61,10 +61,21 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     }
 
     // Initialize status terminal (enables raw mode)
-    let status_terminal = Arc::new(Mutex::new(StatusTerminal::new(config.use_nerd_font)?));
+    // Use 3-line height when progress_file is set (task continue mode)
+    let status_terminal = if config.progress_file.is_some() {
+        Arc::new(Mutex::new(StatusTerminal::with_height(
+            config.use_nerd_font,
+            3,
+        )?))
+    } else {
+        Arc::new(Mutex::new(StatusTerminal::new(config.use_nerd_font)?))
+    };
 
     // Resize flag for terminal resize detection
     let resize_flag = Arc::new(AtomicBool::new(false));
+
+    // Refresh flag for manual PROGRESS.md re-read (r key)
+    let refresh_flag = Arc::new(AtomicBool::new(false));
 
     // Spawn dedicated OS thread for keyboard input (after raw mode is enabled)
     let input_thread = InputThread::spawn(
@@ -72,6 +83,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         resize_flag.clone(),
         update_state.clone(),
         update_trigger.clone(),
+        refresh_flag.clone(),
     );
 
     // Save initial state
@@ -141,7 +153,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             config.system_prompt_template.as_deref(),
             state_manager.iteration(),
             &config.completion_promise,
-            config.min_iterations,
+            state_manager.min_iterations(),
             config.max_iterations,
         );
 
@@ -250,6 +262,34 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             }
             Err(e) => return Err(e),
         };
+
+        // Adaptive iterations: re-read PROGRESS.md and adjust min/max + task progress
+        if let Some(ref progress_file) = config.progress_file
+            && let Ok(summary) = crate::shared::progress::load_progress(progress_file) {
+                let remaining = summary.remaining() as u32;
+                let new_min = state_manager.iteration() + remaining;
+                state_manager.set_min_iterations(new_min);
+                state_manager.set_max_iterations(new_min + 5);
+
+                let current = crate::shared::progress::current_task(&summary);
+                let tp = output::TaskProgress {
+                    total: summary.total(),
+                    done: summary.done,
+                    in_progress: summary.in_progress,
+                    blocked: summary.blocked,
+                    todo: summary.todo,
+                    current_task_id: current.map(|t| t.id.clone()),
+                    current_task_name: current.map(|t| t.name.clone()),
+                    current_task_component: current.map(|t| t.component.clone()),
+                };
+
+                {
+                    let mut fmt = formatter.lock().unwrap();
+                    fmt.set_min_iterations(state_manager.min_iterations());
+                    fmt.set_max_iterations(new_min + 5);
+                    fmt.set_task_progress(Some(tp));
+                }
+            }
 
         // Update status bar after iteration completes
         {

@@ -7,14 +7,17 @@ use ratatui::{
     backend::CrosstermBackend,
     buffer::Buffer,
     layout::Rect,
+    layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Gauge, Paragraph, Wrap},
 };
 
 use crate::shared::error::Result;
 use crate::shared::icons;
 use crate::updater::version_checker::{UpdateInfo, UpdateState};
+
+use super::output::TaskProgress;
 
 /// Data for the status bar display
 #[derive(Debug, Clone, Default)]
@@ -30,6 +33,7 @@ pub struct StatusData {
     pub cost_usd: f64,
     pub update_info: Option<UpdateInfo>,
     pub update_state: UpdateState,
+    pub task_progress: Option<TaskProgress>,
 }
 
 impl StatusData {
@@ -139,11 +143,17 @@ pub struct StatusTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     enabled: bool,
     use_nerd_font: bool,
+    height: u16,
 }
 
 impl StatusTerminal {
     /// Create a new status terminal with inline viewport (1 line)
     pub fn new(use_nerd_font: bool) -> Result<Self> {
+        Self::with_height(use_nerd_font, 1)
+    }
+
+    /// Create a status terminal with custom viewport height
+    pub fn with_height(use_nerd_font: bool, height: u16) -> Result<Self> {
         // Check if we're in a TTY
         let enabled = atty::is(atty::Stream::Stdout);
 
@@ -160,6 +170,7 @@ impl StatusTerminal {
                 terminal,
                 enabled,
                 use_nerd_font,
+                height: 0,
             });
         }
 
@@ -169,7 +180,7 @@ impl StatusTerminal {
         let terminal = Terminal::with_options(
             backend,
             ratatui::TerminalOptions {
-                viewport: Viewport::Inline(1),
+                viewport: Viewport::Inline(height),
             },
         )?;
 
@@ -177,6 +188,7 @@ impl StatusTerminal {
             terminal,
             enabled,
             use_nerd_font,
+            height,
         })
     }
 
@@ -187,8 +199,48 @@ impl StatusTerminal {
         }
 
         let nf = self.use_nerd_font;
+        let height = self.height;
         self.terminal.draw(|frame| {
             let area = frame.area();
+
+            if height >= 3
+                && let Some(ref tp) = status.task_progress {
+                    // 3-line layout: metrics | current task | gauge
+                    let chunks = Layout::vertical([
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                    ])
+                    .split(area);
+
+                    // Line 1: existing status metrics
+                    let line1 = status.to_line(nf);
+                    let p1 = Paragraph::new(line1);
+                    frame.render_widget(p1, chunks[0]);
+
+                    // Line 2: current task info
+                    let task_line = tp.to_status_line();
+                    let p2 = Paragraph::new(task_line);
+                    frame.render_widget(p2, chunks[1]);
+
+                    // Line 3: gauge progress bar
+                    let ratio = if tp.total > 0 {
+                        tp.done as f64 / tp.total as f64
+                    } else {
+                        0.0
+                    };
+                    let label = format!("{}/{} ({}%)", tp.done, tp.total, (ratio * 100.0).round() as u32);
+                    let gauge = Gauge::default()
+                        .ratio(ratio)
+                        .label(label)
+                        .gauge_style(Style::default().fg(Color::Green));
+                    frame.render_widget(gauge, chunks[2]);
+
+                    strip_trailing_spaces(frame.buffer_mut());
+                    return;
+                }
+
+            // Default: single line
             let line = status.to_line(nf);
             let paragraph = Paragraph::new(line);
             frame.render_widget(paragraph, area);

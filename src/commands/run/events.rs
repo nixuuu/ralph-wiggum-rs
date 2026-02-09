@@ -24,6 +24,7 @@ impl InputThread {
         resize_flag: Arc<AtomicBool>,
         update_state: Arc<AtomicU8>,
         update_trigger: Arc<AtomicBool>,
+        refresh_flag: Arc<AtomicBool>,
     ) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
@@ -53,6 +54,17 @@ impl InputThread {
                                 if should_quit {
                                     shutdown.store(true, Ordering::SeqCst);
                                     break;
+                                }
+
+                                // r: trigger progress refresh
+                                if matches!(
+                                    key_event,
+                                    KeyEvent {
+                                        code: KeyCode::Char('r'),
+                                        ..
+                                    }
+                                ) {
+                                    refresh_flag.store(true, Ordering::SeqCst);
                                 }
 
                                 // Ctrl+U: trigger background update

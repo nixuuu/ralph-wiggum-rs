@@ -25,6 +25,12 @@ pub enum RalphError {
 
     #[error("Interrupted by user")]
     Interrupted,
+
+    #[error("Missing required file: {0}")]
+    MissingFile(String),
+
+    #[error("Task setup error: {0}")]
+    TaskSetup(String),
 }
 
 pub type Result<T> = std::result::Result<T, RalphError>;

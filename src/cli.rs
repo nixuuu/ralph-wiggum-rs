@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::commands::run::RunArgs;
+use crate::commands::task::TaskCommands;
 
 #[derive(Parser, Debug)]
 #[command(name = "ralph-wiggum")]
@@ -24,6 +25,12 @@ pub enum Commands {
 
     /// Update to the latest version
     Update,
+
+    /// Task management commands
+    Task {
+        #[command(subcommand)]
+        command: TaskCommands,
+    },
 }
 
 #[cfg(test)]
