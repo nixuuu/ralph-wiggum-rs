@@ -51,6 +51,7 @@ pub struct PromptConfig {
 
 /// Task management configuration
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct TaskConfig {
     #[serde(default = "default_progress_file")]
     pub progress_file: PathBuf,
