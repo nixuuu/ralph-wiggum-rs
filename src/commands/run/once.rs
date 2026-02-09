@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::signal;
 
-use crate::shared::error::{RalphError, Result};
+use crate::shared::error::Result;
 
 use super::events::InputThread;
 use super::output::OutputFormatter;
@@ -32,13 +32,9 @@ pub(crate) async fn run_once(options: RunOnceOptions) -> Result<()> {
         });
     }
 
-    // Initialize output formatter (single iteration)
+    // Initialize output formatter (iteration=0 signals one-shot mode to status bar)
     let formatter = Arc::new(Mutex::new(OutputFormatter::new(options.use_nerd_font)));
-    {
-        let mut fmt = formatter.lock().unwrap();
-        fmt.set_iteration(1);
-        fmt.start_iteration();
-    }
+    formatter.lock().unwrap().start_iteration();
 
     // Initialize status terminal (enables raw mode)
     let status_terminal = Arc::new(Mutex::new(StatusTerminal::new(options.use_nerd_font)?));
@@ -57,15 +53,6 @@ pub(crate) async fn run_once(options: RunOnceOptions) -> Result<()> {
         update_trigger.clone(),
         refresh_flag.clone(),
     );
-
-    // Print iteration header
-    {
-        let header_lines = formatter.lock().unwrap().format_iteration_header();
-        let status = formatter.lock().unwrap().get_status();
-        let mut term = status_terminal.lock().unwrap();
-        term.print_lines(&header_lines)?;
-        term.update(&status)?;
-    }
 
     // Create and run ClaudeRunner
     let runner = ClaudeRunner::oneshot(options.prompt, options.model, options.output_dir);
@@ -120,18 +107,8 @@ pub(crate) async fn run_once(options: RunOnceOptions) -> Result<()> {
     }
     input_thread.stop();
 
-    // Handle result
     match run_result {
         Ok(_) => Ok(()),
-        Err(RalphError::Interrupted) => {
-            let lines = formatter
-                .lock()
-                .unwrap()
-                .format_interrupted(1);
-            let mut term = status_terminal.lock().unwrap();
-            term.print_lines(&lines)?;
-            Err(RalphError::Interrupted)
-        }
         Err(e) => Err(e),
     }
 }

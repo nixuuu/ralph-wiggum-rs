@@ -66,8 +66,10 @@ impl StatusData {
         let cost_text = format!("${:.4}", self.cost_usd);
 
         let mut spans = self.version_spans();
-        spans.push(Span::raw(" │ "));
-        spans.push(Span::styled(iter_text, Style::default().fg(Color::Cyan)));
+        if self.iteration > 0 {
+            spans.push(Span::raw(" │ "));
+            spans.push(Span::styled(iter_text, Style::default().fg(Color::Cyan)));
+        }
         spans.push(Span::raw(" │ "));
         spans.push(Span::styled(
             format!("{} ", icons::status_clock(nerd_font)),
