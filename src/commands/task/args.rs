@@ -9,6 +9,8 @@ pub enum TaskCommands {
     Continue,
     /// Add new tasks
     Add(AddArgs),
+    /// Edit existing tasks in PROGRESS.md
+    Edit(EditArgs),
     /// Show task status dashboard
     Status,
 }
@@ -39,6 +41,21 @@ pub struct AddArgs {
     pub file: Option<PathBuf>,
 
     /// Requirements as text
+    #[arg(short, long)]
+    pub prompt: Option<String>,
+
+    /// Claude model to use
+    #[arg(short, long)]
+    pub model: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct EditArgs {
+    /// Path to file with edit instructions
+    #[arg(short, long)]
+    pub file: Option<PathBuf>,
+
+    /// Edit instructions as text
     #[arg(short, long)]
     pub prompt: Option<String>,
 
@@ -93,6 +110,26 @@ mod tests {
     fn test_status() {
         let cli = TestCli::parse_from(["test", "status"]);
         assert!(matches!(cli.command, super::TaskCommands::Status));
+    }
+
+    #[test]
+    fn test_edit_with_prompt() {
+        let cli = TestCli::parse_from(["test", "edit", "--prompt", "Remove task 2.3"]);
+        if let super::TaskCommands::Edit(args) = cli.command {
+            assert_eq!(args.prompt.as_deref(), Some("Remove task 2.3"));
+        } else {
+            panic!("Expected Edit command");
+        }
+    }
+
+    #[test]
+    fn test_edit_with_file() {
+        let cli = TestCli::parse_from(["test", "edit", "--file", "edits.md"]);
+        if let super::TaskCommands::Edit(args) = cli.command {
+            assert!(args.file.is_some());
+        } else {
+            panic!("Expected Edit command");
+        }
     }
 
     #[test]

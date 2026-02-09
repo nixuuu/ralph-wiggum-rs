@@ -180,6 +180,29 @@ echo "Add logging middleware" | ralph-wiggum task add
 
 If a state file exists (`.claude/ralph-loop.local.md`), iteration limits are automatically updated to account for the new tasks.
 
+#### `task edit` — Edit existing tasks
+
+Modifies existing tasks in `PROGRESS.md` — change descriptions, statuses, reorder, remove, split, or merge tasks.
+
+```bash
+# From a file
+ralph-wiggum task edit --file edit-instructions.md
+
+# From inline text
+ralph-wiggum task edit --prompt "Remove task 2.3 and split task 3.1 into frontend and backend parts"
+
+# From stdin
+echo "Mark all auth tasks as blocked" | ralph-wiggum task edit
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--file` | `-f` | Path to file with edit instructions |
+| `--prompt` | `-p` | Edit instructions as text |
+| `--model` | `-m` | Claude model to use |
+
+Shows a before/after diff of task counts and statuses after editing.
+
 #### `task status` — Show progress dashboard
 
 Displays a quick overview of project progress without running any tasks.
@@ -254,7 +277,10 @@ ralph-wiggum task status
 # 4. Add new requirements mid-project
 ralph-wiggum task add --prompt "Add logging and monitoring"
 
-# 5. Continue working on all tasks (including new ones)
+# 5. Edit existing tasks
+ralph-wiggum task edit --prompt "Split task 3.1 into frontend and backend"
+
+# 6. Continue working on all tasks (including new ones)
 ralph-wiggum task continue
 ```
 
