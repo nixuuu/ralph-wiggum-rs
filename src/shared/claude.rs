@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 
+use tokio::signal;
+
 use crate::shared::error::{RalphError, Result};
 
 pub struct ClaudeOnceOptions {
@@ -11,6 +13,7 @@ pub struct ClaudeOnceOptions {
 
 /// Run Claude CLI once (non-streaming, inherit stdout/stderr).
 /// Used by `task prd` and `task add` for one-shot Claude invocations.
+/// Handles Ctrl+C gracefully — kills child process and returns `Interrupted`.
 pub async fn run_claude_once(options: ClaudeOnceOptions) -> Result<()> {
     let mut cmd = tokio::process::Command::new("claude");
     cmd.arg("-p");
@@ -29,10 +32,20 @@ pub async fn run_claude_once(options: ClaudeOnceOptions) -> Result<()> {
         cmd.current_dir(dir);
     }
 
-    let status = cmd
-        .status()
-        .await
+    let mut child = cmd
+        .spawn()
         .map_err(|e| RalphError::ClaudeProcess(format!("Failed to run claude: {}", e)))?;
+
+    // Race between child completion and Ctrl+C
+    let status = tokio::select! {
+        result = child.wait() => {
+            result.map_err(|e| RalphError::ClaudeProcess(format!("Failed to wait for claude: {}", e)))?
+        }
+        _ = signal::ctrl_c() => {
+            child.kill().await.ok();
+            return Err(RalphError::Interrupted);
+        }
+    };
 
     if !status.success() {
         return Err(RalphError::ClaudeProcess(format!(
