@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::signal;
 
@@ -15,6 +18,16 @@ pub struct ClaudeOnceOptions {
 /// Used by `task prd` and `task add` for one-shot Claude invocations.
 /// Handles Ctrl+C gracefully — kills child process and returns `Interrupted`.
 pub async fn run_claude_once(options: ClaudeOnceOptions) -> Result<()> {
+    // Install Ctrl+C handler before spawning child (same pattern as run loop)
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let _ = signal::ctrl_c().await;
+            shutdown.store(true, Ordering::SeqCst);
+        });
+    }
+
     let mut cmd = tokio::process::Command::new("claude");
     cmd.arg("-p");
     cmd.arg("--dangerously-skip-permissions");
@@ -32,18 +45,30 @@ pub async fn run_claude_once(options: ClaudeOnceOptions) -> Result<()> {
         cmd.current_dir(dir);
     }
 
+    // Put child in its own process group so terminal Ctrl+C (SIGINT)
+    // goes only to ralph-wiggum, not to claude. Without this, claude's
+    // Node.js SIGINT handler absorbs the signal and ralph-wiggum never sees it.
+    #[cfg(unix)]
+    cmd.process_group(0);
+
     let mut child = cmd
         .spawn()
         .map_err(|e| RalphError::ClaudeProcess(format!("Failed to run claude: {}", e)))?;
 
-    // Race between child completion and Ctrl+C
-    let status = tokio::select! {
-        result = child.wait() => {
-            result.map_err(|e| RalphError::ClaudeProcess(format!("Failed to wait for claude: {}", e)))?
-        }
-        _ = signal::ctrl_c() => {
-            child.kill().await.ok();
-            return Err(RalphError::Interrupted);
+    // Poll child with periodic shutdown checks
+    let status = loop {
+        tokio::select! {
+            result = child.wait() => {
+                break result.map_err(|e| RalphError::ClaudeProcess(
+                    format!("Failed to wait for claude: {}", e)
+                ))?;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if shutdown.load(Ordering::SeqCst) {
+                    child.kill().await.ok();
+                    return Err(RalphError::Interrupted);
+                }
+            }
         }
     };
 
