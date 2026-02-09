@@ -2,7 +2,7 @@ use crossterm::style::Stylize;
 
 use super::args::PrdArgs;
 use super::input::resolve_input;
-use crate::shared::claude::{ClaudeOnceOptions, run_claude_once};
+use crate::commands::run::{RunOnceOptions, run_once};
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
 use crate::shared::progress;
@@ -39,20 +39,14 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
     // Determine model
     let model = args.model.or_else(|| file_config.task.default_model.clone());
 
-    println!(
-        "\n{} Generating project files from PRD...\n",
-        "▶".cyan()
-    );
-
-    // Run Claude
-    run_claude_once(ClaudeOnceOptions {
+    // Run Claude with streaming output
+    run_once(RunOnceOptions {
         prompt,
         model,
         output_dir: Some(output_dir.clone()),
+        use_nerd_font: file_config.ui.nerd_font,
     })
     .await?;
-
-    println!();
 
     // Verify required outputs exist
     let progress_path = output_dir.join(&file_config.task.progress_file);

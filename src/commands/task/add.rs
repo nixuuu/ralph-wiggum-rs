@@ -2,7 +2,7 @@ use crossterm::style::Stylize;
 
 use super::args::AddArgs;
 use super::input::resolve_input;
-use crate::shared::claude::{ClaudeOnceOptions, run_claude_once};
+use crate::commands::run::{RunOnceOptions, run_once};
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
 use crate::shared::progress;
@@ -29,17 +29,14 @@ pub async fn execute(args: AddArgs, file_config: &FileConfig) -> Result<()> {
     // Determine model
     let model = args.model.or_else(|| file_config.task.default_model.clone());
 
-    println!("\n{} Adding tasks...\n", "▶".cyan());
-
-    // Run Claude with write access
-    run_claude_once(ClaudeOnceOptions {
+    // Run Claude with streaming output
+    run_once(RunOnceOptions {
         prompt,
         model,
         output_dir: None,
+        use_nerd_font: file_config.ui.nerd_font,
     })
     .await?;
-
-    println!();
 
     // Re-parse and show diff
     let after = progress::load_progress(progress_path)?;

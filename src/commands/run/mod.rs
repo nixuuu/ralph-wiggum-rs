@@ -1,6 +1,7 @@
 mod args;
 mod config;
 mod events;
+mod once;
 mod output;
 mod prompt;
 mod runner;
@@ -8,6 +9,7 @@ pub(crate) mod state;
 mod ui;
 
 pub use args::RunArgs;
+pub(crate) use once::{RunOnceOptions, run_once};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

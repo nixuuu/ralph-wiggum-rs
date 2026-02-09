@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,6 +122,8 @@ pub struct ClaudeRunner {
     user_prompt: String,
     system_prompt: Option<String>,
     continue_conversation: bool,
+    model: Option<String>,
+    output_dir: Option<PathBuf>,
 }
 
 impl ClaudeRunner {
@@ -130,6 +133,8 @@ impl ClaudeRunner {
             user_prompt,
             system_prompt: Some(system_prompt),
             continue_conversation: false,
+            model: None,
+            output_dir: None,
         }
     }
 
@@ -139,6 +144,19 @@ impl ClaudeRunner {
             user_prompt,
             system_prompt: Some(system_prompt),
             continue_conversation: true,
+            model: None,
+            output_dir: None,
+        }
+    }
+
+    /// Create runner for a one-shot invocation (no system prompt, optional model/output_dir)
+    pub fn oneshot(prompt: String, model: Option<String>, output_dir: Option<PathBuf>) -> Self {
+        Self {
+            user_prompt: prompt,
+            system_prompt: None,
+            continue_conversation: false,
+            model,
+            output_dir,
         }
     }
 
@@ -171,6 +189,10 @@ impl ClaudeRunner {
         cmd.arg("--verbose");
         cmd.arg("--dangerously-skip-permissions");
 
+        if let Some(ref model) = self.model {
+            cmd.arg("--model").arg(model);
+        }
+
         if self.continue_conversation {
             cmd.arg("--continue");
         }
@@ -188,6 +210,15 @@ impl ClaudeRunner {
         cmd.stderr(Stdio::inherit());
         // Kill child process when dropped (e.g., on Ctrl+C)
         cmd.kill_on_drop(true);
+
+        if let Some(ref dir) = self.output_dir {
+            cmd.current_dir(dir);
+        }
+
+        // Isolate child in its own process group so terminal SIGINT
+        // goes only to ralph-wiggum, not absorbed by claude's Node.js handler
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let mut child = cmd
             .spawn()
