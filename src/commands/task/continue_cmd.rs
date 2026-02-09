@@ -32,9 +32,7 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
     let min_iterations = remaining.max(1);
     let max_iterations = remaining + 5;
 
-    // Check if state file exists for resume
     let state_file = std::path::PathBuf::from(".claude/ralph-loop.local.md");
-    let resume = state_file.exists();
 
     // Print info
     if let Some(current) = progress::current_task(&summary) {
@@ -53,9 +51,6 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
         min_iterations,
         max_iterations
     );
-    if resume {
-        println!("  {} Resuming from state file", "↻".dark_grey());
-    }
     println!();
 
     // Build RunArgs programmatically
@@ -64,10 +59,10 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
         min_iterations,
         max_iterations,
         promise: "done".to_string(),
-        resume,
+        resume: false,
         state_file,
         config: std::path::PathBuf::from(".ralph.toml"),
-        continue_session: true,
+        continue_session: false,
         no_nf: false,
         progress_file: Some(progress_path.clone()),
     };

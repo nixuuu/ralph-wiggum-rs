@@ -235,7 +235,8 @@ impl StatusTerminal {
                     let gauge = Gauge::default()
                         .ratio(ratio)
                         .label(label)
-                        .gauge_style(Style::default().fg(Color::Green));
+                        .gauge_style(Style::default().fg(Color::Green).bg(Color::DarkGray))
+                        .style(Style::default().fg(Color::White));
                     frame.render_widget(gauge, chunks[2]);
 
                     strip_trailing_spaces(frame.buffer_mut());

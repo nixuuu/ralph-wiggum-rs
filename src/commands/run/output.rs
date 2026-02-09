@@ -259,8 +259,9 @@ impl OutputFormatter {
                             }
                             self.last_block_type = BlockType::Text;
 
-                            // Shorten absolute paths and render markdown
+                            // Shorten paths, style thinking blocks, render markdown
                             let text = shorten_path(text);
+                            let text = process_thinking_blocks(&text);
                             let rendered = markdown::render_markdown(&text);
                             for line in rendered.lines() {
                                 lines.push(line.to_string());
@@ -649,6 +650,47 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Convert `<thinking>...</thinking>` blocks to markdown blockquotes with italic.
+///
+/// Text outside thinking tags is passed through unchanged.
+/// Example: `<thinking>\nfoo\nbar\n</thinking>` → `> *foo*\n> *bar*`
+fn process_thinking_blocks(text: &str) -> String {
+    let open_tag = "<thinking>";
+    let close_tag = "</thinking>";
+
+    let mut result = String::with_capacity(text.len());
+    let mut search_from = 0;
+
+    while let Some(start) = text[search_from..].find(open_tag) {
+        let abs_start = search_from + start;
+        // Append text before the tag
+        result.push_str(&text[search_from..abs_start]);
+
+        let content_start = abs_start + open_tag.len();
+        if let Some(end) = text[content_start..].find(close_tag) {
+            let inner = text[content_start..content_start + end].trim_matches('\n');
+            // Convert each line to blockquote with italic
+            for line in inner.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    result.push_str("> \n");
+                } else {
+                    result.push_str(&format!("> *{}*\n", trimmed));
+                }
+            }
+            search_from = content_start + end + close_tag.len();
+        } else {
+            // No closing tag — output remainder as-is
+            result.push_str(&text[abs_start..]);
+            return result;
+        }
+    }
+
+    // Append remaining text after last tag
+    result.push_str(&text[search_from..]);
+    result
+}
+
 /// Check if text contains completion promise in <promise>...</promise> tags
 pub fn find_promise(text: &str, promise: &str) -> bool {
     let open_tag = "<promise>";
@@ -751,5 +793,38 @@ mod tests {
     fn test_truncate_string_newlines() {
         assert_eq!(truncate_string("hello\nworld", 20), "hello\\nworld");
         assert_eq!(truncate_string("a\rb\nc", 10), "ab\\nc");
+    }
+
+    #[test]
+    fn test_process_thinking_no_tags() {
+        assert_eq!(process_thinking_blocks("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_process_thinking_simple() {
+        let input = "<thinking>\nfoo\nbar\n</thinking>";
+        let result = process_thinking_blocks(input);
+        assert_eq!(result, "> *foo*\n> *bar*\n");
+    }
+
+    #[test]
+    fn test_process_thinking_with_surrounding_text() {
+        let input = "Before\n<thinking>\nthought\n</thinking>\nAfter";
+        let result = process_thinking_blocks(input);
+        assert_eq!(result, "Before\n> *thought*\n\nAfter");
+    }
+
+    #[test]
+    fn test_process_thinking_empty_lines() {
+        let input = "<thinking>\nfoo\n\nbar\n</thinking>";
+        let result = process_thinking_blocks(input);
+        assert_eq!(result, "> *foo*\n> \n> *bar*\n");
+    }
+
+    #[test]
+    fn test_process_thinking_no_closing_tag() {
+        let input = "text <thinking>unclosed";
+        let result = process_thinking_blocks(input);
+        assert_eq!(result, "text <thinking>unclosed");
     }
 }
