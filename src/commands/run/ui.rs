@@ -34,6 +34,10 @@ pub struct StatusData {
     pub update_info: Option<UpdateInfo>,
     pub update_state: UpdateState,
     pub task_progress: Option<TaskProgress>,
+    /// Formatted speed string (e.g., "1.2/h")
+    pub speed_text: Option<String>,
+    /// Formatted ETA string (e.g., "~23m")
+    pub eta_text: Option<String>,
 }
 
 impl StatusData {
@@ -220,8 +224,22 @@ impl StatusTerminal {
                     let p1 = Paragraph::new(line1);
                     frame.render_widget(p1, chunks[0]);
 
-                    // Line 2: current task info
-                    let task_line = tp.to_status_line();
+                    // Line 2: current task info + speed/ETA
+                    let mut task_line = tp.to_status_line();
+                    if let Some(ref speed) = status.speed_text {
+                        task_line.spans.push(Span::raw(" │ "));
+                        task_line.spans.push(Span::styled(
+                            format!("{} {}", icons::status_speed(nf), speed),
+                            Style::default().fg(Color::Yellow),
+                        ));
+                    }
+                    if let Some(ref eta) = status.eta_text {
+                        task_line.spans.push(Span::raw(" "));
+                        task_line.spans.push(Span::styled(
+                            format!("ETA {}", eta),
+                            Style::default().fg(Color::Cyan),
+                        ));
+                    }
                     let p2 = Paragraph::new(task_line);
                     frame.render_widget(p2, chunks[1]);
 
@@ -231,7 +249,11 @@ impl StatusTerminal {
                     } else {
                         0.0
                     };
-                    let label = format!("{}/{} ({}%)", tp.done, tp.total, (ratio * 100.0).round() as u32);
+                    let label = if let Some(ref eta) = status.eta_text {
+                        format!("{}/{} ({}%) | ETA {}", tp.done, tp.total, (ratio * 100.0).round() as u32, eta)
+                    } else {
+                        format!("{}/{} ({}%)", tp.done, tp.total, (ratio * 100.0).round() as u32)
+                    };
                     let gauge = Gauge::default()
                         .ratio(ratio)
                         .label(label)

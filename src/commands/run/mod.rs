@@ -79,7 +79,9 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     if let Some(ref progress_file) = config.progress_file
         && let Ok(summary) = crate::shared::progress::load_progress(progress_file) {
             let tp = build_task_progress(&summary);
-            formatter.lock().unwrap().set_task_progress(Some(tp));
+            let mut fmt = formatter.lock().unwrap();
+            fmt.set_initial_done_count(summary.done);
+            fmt.set_task_progress(Some(tp));
         }
 
     // Initialize status terminal (enables raw mode)
@@ -299,6 +301,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
                     fmt.set_min_iterations(state_manager.min_iterations());
                     fmt.set_max_iterations(new_min + 5);
                     fmt.set_task_progress(Some(tp));
+                    fmt.record_iteration_end();
                 }
             }
 

@@ -68,3 +68,12 @@ pub fn status_clock(nerd_font: bool) -> &'static str {
         "[t]"
     }
 }
+
+/// Speed/bolt icon for task throughput
+pub fn status_speed(nerd_font: bool) -> &'static str {
+    if nerd_font {
+        "\u{f0e7}" //  nf-fa-bolt
+    } else {
+        "^"
+    }
+}

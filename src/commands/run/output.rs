@@ -66,6 +66,10 @@ pub struct OutputFormatter {
     last_block_type: BlockType,
     use_nerd_font: bool,
     task_progress: Option<TaskProgress>,
+    /// Number of done tasks at session start (baseline for speed calculation)
+    initial_done_count: usize,
+    /// History of iteration durations in seconds
+    iteration_durations: Vec<f64>,
 }
 
 impl OutputFormatter {
@@ -86,6 +90,8 @@ impl OutputFormatter {
             last_block_type: BlockType::None,
             use_nerd_font,
             task_progress: None,
+            initial_done_count: 0,
+            iteration_durations: Vec::new(),
         }
     }
 
@@ -153,6 +159,68 @@ impl OutputFormatter {
         self.task_progress = progress;
     }
 
+    /// Set the baseline done count at session start
+    pub fn set_initial_done_count(&mut self, count: usize) {
+        self.initial_done_count = count;
+    }
+
+    /// Record iteration completion for speed tracking.
+    /// Must be called after set_task_progress.
+    pub fn record_iteration_end(&mut self) {
+        let duration = self.iteration_start_time.elapsed().as_secs_f64();
+        self.iteration_durations.push(duration);
+    }
+
+    /// Tasks completed during this session
+    fn tasks_completed_this_session(&self) -> usize {
+        let current_done = self.task_progress.as_ref().map_or(0, |tp| tp.done);
+        current_done.saturating_sub(self.initial_done_count)
+    }
+
+    /// Compute speed text (tasks/hour) or None if no tasks completed yet
+    fn compute_speed_text(&self) -> Option<String> {
+        let completed = self.tasks_completed_this_session();
+        if completed == 0 {
+            return None;
+        }
+        let elapsed_hours = self.start_time.elapsed().as_secs_f64() / 3600.0;
+        if elapsed_hours < 0.001 {
+            return None;
+        }
+        let rate = completed as f64 / elapsed_hours;
+        Some(format!("{:.1}/h", rate))
+    }
+
+    /// Compute ETA text or None if no tasks completed or nothing remaining
+    fn compute_eta_text(&self) -> Option<String> {
+        let completed = self.tasks_completed_this_session();
+        if completed == 0 {
+            return None;
+        }
+        let remaining = self
+            .task_progress
+            .as_ref()
+            .map_or(0, |tp| tp.todo + tp.in_progress);
+        if remaining == 0 {
+            return None;
+        }
+        let elapsed_secs = self.start_time.elapsed().as_secs_f64();
+        let secs_per_task = elapsed_secs / completed as f64;
+        let eta_secs = (remaining as f64 * secs_per_task) as u64;
+        Some(format_duration_short(eta_secs))
+    }
+
+    /// Average iteration duration in seconds, or None if no iterations recorded
+    fn avg_iteration_secs(&self) -> Option<f64> {
+        if self.iteration_durations.is_empty() {
+            return None;
+        }
+        Some(
+            self.iteration_durations.iter().sum::<f64>()
+                / self.iteration_durations.len() as f64,
+        )
+    }
+
     /// Get current status data for the status bar
     pub fn get_status(&self) -> StatusData {
         StatusData {
@@ -167,6 +235,8 @@ impl OutputFormatter {
             update_info: None,
             update_state: Default::default(),
             task_progress: self.task_progress.clone(),
+            speed_text: self.compute_speed_text(),
+            eta_text: self.compute_eta_text(),
         }
     }
 
@@ -198,6 +268,35 @@ impl OutputFormatter {
         }
     }
 
+    /// Format speed/throughput lines for stats display
+    fn format_speed_lines(&self) -> Vec<String> {
+        let completed = self.tasks_completed_this_session();
+        if completed == 0 {
+            return vec![];
+        }
+        let elapsed_h = self.start_time.elapsed().as_secs_f64() / 3600.0;
+        let rate = if elapsed_h > 0.001 {
+            format!("{:.1}/h", completed as f64 / elapsed_h)
+        } else {
+            "—".to_string()
+        };
+        let mut lines = vec![format!(
+            "  {}     {} {} {}",
+            "Speed:".dark_grey(),
+            completed.to_string().green(),
+            "tasks |".dark_grey(),
+            rate
+        )];
+        if let Some(avg) = self.avg_iteration_secs() {
+            lines.push(format!(
+                "  {}   {:.0}s",
+                "Avg iter:".dark_grey(),
+                avg
+            ));
+        }
+        lines
+    }
+
     /// Format cost lines with per-model breakdown for stats display
     fn format_cost_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
@@ -225,17 +324,23 @@ impl OutputFormatter {
     /// Format iteration header and return lines
     pub fn format_iteration_header(&self) -> Vec<String> {
         let elapsed = self.start_time.elapsed();
+        let mut header = format!(
+            "{} {} {} {} {:.1}s",
+            "▶".cyan(),
+            "Iteration".bold(),
+            self.iteration.to_string().cyan().bold(),
+            "│ Elapsed:".dark_grey(),
+            elapsed.as_secs_f64()
+        );
+
+        if let Some(avg) = self.avg_iteration_secs() {
+            header.push_str(&format!(" {} {:.0}s/iter", "│".dark_grey(), avg));
+        }
+
         vec![
             String::new(),
             format!("{}", "━".repeat(60).dark_grey()),
-            format!(
-                "{} {} {} {} {:.1}s",
-                "▶".cyan(),
-                "Iteration".bold(),
-                self.iteration.to_string().cyan().bold(),
-                "│ Elapsed:".dark_grey(),
-                elapsed.as_secs_f64()
-            ),
+            header,
             format!("{}", "━".repeat(60).dark_grey()),
         ]
     }
@@ -343,6 +448,7 @@ impl OutputFormatter {
             elapsed.as_secs_f64()
         ));
 
+        lines.extend(self.format_speed_lines());
         lines.extend(self.format_token_lines());
         lines.extend(self.format_cost_lines());
 
@@ -375,6 +481,7 @@ impl OutputFormatter {
             ),
         ];
 
+        lines.extend(self.format_speed_lines());
         lines.extend(self.format_token_lines());
         lines.extend(self.format_cost_lines());
 
@@ -458,6 +565,25 @@ impl TaskProgress {
 impl Default for OutputFormatter {
     fn default() -> Self {
         Self::new(true)
+    }
+}
+
+/// Format seconds into a short human-readable duration string.
+/// Examples: "~45s", "~3m", "~12m", "~1h05m", "~2h30m"
+fn format_duration_short(total_secs: u64) -> String {
+    if total_secs < 60 {
+        format!("~{}s", total_secs)
+    } else if total_secs < 3600 {
+        let mins = total_secs / 60;
+        format!("~{}m", mins)
+    } else {
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        if mins == 0 {
+            format!("~{}h", hours)
+        } else {
+            format!("~{}h{:02}m", hours, mins)
+        }
     }
 }
 
@@ -826,5 +952,28 @@ mod tests {
         let input = "text <thinking>unclosed";
         let result = process_thinking_blocks(input);
         assert_eq!(result, "text <thinking>unclosed");
+    }
+
+    #[test]
+    fn test_format_duration_short_seconds() {
+        assert_eq!(format_duration_short(0), "~0s");
+        assert_eq!(format_duration_short(45), "~45s");
+        assert_eq!(format_duration_short(59), "~59s");
+    }
+
+    #[test]
+    fn test_format_duration_short_minutes() {
+        assert_eq!(format_duration_short(60), "~1m");
+        assert_eq!(format_duration_short(90), "~1m");
+        assert_eq!(format_duration_short(720), "~12m");
+        assert_eq!(format_duration_short(3599), "~59m");
+    }
+
+    #[test]
+    fn test_format_duration_short_hours() {
+        assert_eq!(format_duration_short(3600), "~1h");
+        assert_eq!(format_duration_short(3900), "~1h05m");
+        assert_eq!(format_duration_short(9000), "~2h30m");
+        assert_eq!(format_duration_short(7200), "~2h");
     }
 }
