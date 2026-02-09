@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-use crate::config::Config;
-use crate::error::{RalphError, Result};
+use super::config::Config;
+use crate::shared::error::{RalphError, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopState {

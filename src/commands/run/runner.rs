@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::error::{RalphError, Result};
+use crate::shared::error::{RalphError, Result};
 
 /// Token usage information from claude
 #[derive(Debug, Deserialize, Default, Clone)]

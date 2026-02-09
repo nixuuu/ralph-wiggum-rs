@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use crate::claude::{ClaudeEvent, ContentBlock, ModelUsageEntry, Usage};
-use crate::icons;
-use crate::markdown;
-use crate::ui::StatusData;
+use super::runner::{ClaudeEvent, ContentBlock, ModelUsageEntry, Usage};
+use super::ui::StatusData;
+use crate::shared::icons;
+use crate::shared::markdown;
 
 /// Cached current working directory for path shortening
 static CWD: LazyLock<String> = LazyLock::new(|| {

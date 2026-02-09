@@ -1,56 +1,9 @@
-use clap::Parser;
 use std::path::PathBuf;
 
-use crate::error::{RalphError, Result};
-use crate::file_config::FileConfig;
-use crate::state::StateManager;
-
-#[derive(Parser, Debug)]
-#[command(name = "ralph-wiggum")]
-#[command(version)]
-#[command(about = "Run claude in a loop until completion promise is found")]
-pub struct CliArgs {
-    /// Prompt to send to claude
-    #[arg(short, long)]
-    pub prompt: Option<String>,
-
-    /// Minimum iterations before accepting promise (default: 1)
-    #[arg(short = 'm', long, default_value = "1")]
-    pub min_iterations: u32,
-
-    /// Maximum iterations (0 = unlimited)
-    #[arg(short = 'n', long, default_value = "0")]
-    pub max_iterations: u32,
-
-    /// Completion promise text to look for
-    #[arg(long, default_value = "done")]
-    pub promise: String,
-
-    /// Resume from state file
-    #[arg(short, long)]
-    pub resume: bool,
-
-    /// Path to state file
-    #[arg(long, default_value = ".claude/ralph-loop.local.md")]
-    pub state_file: PathBuf,
-
-    /// Path to config file (default: .ralph.toml)
-    #[arg(short, long, default_value = ".ralph.toml")]
-    pub config: PathBuf,
-
-    /// Continue conversation from previous iteration
-    /// (by default each iteration starts a fresh conversation)
-    #[arg(long)]
-    pub continue_session: bool,
-
-    /// Update to the latest version
-    #[arg(long)]
-    pub update: bool,
-
-    /// Disable Nerd Font icons (use ASCII fallback)
-    #[arg(long)]
-    pub no_nf: bool,
-}
+use crate::shared::error::{RalphError, Result};
+use crate::shared::file_config::FileConfig;
+use super::args::RunArgs;
+use super::state::StateManager;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -69,7 +22,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn build(args: CliArgs) -> Result<Self> {
+    pub fn build(args: RunArgs) -> Result<Self> {
         // Load file config (.ralph.toml)
         let file_config = FileConfig::load_from_path(&args.config)?;
 
@@ -144,44 +97,5 @@ impl Config {
             system_prompt_template: file_config.prompt.system.clone(),
             use_nerd_font,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn test_cli_args_continue_session_default() {
-        // Without --continue-session flag, it should be false (default: no continuation)
-        let args = CliArgs::parse_from(["ralph-wiggum", "--prompt", "test"]);
-        assert!(!args.continue_session);
-    }
-
-    #[test]
-    fn test_cli_args_continue_session_enabled() {
-        // With --continue-session flag, it should be true
-        let args = CliArgs::parse_from(["ralph-wiggum", "--prompt", "test", "--continue-session"]);
-        assert!(args.continue_session);
-    }
-
-    #[test]
-    fn test_cli_args_all_flags_together() {
-        // Test that --continue-session works with other flags
-        let args = CliArgs::parse_from([
-            "ralph-wiggum",
-            "--prompt",
-            "test prompt",
-            "--min-iterations",
-            "3",
-            "--max-iterations",
-            "10",
-            "--continue-session",
-        ]);
-        assert!(args.continue_session);
-        assert_eq!(args.min_iterations, 3);
-        assert_eq!(args.max_iterations, 10);
-        assert_eq!(args.prompt, Some("test prompt".to_string()));
     }
 }

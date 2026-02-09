@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::error::{RalphError, Result};
+use crate::shared::error::{RalphError, Result};
 
 /// Configuration loaded from .ralph.toml file
 #[derive(Debug, Default, Deserialize)]

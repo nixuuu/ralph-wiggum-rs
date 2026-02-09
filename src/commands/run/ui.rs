@@ -12,8 +12,8 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-use crate::error::Result;
-use crate::icons;
+use crate::shared::error::Result;
+use crate::shared::icons;
 use crate::updater::version_checker::{UpdateInfo, UpdateState};
 
 /// Data for the status bar display
