@@ -305,6 +305,12 @@ During execution, a status bar shows:
 - Token usage (input/output)
 - Cost estimate
 
+### Live Progress Refresh
+
+In `task continue` mode, the status bar displays task progress from `PROGRESS.md`. This data is refreshed:
+- **Automatically** every 15 seconds (only when the file has actually changed)
+- **Manually** by pressing `r` at any time
+
 ## Exit Codes
 
 | Code | Meaning |

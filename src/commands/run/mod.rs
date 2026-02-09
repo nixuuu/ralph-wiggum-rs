@@ -73,6 +73,10 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         fmt.set_max_iterations(config.max_iterations);
     }
 
+    // Track PROGRESS.md mtime for auto-refresh in idle callback
+    let mut last_progress_mtime: Option<std::time::SystemTime> = None;
+    let mut last_mtime_check = std::time::Instant::now();
+
     // Pre-load task progress so progress bar is visible from first iteration
     if let Some(ref progress_file) = config.progress_file
         && let Ok(summary) = crate::shared::progress::load_progress(progress_file)
@@ -81,6 +85,9 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         let mut fmt = formatter.lock().unwrap();
         fmt.set_initial_done_count(summary.done);
         fmt.set_task_progress(Some(tp));
+        if let Ok(meta) = std::fs::metadata(progress_file) {
+            last_progress_mtime = meta.modified().ok();
+        }
     }
 
     // Initialize status terminal (enables raw mode)
@@ -209,6 +216,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         let update_info_idle = update_info.clone();
         let update_state_idle = update_state.clone();
         let update_trigger_idle = update_trigger.clone();
+        let refresh_flag_idle = refresh_flag.clone();
+        let progress_file_idle = config.progress_file.clone();
 
         // Run claude with consolidated lock acquisitions in callback
         let run_result = runner
@@ -251,8 +260,41 @@ pub async fn execute(args: RunArgs) -> Result<()> {
                         });
                     }
 
-                    // Refresh status bar every idle tick (250ms)
-                    let mut status = formatter_idle.lock().unwrap().get_status();
+                    // Progress refresh: manual 'r' key OR periodic mtime check (15s)
+                    let reload_result = if let Some(ref progress_path) = progress_file_idle {
+                        let mut should_reload = refresh_flag_idle.swap(false, Ordering::SeqCst);
+
+                        if !should_reload {
+                            let now = std::time::Instant::now();
+                            if now.duration_since(last_mtime_check).as_secs() >= 15 {
+                                last_mtime_check = now;
+                                if let Ok(meta) = std::fs::metadata(progress_path)
+                                    && let Ok(mtime) = meta.modified()
+                                    && last_progress_mtime.as_ref() != Some(&mtime)
+                                {
+                                    last_progress_mtime = Some(mtime);
+                                    should_reload = true;
+                                }
+                            }
+                        }
+
+                        if should_reload {
+                            crate::shared::progress::load_progress(progress_path).ok()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Consolidated lock: set progress (if reloaded) + get status
+                    let mut status = {
+                        let mut fmt = formatter_idle.lock().unwrap();
+                        if let Some(summary) = reload_result {
+                            fmt.set_task_progress(Some(build_task_progress(&summary)));
+                        }
+                        fmt.get_status()
+                    };
                     status.update_info = update_info_idle.lock().unwrap().clone();
                     status.update_state =
                         UpdateState::from_u8(update_state_idle.load(Ordering::SeqCst));
