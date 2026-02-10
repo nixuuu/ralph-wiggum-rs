@@ -13,7 +13,7 @@ use crate::commands::task::orchestrate::output::MultiplexedOutput;
 use crate::commands::task::orchestrate::scheduler::TaskScheduler;
 use crate::commands::task::orchestrate::state::{Lockfile, OrchestrateState};
 use crate::commands::task::orchestrate::status::{
-    DashboardInputThread, OrchestratorStatus, WorkerState, WorkerStatus,
+    DashboardInputThread, OrchestratorStatus, ShutdownState, WorkerState, WorkerStatus,
 };
 use crate::commands::task::orchestrate::summary::{self, TaskSummaryEntry};
 use crate::commands::task::orchestrate::worker::{TaskResult, Worker};
@@ -246,6 +246,7 @@ impl Orchestrator {
         let resize_flag = Arc::new(AtomicBool::new(false));
         let focused_worker = Arc::new(AtomicU32::new(0));
         let scroll_delta = Arc::new(AtomicI32::new(0));
+        let render_notify = Arc::new(tokio::sync::Notify::new());
 
         // 10. Initialize TUI (fullscreen dashboard)
         let output_log_path = ralph_dir.join("orchestrate-output.log");
@@ -264,6 +265,7 @@ impl Orchestrator {
             focused_worker.clone(),
             worker_count,
             scroll_delta.clone(),
+            render_notify.clone(),
         );
 
         // 12. Run the main orchestration loop
@@ -283,6 +285,7 @@ impl Orchestrator {
                 resize_flag,
                 focused_worker,
                 scroll_delta,
+                render_notify,
                 lockfile,
                 &mut tui,
             )
@@ -313,6 +316,7 @@ impl Orchestrator {
         resize_flag: Arc<AtomicBool>,
         focused_worker: Arc<AtomicU32>,
         scroll_delta: Arc<AtomicI32>,
+        render_notify: Arc<tokio::sync::Notify>,
         mut lockfile: Lockfile,
         tui: &mut TuiContext,
     ) -> Result<()> {
@@ -322,6 +326,12 @@ impl Orchestrator {
         let mut last_heartbeat = Instant::now();
         let mut last_hot_reload = Instant::now();
         let started_at = Instant::now();
+
+        // SIGTERM handler — treat `kill <pid>` as force shutdown
+        #[cfg(unix)]
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ).ok();
 
         // Build task lookup for merge
         let task_lookup: HashMap<String, ProgressTask> = progress
@@ -356,6 +366,7 @@ impl Orchestrator {
                 workers: Vec::new(),
                 total_cost: tui.mux_output.total_cost(),
                 elapsed: started_at.elapsed(),
+                shutdown_state: ShutdownState::Running,
             };
             tui.dashboard.render(&orch_status)?;
         }
@@ -433,7 +444,7 @@ impl Orchestrator {
                     if resize_flag.swap(false, Ordering::SeqCst) {
                         tui.dashboard.handle_resize()?;
                     }
-                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta)?;
+                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta, &graceful_shutdown, &shutdown)?;
                 }
 
                 // Ctrl+C signal handling (backup — input thread handles q/Ctrl+C too)
@@ -464,7 +475,33 @@ impl Orchestrator {
                     }
                 }
 
-                // Periodic timer: heartbeat, hot reload, state save, dashboard refresh
+                // SIGTERM — immediate force shutdown (from `kill <pid>`)
+                _ = async {
+                    #[cfg(unix)]
+                    if let Some(ref mut s) = sigterm { s.recv().await; return; }
+                    // On non-unix, never resolves
+                    std::future::pending::<()>().await;
+                } => {
+                    let msg = MultiplexedOutput::format_orchestrator_line(
+                        "SIGTERM received — force shutdown"
+                    );
+                    tui.dashboard.push_log_line(&msg);
+                    shutdown.store(true, Ordering::Relaxed);
+                    for (_, handle) in worker_join_handles.drain() {
+                        handle.abort();
+                    }
+                    break;
+                }
+
+                // Immediate re-render on keypress (input thread notifies)
+                _ = render_notify.notified() => {
+                    if resize_flag.swap(false, Ordering::SeqCst) {
+                        tui.dashboard.handle_resize()?;
+                    }
+                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta, &graceful_shutdown, &shutdown)?;
+                }
+
+                // Periodic timer: heartbeat, hot reload, status refresh
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
                     // Check if input thread triggered shutdown
                     if shutdown.load(Ordering::SeqCst) {
@@ -514,7 +551,7 @@ impl Orchestrator {
                     if resize_flag.swap(false, Ordering::SeqCst) {
                         tui.dashboard.handle_resize()?;
                     }
-                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta)?;
+                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta, &graceful_shutdown, &shutdown)?;
                 }
             }
         }
@@ -534,6 +571,7 @@ impl Orchestrator {
     }
 
     /// Apply focus/scroll from input thread and render the dashboard.
+    #[allow(clippy::too_many_arguments)]
     fn render_dashboard(
         &self,
         tui: &mut TuiContext,
@@ -541,6 +579,8 @@ impl Orchestrator {
         started_at: Instant,
         focused_worker: &Arc<AtomicU32>,
         scroll_delta: &Arc<AtomicI32>,
+        graceful_shutdown: &Arc<AtomicBool>,
+        shutdown: &Arc<AtomicBool>,
     ) -> Result<()> {
         // Apply focus from input thread
         let focus = focused_worker.load(Ordering::Relaxed);
@@ -553,12 +593,22 @@ impl Orchestrator {
             tui.dashboard.apply_scroll(delta);
         }
 
+        // Determine shutdown state
+        let shutdown_state = if shutdown.load(Ordering::Relaxed) {
+            ShutdownState::Aborting
+        } else if graceful_shutdown.load(Ordering::Relaxed) {
+            ShutdownState::Draining
+        } else {
+            ShutdownState::Running
+        };
+
         // Build status snapshot and render
         let orch_status = OrchestratorStatus {
             scheduler: scheduler.status(),
-            workers: Vec::new(), // worker statuses now live inside dashboard panels
+            workers: Vec::new(),
             total_cost: tui.mux_output.total_cost(),
             elapsed: started_at.elapsed(),
+            shutdown_state,
         };
         tui.dashboard.render(&orch_status)
     }

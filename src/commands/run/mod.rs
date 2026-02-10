@@ -47,14 +47,28 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // Initialize state manager
     let mut state_manager = StateManager::new(&config);
 
-    // Setup signal handler for graceful shutdown
+    // Setup signal handlers for graceful shutdown (SIGINT + SIGTERM)
     let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
 
-    tokio::spawn(async move {
-        let _ = signal::ctrl_c().await;
-        shutdown_clone.store(true, Ordering::SeqCst);
-    });
+    {
+        let shutdown_ctrlc = shutdown.clone();
+        tokio::spawn(async move {
+            let _ = signal::ctrl_c().await;
+            shutdown_ctrlc.store(true, Ordering::SeqCst);
+        });
+    }
+
+    #[cfg(unix)]
+    {
+        let shutdown_term = shutdown.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                sigterm.recv().await;
+                shutdown_term.store(true, Ordering::SeqCst);
+            }
+        });
+    }
 
     // Initialize background version checker (non-blocking)
     let version_checker = crate::updater::VersionChecker::new();
