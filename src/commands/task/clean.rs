@@ -54,9 +54,7 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
         eprintln!("  State file: {}", state_path.display());
     }
     if has_logs {
-        let log_count = std::fs::read_dir(&log_dir)
-            .map(|d| d.count())
-            .unwrap_or(0);
+        let log_count = std::fs::read_dir(&log_dir).map(|d| d.count()).unwrap_or(0);
         eprintln!("  Log files: {} in {}", log_count, log_dir.display());
     }
     if has_lock {

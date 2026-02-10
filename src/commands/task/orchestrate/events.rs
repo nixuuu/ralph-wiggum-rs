@@ -336,7 +336,10 @@ mod tests {
         for kind in events {
             let event = WorkerEvent::new(kind);
             let json = event.to_jsonl().unwrap();
-            assert!(!json.contains('\n'), "Event JSON must be single line: {json}");
+            assert!(
+                !json.contains('\n'),
+                "Event JSON must be single line: {json}"
+            );
         }
     }
 

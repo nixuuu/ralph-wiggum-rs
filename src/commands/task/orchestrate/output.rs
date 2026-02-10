@@ -50,8 +50,7 @@ impl MultiplexedOutput {
 
     /// Assign a task to a worker (for prefix display).
     pub fn assign_worker(&mut self, worker_id: u32, task_id: &str) {
-        self.worker_tasks
-            .insert(worker_id, task_id.to_string());
+        self.worker_tasks.insert(worker_id, task_id.to_string());
     }
 
     /// Clear a worker's task assignment (when idle).

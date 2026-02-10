@@ -75,9 +75,7 @@ impl Lockfile {
         if path.exists() {
             if !Self::is_stale(path) {
                 let content = std::fs::read_to_string(path).unwrap_or_default();
-                return Err(RalphError::LockfileHeld(format!(
-                    "Lock held by: {content}"
-                )));
+                return Err(RalphError::LockfileHeld(format!("Lock held by: {content}")));
             }
             // Stale lock — remove it
             std::fs::remove_file(path).ok();
@@ -199,10 +197,7 @@ mod tests {
                 cost: 0.042,
             },
         );
-        state.dag.insert(
-            "T02".to_string(),
-            vec!["T01".to_string()],
-        );
+        state.dag.insert("T02".to_string(), vec!["T01".to_string()]);
 
         let dir = std::env::temp_dir().join("ralph-test-state");
         std::fs::create_dir_all(&dir).unwrap();

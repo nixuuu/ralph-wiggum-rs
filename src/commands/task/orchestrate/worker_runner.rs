@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc;
 
@@ -72,9 +72,7 @@ impl WorkerRunner {
                 |event| {
                     // Forward cost updates from Claude Result events
                     if let ClaudeEvent::Result {
-                        cost_usd,
-                        usage,
-                        ..
+                        cost_usd, usage, ..
                     } = event
                     {
                         let (input_tokens, output_tokens) = usage

@@ -54,9 +54,7 @@ pub async fn generate_deps(
         );
 
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let result = runner
-            .run(shutdown, |_| {}, || {})
-            .await;
+        let result = runner.run(shutdown, |_| {}, || {}).await;
 
         let output = match result {
             Ok(Some(text)) => text,
@@ -81,9 +79,7 @@ pub async fn generate_deps(
         return Ok(frontmatter);
     }
 
-    Err(RalphError::DagCycle(
-        last_cycle.unwrap_or_default(),
-    ))
+    Err(RalphError::DagCycle(last_cycle.unwrap_or_default()))
 }
 
 /// Generate a conflict resolution from Claude AI.
@@ -120,9 +116,7 @@ pub async fn resolve_conflict(
     );
 
     let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let result = runner
-        .run(shutdown, |_| {}, || {})
-        .await;
+    let result = runner.run(shutdown, |_| {}, || {}).await;
 
     match result {
         Ok(Some(text)) => Ok(text),
@@ -146,9 +140,7 @@ pub fn parse_deps_json(output: &str) -> Result<ProgressFrontmatter> {
         && let Some(deps_val) = parsed.get("deps")
     {
         let deps: HashMap<String, Vec<String>> = serde_json::from_value(deps_val.clone())
-            .map_err(|e| {
-                RalphError::Orchestrate(format!("Failed to parse deps JSON: {e}"))
-            })?;
+            .map_err(|e| RalphError::Orchestrate(format!("Failed to parse deps JSON: {e}")))?;
         return Ok(ProgressFrontmatter {
             deps,
             models: HashMap::new(),

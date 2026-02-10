@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::mpsc;
@@ -58,10 +58,7 @@ impl ResolvedConfig {
 
         let workers = cli.workers.unwrap_or(orch_cfg.workers);
         let max_retries = cli.max_retries.unwrap_or(orch_cfg.max_retries);
-        let model = cli
-            .model
-            .clone()
-            .or_else(|| orch_cfg.default_model.clone());
+        let model = cli.model.clone().or_else(|| orch_cfg.default_model.clone());
         let worktree_prefix = cli
             .worktree_prefix
             .clone()
@@ -164,10 +161,7 @@ impl Orchestrator {
         let progress = progress::parse_progress(&progress_content);
 
         // 2. Build and validate DAG
-        let frontmatter = progress
-            .frontmatter
-            .clone()
-            .unwrap_or_default();
+        let frontmatter = progress.frontmatter.clone().unwrap_or_default();
         let dag = TaskDag::from_frontmatter(&frontmatter);
 
         if let Some(cycle) = dag.detect_cycles() {
@@ -181,8 +175,7 @@ impl Orchestrator {
         let lockfile = Lockfile::acquire(&lock_path)?;
 
         // 4. Initialize scheduler
-        let mut scheduler =
-            TaskScheduler::new(dag, &progress, self.config.max_retries);
+        let mut scheduler = TaskScheduler::new(dag, &progress, self.config.max_retries);
 
         // 5. Initialize worktree manager
         let worktree_manager = WorktreeManager::new(
@@ -195,10 +188,7 @@ impl Orchestrator {
         let mut state = if self.config.resume && state_path.exists() {
             OrchestrateState::load(&state_path)?
         } else {
-            OrchestrateState::new(
-                self.config.workers,
-                frontmatter.deps.clone(),
-            )
+            OrchestrateState::new(self.config.workers, frontmatter.deps.clone())
         };
 
         // 7. Initialize event channel and logger
@@ -455,10 +445,7 @@ impl Orchestrator {
                 .create_worktree(worker_id, &task_id)
                 .await?;
 
-            eprintln!(
-                "[W{worker_id}] Assigned: {task_id} → {}",
-                worktree.branch
-            );
+            eprintln!("[W{worker_id}] Assigned: {task_id} → {}", worktree.branch);
 
             // Mark task as started in scheduler
             scheduler.mark_started(&task_id);
@@ -535,8 +522,7 @@ impl Orchestrator {
 
                 if *success && !self.config.no_merge {
                     // Attempt squash merge
-                    if let Some(WorkerSlot::Busy { worktree, .. }) =
-                        worker_slots.get(worker_id)
+                    if let Some(WorkerSlot::Busy { worktree, .. }) = worker_slots.get(worker_id)
                         && let Some(task) = task_lookup.get(task_id)
                     {
                         let merge_result =
@@ -544,9 +530,7 @@ impl Orchestrator {
 
                         match merge_result {
                             MergeResult::Success { commit_hash } => {
-                                eprintln!(
-                                    "[W{worker_id}] Merged: {task_id} → {commit_hash}"
-                                );
+                                eprintln!("[W{worker_id}] Merged: {task_id} → {commit_hash}");
                                 scheduler.mark_done(task_id);
 
                                 // Update state
@@ -561,19 +545,11 @@ impl Orchestrator {
                                 );
 
                                 // Cleanup worktree
-                                worktree_manager
-                                    .remove_worktree(&worktree.path)
-                                    .await
-                                    .ok();
-                                worktree_manager
-                                    .remove_branch(&worktree.branch)
-                                    .await
-                                    .ok();
+                                worktree_manager.remove_worktree(&worktree.path).await.ok();
+                                worktree_manager.remove_branch(&worktree.branch).await.ok();
                             }
                             MergeResult::Conflict { files } => {
-                                eprintln!(
-                                    "[W{worker_id}] Merge conflict in {task_id}: {files:?}"
-                                );
+                                eprintln!("[W{worker_id}] Merge conflict in {task_id}: {files:?}");
                                 // Abort merge and block the task for now
                                 merge::abort_merge(&self.project_root).await.ok();
                                 scheduler.mark_blocked(task_id);
@@ -589,9 +565,7 @@ impl Orchestrator {
                                 );
                             }
                             MergeResult::Failed { error } => {
-                                eprintln!(
-                                    "[W{worker_id}] Merge failed for {task_id}: {error}"
-                                );
+                                eprintln!("[W{worker_id}] Merge failed for {task_id}: {error}");
                                 scheduler.mark_blocked(task_id);
                             }
                         }
@@ -604,9 +578,7 @@ impl Orchestrator {
                     // Task failed
                     let requeued = scheduler.mark_failed(task_id);
                     if requeued {
-                        eprintln!(
-                            "[W{worker_id}] Task {task_id} failed, re-queued for retry"
-                        );
+                        eprintln!("[W{worker_id}] Task {task_id} failed, re-queued for retry");
                     } else {
                         eprintln!("[W{worker_id}] Task {task_id} blocked after max retries");
                     }

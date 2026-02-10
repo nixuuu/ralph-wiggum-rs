@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -263,11 +263,7 @@ impl Worker {
             .ok()?;
 
         let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if hash.is_empty() {
-            None
-        } else {
-            Some(hash)
-        }
+        if hash.is_empty() { None } else { Some(hash) }
     }
 
     async fn handle_failure(
@@ -328,13 +324,7 @@ mod tests {
     fn test_worker_creation() {
         let (tx, _rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let worker = Worker::new(
-            1,
-            tx,
-            shutdown,
-            "system prompt".to_string(),
-            3,
-        );
+        let worker = Worker::new(1, tx, shutdown, "system prompt".to_string(), 3);
         assert_eq!(worker.id, 1);
         assert_eq!(worker.max_retries, 3);
     }
@@ -343,13 +333,7 @@ mod tests {
     async fn test_worker_send_event() {
         let (tx, mut rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let worker = Worker::new(
-            2,
-            tx,
-            shutdown,
-            "system prompt".to_string(),
-            3,
-        );
+        let worker = Worker::new(2, tx, shutdown, "system prompt".to_string(), 3);
 
         worker
             .send_event(WorkerEventKind::TaskStarted {

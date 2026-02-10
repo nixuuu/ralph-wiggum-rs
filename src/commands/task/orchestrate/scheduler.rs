@@ -90,10 +90,7 @@ impl TaskScheduler {
     pub fn mark_failed(&mut self, task_id: &str) -> bool {
         self.in_progress.remove(task_id);
 
-        let retries = self
-            .failed_retries
-            .entry(task_id.to_string())
-            .or_insert(0);
+        let retries = self.failed_retries.entry(task_id.to_string()).or_insert(0);
         *retries += 1;
 
         if *retries >= self.max_retries {
@@ -109,9 +106,9 @@ impl TaskScheduler {
     /// Check if all tasks are either done or blocked.
     pub fn is_complete(&self) -> bool {
         let all_tasks = self.dag.tasks();
-        all_tasks.iter().all(|t| {
-            self.done.contains(t) || self.blocked.contains(t)
-        })
+        all_tasks
+            .iter()
+            .all(|t| self.done.contains(t) || self.blocked.contains(t))
     }
 
     /// Re-compute the ready queue from DAG state.
@@ -227,11 +224,7 @@ mod tests {
 
     #[test]
     fn test_scheduler_fifo_order() {
-        let dag = make_dag(vec![
-            ("T01", vec![]),
-            ("T02", vec![]),
-            ("T03", vec![]),
-        ]);
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec![]), ("T03", vec![])]);
         let progress = make_progress(vec![
             ("T01", "api", "First", TaskStatus::Todo),
             ("T02", "api", "Second", TaskStatus::Todo),
@@ -275,10 +268,7 @@ mod tests {
 
     #[test]
     fn test_scheduler_skip_done_tasks() {
-        let dag = make_dag(vec![
-            ("T01", vec![]),
-            ("T02", vec!["T01"]),
-        ]);
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec!["T01"])]);
         let progress = make_progress(vec![
             ("T01", "api", "First", TaskStatus::Done),
             ("T02", "api", "Second", TaskStatus::Todo),
@@ -291,10 +281,7 @@ mod tests {
 
     #[test]
     fn test_scheduler_blocked_propagation() {
-        let dag = make_dag(vec![
-            ("T01", vec![]),
-            ("T02", vec!["T01"]),
-        ]);
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec!["T01"])]);
         let progress = make_progress(vec![
             ("T01", "api", "First", TaskStatus::Todo),
             ("T02", "api", "Second", TaskStatus::Todo),
@@ -313,9 +300,7 @@ mod tests {
     #[test]
     fn test_scheduler_retry_to_blocked() {
         let dag = make_dag(vec![("T01", vec![])]);
-        let progress = make_progress(vec![
-            ("T01", "api", "First", TaskStatus::Todo),
-        ]);
+        let progress = make_progress(vec![("T01", "api", "First", TaskStatus::Todo)]);
 
         let mut sched = TaskScheduler::new(dag, &progress, 2); // max 2 retries
 
@@ -335,10 +320,7 @@ mod tests {
 
     #[test]
     fn test_scheduler_is_complete() {
-        let dag = make_dag(vec![
-            ("T01", vec![]),
-            ("T02", vec![]),
-        ]);
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec![])]);
         let progress = make_progress(vec![
             ("T01", "api", "First", TaskStatus::Done),
             ("T02", "api", "Second", TaskStatus::Done),
@@ -350,11 +332,7 @@ mod tests {
 
     #[test]
     fn test_scheduler_status() {
-        let dag = make_dag(vec![
-            ("T01", vec![]),
-            ("T02", vec!["T01"]),
-            ("T03", vec![]),
-        ]);
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec!["T01"]), ("T03", vec![])]);
         let progress = make_progress(vec![
             ("T01", "api", "First", TaskStatus::Todo),
             ("T02", "api", "Second", TaskStatus::Todo),

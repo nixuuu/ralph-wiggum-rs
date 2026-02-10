@@ -76,11 +76,7 @@ impl OrchestratorStatusBar {
     pub fn render_progress_line(&self, status: &OrchestratorStatus) -> String {
         let total = status.scheduler.total;
         let done = status.scheduler.done;
-        let pct = if total > 0 {
-            (done * 100) / total
-        } else {
-            0
-        };
+        let pct = if total > 0 { (done * 100) / total } else { 0 };
 
         let bar = render_progress_bar(done, total, 20);
         let elapsed = format_duration(status.elapsed);
@@ -106,14 +102,8 @@ impl OrchestratorStatusBar {
             WorkerState::Merging => "⊕",
         };
 
-        let task = worker
-            .task_id
-            .as_deref()
-            .unwrap_or("---");
-        let component = worker
-            .component
-            .as_deref()
-            .unwrap_or("");
+        let task = worker.task_id.as_deref().unwrap_or("---");
+        let component = worker.component.as_deref().unwrap_or("");
         let phase = worker
             .phase
             .as_ref()

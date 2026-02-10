@@ -33,7 +33,10 @@ impl TaskDag {
 
             for dep in task_deps {
                 all_tasks.insert(dep.clone());
-                reverse.entry(dep.clone()).or_default().push(task_id.clone());
+                reverse
+                    .entry(dep.clone())
+                    .or_default()
+                    .push(task_id.clone());
             }
         }
 
@@ -88,8 +91,7 @@ impl TaskDag {
         let mut path: Vec<String> = Vec::new();
 
         while let Some(&node) = white.iter().next() {
-            if let Some(cycle) =
-                self.dfs_cycle(node, &mut white, &mut gray, &mut black, &mut path)
+            if let Some(cycle) = self.dfs_cycle(node, &mut white, &mut gray, &mut black, &mut path)
             {
                 return Some(cycle);
             }
@@ -202,7 +204,9 @@ impl TaskDag {
             })
             .filter(|task| {
                 // All deps must be done
-                self.task_deps(task).iter().all(|dep| done.contains(dep.as_str()))
+                self.task_deps(task)
+                    .iter()
+                    .all(|dep| done.contains(dep.as_str()))
             })
             .cloned()
             .collect();

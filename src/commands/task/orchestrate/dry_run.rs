@@ -43,11 +43,7 @@ pub fn visualize_dag(dag: &TaskDag, progress: &ProgressSummary) -> DagVisualizat
             let layer = if deps.is_empty() {
                 0
             } else {
-                let max_dep_layer = deps
-                    .iter()
-                    .filter_map(|d| task_layer.get(d))
-                    .max()
-                    .copied();
+                let max_dep_layer = deps.iter().filter_map(|d| task_layer.get(d)).max().copied();
                 match max_dep_layer {
                     Some(l) => l + 1,
                     None => continue, // deps not computed yet
@@ -103,10 +99,7 @@ pub fn format_dag(viz: &DagVisualization, workers: u32) -> String {
                 format!("[{status}] {t}")
             })
             .collect();
-        lines.push(format!(
-            "  Layer {i}: {}",
-            tasks_str.join("  ")
-        ));
+        lines.push(format!("  Layer {i}: {}", tasks_str.join("  ")));
     }
 
     // Estimated serial rounds
@@ -200,8 +193,14 @@ mod tests {
             })
             .collect();
 
-        let done = task_vec.iter().filter(|t| t.status == TaskStatus::Done).count();
-        let todo = task_vec.iter().filter(|t| t.status == TaskStatus::Todo).count();
+        let done = task_vec
+            .iter()
+            .filter(|t| t.status == TaskStatus::Done)
+            .count();
+        let todo = task_vec
+            .iter()
+            .filter(|t| t.status == TaskStatus::Todo)
+            .count();
 
         ProgressSummary {
             tasks: task_vec,
@@ -273,10 +272,7 @@ mod tests {
 
     #[test]
     fn test_format_dag_output() {
-        let dag = make_dag(vec![
-            ("T01", vec![]),
-            ("T02", vec!["T01"]),
-        ]);
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec!["T01"])]);
         let progress = make_progress(vec![
             ("T01", "api", TaskStatus::Done),
             ("T02", "api", TaskStatus::Todo),
@@ -294,10 +290,7 @@ mod tests {
 
     #[test]
     fn test_format_dep_list() {
-        let dag = make_dag(vec![
-            ("T01", vec![]),
-            ("T02", vec!["T01"]),
-        ]);
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec!["T01"])]);
         let progress = make_progress(vec![
             ("T01", "api", TaskStatus::Done),
             ("T02", "api", TaskStatus::Todo),

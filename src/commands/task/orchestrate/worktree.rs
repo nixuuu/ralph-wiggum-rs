@@ -53,10 +53,7 @@ impl WorktreeManager {
     /// Generate the worktree directory path for a given worker ID.
     /// Worktrees are created as siblings to the project root.
     pub fn worktree_path(&self, worker_id: u32) -> PathBuf {
-        let parent = self
-            .project_root
-            .parent()
-            .unwrap_or(Path::new("/tmp"));
+        let parent = self.project_root.parent().unwrap_or(Path::new("/tmp"));
         parent.join(format!("{}{worker_id}", self.prefix))
     }
 
@@ -69,11 +66,7 @@ impl WorktreeManager {
     ///
     /// Creates a new branch from HEAD and a worktree directory as a sibling
     /// to the project root.
-    pub async fn create_worktree(
-        &self,
-        worker_id: u32,
-        task_id: &str,
-    ) -> Result<WorktreeInfo> {
+    pub async fn create_worktree(&self, worker_id: u32, task_id: &str) -> Result<WorktreeInfo> {
         let path = self.worktree_path(worker_id);
         let branch = Self::branch_name(worker_id, task_id);
 
@@ -209,10 +202,7 @@ mod tests {
 
     #[test]
     fn test_worktree_path_generation() {
-        let mgr = WorktreeManager::new(
-            PathBuf::from("/home/user/myproject"),
-            None,
-        );
+        let mgr = WorktreeManager::new(PathBuf::from("/home/user/myproject"), None);
         let path = mgr.worktree_path(1);
         assert_eq!(path, PathBuf::from("/home/user/myproject-ralph-w1"));
 
@@ -232,14 +222,8 @@ mod tests {
 
     #[test]
     fn test_branch_name_generation() {
-        assert_eq!(
-            WorktreeManager::branch_name(1, "T01"),
-            "ralph/w1/T01"
-        );
-        assert_eq!(
-            WorktreeManager::branch_name(3, "1.2.3"),
-            "ralph/w3/1.2.3"
-        );
+        assert_eq!(WorktreeManager::branch_name(1, "T01"), "ralph/w1/T01");
+        assert_eq!(WorktreeManager::branch_name(3, "1.2.3"), "ralph/w3/1.2.3");
     }
 
     #[test]
@@ -264,14 +248,8 @@ mod tests {
 
     #[test]
     fn test_default_prefix_from_project_name() {
-        let mgr = WorktreeManager::new(
-            PathBuf::from("/home/user/ralph-wiggum-rs"),
-            None,
-        );
+        let mgr = WorktreeManager::new(PathBuf::from("/home/user/ralph-wiggum-rs"), None);
         let path = mgr.worktree_path(2);
-        assert_eq!(
-            path,
-            PathBuf::from("/home/user/ralph-wiggum-rs-ralph-w2")
-        );
+        assert_eq!(path, PathBuf::from("/home/user/ralph-wiggum-rs-ralph-w2"));
     }
 }
