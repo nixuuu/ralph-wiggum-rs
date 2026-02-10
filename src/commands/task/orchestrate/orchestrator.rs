@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::mpsc;
 
+use crate::commands::task::orchestrate::dashboard::Dashboard;
 use crate::commands::task::orchestrate::events::{EventLogger, WorkerEvent, WorkerEventKind, WorkerPhase};
 use crate::commands::task::orchestrate::merge::{self, MergeResult};
 use crate::commands::task::orchestrate::output::MultiplexedOutput;
 use crate::commands::task::orchestrate::scheduler::TaskScheduler;
 use crate::commands::task::orchestrate::state::{Lockfile, OrchestrateState};
 use crate::commands::task::orchestrate::status::{
-    OrchestratorInputThread, OrchestratorStatus, OrchestratorStatusBar, WorkerState, WorkerStatus,
+    DashboardInputThread, OrchestratorStatus, ShutdownState, WorkerState, WorkerStatus,
 };
 use crate::commands::task::orchestrate::summary::{self, TaskSummaryEntry};
 use crate::commands::task::orchestrate::worker::{TaskResult, Worker};
@@ -39,9 +40,8 @@ enum WorkerSlot {
 
 /// Groups all TUI-related mutable state to keep function signatures clean.
 struct TuiContext {
-    status_bar: OrchestratorStatusBar,
+    dashboard: Dashboard,
     mux_output: MultiplexedOutput,
-    worker_statuses: HashMap<u32, WorkerStatus>,
     task_start_times: HashMap<String, Instant>,
     task_summaries: Vec<TaskSummaryEntry>,
 }
@@ -244,24 +244,28 @@ impl Orchestrator {
         let shutdown = Arc::new(AtomicBool::new(false));
         let graceful_shutdown = Arc::new(AtomicBool::new(false));
         let resize_flag = Arc::new(AtomicBool::new(false));
+        let focused_worker = Arc::new(AtomicU32::new(0));
+        let scroll_delta = Arc::new(AtomicI32::new(0));
+        let render_notify = Arc::new(tokio::sync::Notify::new());
 
-        // 10. Initialize TUI
+        // 10. Initialize TUI (fullscreen dashboard)
         let output_log_path = ralph_dir.join("orchestrate-output.log");
         let mut tui = TuiContext {
-            status_bar: OrchestratorStatusBar::new(worker_count, self.use_nerd_font)?,
+            dashboard: Dashboard::new(worker_count)?,
             mux_output: MultiplexedOutput::new(Some(&output_log_path)),
-            worker_statuses: (1..=worker_count)
-                .map(|i| (i, WorkerStatus::idle(i)))
-                .collect(),
             task_start_times: HashMap::new(),
             task_summaries: Vec::new(),
         };
 
         // 11. Spawn input thread (dedicated OS thread for crossterm)
-        let input_thread = OrchestratorInputThread::spawn(
+        let input_thread = DashboardInputThread::spawn(
             shutdown.clone(),
             graceful_shutdown.clone(),
             resize_flag.clone(),
+            focused_worker.clone(),
+            worker_count,
+            scroll_delta.clone(),
+            render_notify.clone(),
         );
 
         // 12. Run the main orchestration loop
@@ -279,13 +283,16 @@ impl Orchestrator {
                 shutdown,
                 graceful_shutdown,
                 resize_flag,
+                focused_worker,
+                scroll_delta,
+                render_notify,
                 lockfile,
                 &mut tui,
             )
             .await;
 
         // 13. Cleanup TUI
-        tui.status_bar.cleanup()?;
+        tui.dashboard.cleanup()?;
         input_thread.stop();
 
         result
@@ -307,6 +314,9 @@ impl Orchestrator {
         shutdown: Arc<AtomicBool>,
         graceful_shutdown: Arc<AtomicBool>,
         resize_flag: Arc<AtomicBool>,
+        focused_worker: Arc<AtomicU32>,
+        scroll_delta: Arc<AtomicI32>,
+        render_notify: Arc<tokio::sync::Notify>,
         mut lockfile: Lockfile,
         tui: &mut TuiContext,
     ) -> Result<()> {
@@ -316,6 +326,12 @@ impl Orchestrator {
         let mut last_heartbeat = Instant::now();
         let mut last_hot_reload = Instant::now();
         let started_at = Instant::now();
+
+        // SIGTERM handler — treat `kill <pid>` as force shutdown
+        #[cfg(unix)]
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ).ok();
 
         // Build task lookup for merge
         let task_lookup: HashMap<String, ProgressTask> = progress
@@ -332,7 +348,7 @@ impl Orchestrator {
             progress.done,
             progress.remaining()
         ));
-        tui.status_bar.print_line(&msg)?;
+        tui.dashboard.push_log_line(&msg);
 
         // Warn if no verification commands configured
         if self.verification_commands.is_none() {
@@ -340,11 +356,20 @@ impl Orchestrator {
                 "⚠ No verify_commands configured — skipping verify phase. \
                  Set verify_commands in [task.orchestrate] in .ralph.toml",
             );
-            tui.status_bar.print_line(&warn)?;
+            tui.dashboard.push_log_line(&warn);
         }
 
-        // Initial status bar render
-        self.update_status_bar(tui, scheduler, started_at)?;
+        // Initial dashboard render
+        {
+            let orch_status = OrchestratorStatus {
+                scheduler: scheduler.status(),
+                workers: Vec::new(),
+                total_cost: tui.mux_output.total_cost(),
+                elapsed: started_at.elapsed(),
+                shutdown_state: ShutdownState::Running,
+            };
+            tui.dashboard.render(&orch_status)?;
+        }
 
         loop {
             // Check budget limits
@@ -355,7 +380,7 @@ impl Orchestrator {
                     "Budget limit reached: ${:.4} >= ${max_cost:.4}",
                     tui.mux_output.total_cost()
                 ));
-                tui.status_bar.print_line(&msg)?;
+                tui.dashboard.push_log_line(&msg);
                 break;
             }
             if let Some(timeout) = self.config.timeout
@@ -363,7 +388,7 @@ impl Orchestrator {
             {
                 let msg =
                     MultiplexedOutput::format_orchestrator_line("Timeout reached");
-                tui.status_bar.print_line(&msg)?;
+                tui.dashboard.push_log_line(&msg);
                 break;
             }
 
@@ -374,7 +399,7 @@ impl Orchestrator {
                     "All tasks complete: {} done, {} blocked",
                     status.done, status.blocked
                 ));
-                tui.status_bar.print_line(&msg)?;
+                tui.dashboard.push_log_line(&msg);
                 break;
             }
 
@@ -415,14 +440,11 @@ impl Orchestrator {
                         tui,
                     ).await?;
 
-                    // Refresh status bar after event
+                    // Handle resize after event
                     if resize_flag.swap(false, Ordering::SeqCst) {
-                        tui.status_bar.cleanup()?;
-                        tui.status_bar = OrchestratorStatusBar::new(
-                            self.config.workers, self.use_nerd_font
-                        )?;
+                        tui.dashboard.handle_resize()?;
                     }
-                    self.update_status_bar(tui, scheduler, started_at)?;
+                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta, &graceful_shutdown, &shutdown)?;
                 }
 
                 // Ctrl+C signal handling (backup — input thread handles q/Ctrl+C too)
@@ -432,7 +454,7 @@ impl Orchestrator {
                         let msg = MultiplexedOutput::format_orchestrator_line(
                             "Force shutdown — aborting all workers"
                         );
-                        tui.status_bar.print_line(&msg)?;
+                        tui.dashboard.push_log_line(&msg);
                         shutdown.store(true, Ordering::Relaxed);
                         for (_, handle) in worker_join_handles.drain() {
                             handle.abort();
@@ -443,7 +465,7 @@ impl Orchestrator {
                         let msg = MultiplexedOutput::format_orchestrator_line(
                             "Graceful shutdown — waiting for in-progress tasks..."
                         );
-                        tui.status_bar.print_line(&msg)?;
+                        tui.dashboard.push_log_line(&msg);
                         graceful_shutdown.store(true, Ordering::Relaxed);
 
                         let any_busy = worker_slots.values().any(|s| matches!(s, WorkerSlot::Busy { .. }));
@@ -453,14 +475,40 @@ impl Orchestrator {
                     }
                 }
 
-                // Periodic timer: heartbeat, hot reload, state save, status refresh
+                // SIGTERM — immediate force shutdown (from `kill <pid>`)
+                _ = async {
+                    #[cfg(unix)]
+                    if let Some(ref mut s) = sigterm { s.recv().await; return; }
+                    // On non-unix, never resolves
+                    std::future::pending::<()>().await;
+                } => {
+                    let msg = MultiplexedOutput::format_orchestrator_line(
+                        "SIGTERM received — force shutdown"
+                    );
+                    tui.dashboard.push_log_line(&msg);
+                    shutdown.store(true, Ordering::Relaxed);
+                    for (_, handle) in worker_join_handles.drain() {
+                        handle.abort();
+                    }
+                    break;
+                }
+
+                // Immediate re-render on keypress (input thread notifies)
+                _ = render_notify.notified() => {
+                    if resize_flag.swap(false, Ordering::SeqCst) {
+                        tui.dashboard.handle_resize()?;
+                    }
+                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta, &graceful_shutdown, &shutdown)?;
+                }
+
+                // Periodic timer: heartbeat, hot reload, status refresh
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
                     // Check if input thread triggered shutdown
                     if shutdown.load(Ordering::SeqCst) {
                         let msg = MultiplexedOutput::format_orchestrator_line(
                             "Force shutdown — aborting all workers"
                         );
-                        tui.status_bar.print_line(&msg)?;
+                        tui.dashboard.push_log_line(&msg);
                         for (_, handle) in worker_join_handles.drain() {
                             handle.abort();
                         }
@@ -472,7 +520,7 @@ impl Orchestrator {
                         let msg = MultiplexedOutput::format_orchestrator_line(
                             "All workers drained — exiting"
                         );
-                        tui.status_bar.print_line(&msg)?;
+                        tui.dashboard.push_log_line(&msg);
                         break;
                     }
 
@@ -499,14 +547,11 @@ impl Orchestrator {
                         last_hot_reload = Instant::now();
                     }
 
-                    // Refresh status bar
+                    // Handle resize + render dashboard
                     if resize_flag.swap(false, Ordering::SeqCst) {
-                        tui.status_bar.cleanup()?;
-                        tui.status_bar = OrchestratorStatusBar::new(
-                            self.config.workers, self.use_nerd_font
-                        )?;
+                        tui.dashboard.handle_resize()?;
                     }
-                    self.update_status_bar(tui, scheduler, started_at)?;
+                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta, &graceful_shutdown, &shutdown)?;
                 }
             }
         }
@@ -525,23 +570,47 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Build and render the current status bar.
-    fn update_status_bar(
+    /// Apply focus/scroll from input thread and render the dashboard.
+    #[allow(clippy::too_many_arguments)]
+    fn render_dashboard(
         &self,
         tui: &mut TuiContext,
         scheduler: &TaskScheduler,
         started_at: Instant,
+        focused_worker: &Arc<AtomicU32>,
+        scroll_delta: &Arc<AtomicI32>,
+        graceful_shutdown: &Arc<AtomicBool>,
+        shutdown: &Arc<AtomicBool>,
     ) -> Result<()> {
-        let mut workers: Vec<WorkerStatus> = tui.worker_statuses.values().cloned().collect();
-        workers.sort_by_key(|w| w.worker_id);
+        // Apply focus from input thread
+        let focus = focused_worker.load(Ordering::Relaxed);
+        tui.dashboard
+            .set_focus(if focus == 0 { None } else { Some(focus) });
 
+        // Apply scroll delta from input thread
+        let delta = scroll_delta.swap(0, Ordering::Relaxed);
+        if delta != 0 {
+            tui.dashboard.apply_scroll(delta);
+        }
+
+        // Determine shutdown state
+        let shutdown_state = if shutdown.load(Ordering::Relaxed) {
+            ShutdownState::Aborting
+        } else if graceful_shutdown.load(Ordering::Relaxed) {
+            ShutdownState::Draining
+        } else {
+            ShutdownState::Running
+        };
+
+        // Build status snapshot and render
         let orch_status = OrchestratorStatus {
             scheduler: scheduler.status(),
-            workers,
+            workers: Vec::new(),
             total_cost: tui.mux_output.total_cost(),
             elapsed: started_at.elapsed(),
+            shutdown_state,
         };
-        tui.status_bar.update(&orch_status)
+        tui.dashboard.render(&orch_status)
     }
 
     /// Assign ready tasks to idle workers.
@@ -588,22 +657,24 @@ impl Orchestrator {
                 worker_id,
                 &format!("Assigned: {task_id} → {}", worktree.branch),
             );
-            tui.status_bar.print_line(&msg)?;
+            tui.dashboard.push_log_line(&msg);
 
             // Mark task as started in scheduler
             scheduler.mark_started(&task_id);
 
             // Update TUI worker status
             tui.mux_output.assign_worker(worker_id, &task_id);
-            if let Some(ws) = tui.worker_statuses.get_mut(&worker_id) {
-                ws.state = WorkerState::Implementing;
-                ws.task_id = Some(task_id.clone());
-                ws.component = task_info.map(|t| t.component.clone());
-                ws.phase = Some(WorkerPhase::Implement);
-                ws.cost_usd = 0.0;
-                ws.input_tokens = 0;
-                ws.output_tokens = 0;
-            }
+            let ws = WorkerStatus {
+                worker_id,
+                state: WorkerState::Implementing,
+                task_id: Some(task_id.clone()),
+                component: task_info.map(|t| t.component.clone()),
+                phase: Some(WorkerPhase::Implement),
+                cost_usd: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+            };
+            tui.dashboard.update_worker_status(worker_id, ws);
             tui.task_start_times
                 .insert(task_id.clone(), Instant::now());
 
@@ -668,16 +739,21 @@ impl Orchestrator {
                 worker_id,
                 task_id,
             } => {
-                if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
-                    ws.state = WorkerState::Implementing;
-                    ws.task_id = Some(task_id.clone());
-                    ws.component = task_lookup.get(task_id).map(|t| t.component.clone());
-                    ws.phase = Some(WorkerPhase::Implement);
-                }
+                let ws = WorkerStatus {
+                    worker_id: *worker_id,
+                    state: WorkerState::Implementing,
+                    task_id: Some(task_id.clone()),
+                    component: task_lookup.get(task_id).map(|t| t.component.clone()),
+                    phase: Some(WorkerPhase::Implement),
+                    cost_usd: 0.0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                };
+                tui.dashboard.update_worker_status(*worker_id, ws);
                 let msg = tui
                     .mux_output
                     .format_worker_line(*worker_id, &format!("Started: {task_id}"));
-                tui.status_bar.print_line(&msg)?;
+                tui.dashboard.push_log_line(&msg);
             }
 
             WorkerEventKind::PhaseStarted {
@@ -685,18 +761,28 @@ impl Orchestrator {
                 task_id,
                 phase,
             } => {
-                if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
-                    ws.phase = Some(phase.clone());
-                    ws.state = match phase {
-                        WorkerPhase::Implement => WorkerState::Implementing,
-                        WorkerPhase::ReviewFix => WorkerState::Reviewing,
-                        WorkerPhase::Verify => WorkerState::Verifying,
-                    };
-                }
+                let new_state = match phase {
+                    WorkerPhase::Implement => WorkerState::Implementing,
+                    WorkerPhase::ReviewFix => WorkerState::Reviewing,
+                    WorkerPhase::Verify => WorkerState::Verifying,
+                };
+                // Update just the phase/state fields via a fresh status
+                let (cost, input, output) = tui.mux_output.worker_cost(*worker_id);
+                let ws = WorkerStatus {
+                    worker_id: *worker_id,
+                    state: new_state,
+                    task_id: Some(task_id.clone()),
+                    component: task_lookup.get(task_id).map(|t| t.component.clone()),
+                    phase: Some(phase.clone()),
+                    cost_usd: cost,
+                    input_tokens: input,
+                    output_tokens: output,
+                };
+                tui.dashboard.update_worker_status(*worker_id, ws);
                 let msg = tui
                     .mux_output
                     .format_worker_line(*worker_id, &format!("{task_id} → phase: {phase}"));
-                tui.status_bar.print_line(&msg)?;
+                tui.dashboard.push_log_line(&msg);
             }
 
             WorkerEventKind::PhaseCompleted {
@@ -710,7 +796,7 @@ impl Orchestrator {
                     *worker_id,
                     &format!("{task_id} ← phase: {phase} [{status_text}]"),
                 );
-                tui.status_bar.print_line(&msg)?;
+                tui.dashboard.push_log_line(&msg);
             }
 
             WorkerEventKind::CostUpdate {
@@ -721,13 +807,10 @@ impl Orchestrator {
             } => {
                 tui.mux_output
                     .update_cost(*worker_id, *cost_usd, *input_tokens, *output_tokens);
-                if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
-                    let (total_cost, total_in, total_out) =
-                        tui.mux_output.worker_cost(*worker_id);
-                    ws.cost_usd = total_cost;
-                    ws.input_tokens = total_in;
-                    ws.output_tokens = total_out;
-                }
+                let (total_cost, total_in, total_out) =
+                    tui.mux_output.worker_cost(*worker_id);
+                tui.dashboard
+                    .update_worker_cost(*worker_id, total_cost, total_in, total_out);
             }
 
             WorkerEventKind::TaskCompleted {
@@ -755,9 +838,18 @@ impl Orchestrator {
                         && let Some(task) = task_lookup.get(task_id)
                     {
                         // Show merging state
-                        if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
-                            ws.state = WorkerState::Merging;
-                        }
+                        let (cost, input, output) = tui.mux_output.worker_cost(*worker_id);
+                        let ws = WorkerStatus {
+                            worker_id: *worker_id,
+                            state: WorkerState::Merging,
+                            task_id: Some(task_id.clone()),
+                            component: Some(task.component.clone()),
+                            phase: None,
+                            cost_usd: cost,
+                            input_tokens: input,
+                            output_tokens: output,
+                        };
+                        tui.dashboard.update_worker_status(*worker_id, ws);
 
                         let merge_result =
                             merge::squash_merge(&self.project_root, worktree, task).await?;
@@ -768,7 +860,7 @@ impl Orchestrator {
                                     *worker_id,
                                     &format!("Merged: {task_id} → {commit_hash}"),
                                 );
-                                tui.status_bar.print_line(&msg)?;
+                                tui.dashboard.push_log_line(&msg);
                                 scheduler.mark_done(task_id);
 
                                 state.tasks.insert(
@@ -797,7 +889,7 @@ impl Orchestrator {
                                     *worker_id,
                                     &format!("Merge conflict in {task_id}: {files:?}"),
                                 );
-                                tui.status_bar.print_line(&msg)?;
+                                tui.dashboard.push_log_line(&msg);
                                 merge::abort_merge(&self.project_root).await.ok();
                                 scheduler.mark_blocked(task_id);
 
@@ -824,7 +916,7 @@ impl Orchestrator {
                                     *worker_id,
                                     &format!("Merge failed for {task_id}: {error}"),
                                 );
-                                tui.status_bar.print_line(&msg)?;
+                                tui.dashboard.push_log_line(&msg);
                                 scheduler.mark_blocked(task_id);
 
                                 tui.task_summaries.push(TaskSummaryEntry {
@@ -843,7 +935,7 @@ impl Orchestrator {
                     let msg = tui
                         .mux_output
                         .format_worker_line(*worker_id, &format!("Done (no merge): {task_id}"));
-                    tui.status_bar.print_line(&msg)?;
+                    tui.dashboard.push_log_line(&msg);
 
                     tui.task_summaries.push(TaskSummaryEntry {
                         task_id: task_id.clone(),
@@ -860,13 +952,13 @@ impl Orchestrator {
                             *worker_id,
                             &format!("Task {task_id} failed, re-queued for retry"),
                         );
-                        tui.status_bar.print_line(&msg)?;
+                        tui.dashboard.push_log_line(&msg);
                     } else {
                         let msg = tui.mux_output.format_worker_line(
                             *worker_id,
                             &format!("Task {task_id} blocked after max retries"),
                         );
-                        tui.status_bar.print_line(&msg)?;
+                        tui.dashboard.push_log_line(&msg);
 
                         tui.task_summaries.push(TaskSummaryEntry {
                             task_id: task_id.clone(),
@@ -880,9 +972,8 @@ impl Orchestrator {
 
                 // Free the worker slot and reset status
                 worker_slots.insert(*worker_id, WorkerSlot::Idle);
-                if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
-                    *ws = WorkerStatus::idle(*worker_id);
-                }
+                tui.dashboard
+                    .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
                 tui.mux_output.clear_worker(*worker_id);
             }
 
@@ -905,20 +996,29 @@ impl Orchestrator {
                         ),
                     )
                 };
-                tui.status_bar.print_line(&msg)?;
+                tui.dashboard.push_log_line(&msg);
             }
 
             WorkerEventKind::MergeStarted {
                 worker_id,
                 task_id,
             } => {
-                if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
-                    ws.state = WorkerState::Merging;
-                }
+                let (cost, input, output) = tui.mux_output.worker_cost(*worker_id);
+                let ws = WorkerStatus {
+                    worker_id: *worker_id,
+                    state: WorkerState::Merging,
+                    task_id: Some(task_id.clone()),
+                    component: task_lookup.get(task_id).map(|t| t.component.clone()),
+                    phase: None,
+                    cost_usd: cost,
+                    input_tokens: input,
+                    output_tokens: output,
+                };
+                tui.dashboard.update_worker_status(*worker_id, ws);
                 let msg = tui
                     .mux_output
                     .format_worker_line(*worker_id, &format!("Merging: {task_id}"));
-                tui.status_bar.print_line(&msg)?;
+                tui.dashboard.push_log_line(&msg);
             }
 
             WorkerEventKind::MergeCompleted {
@@ -933,7 +1033,7 @@ impl Orchestrator {
                     *worker_id,
                     &format!("Merge {task_id}: {status_text} ({hash})"),
                 );
-                tui.status_bar.print_line(&msg)?;
+                tui.dashboard.push_log_line(&msg);
             }
 
             WorkerEventKind::MergeConflict {
@@ -945,14 +1045,11 @@ impl Orchestrator {
                     *worker_id,
                     &format!("Merge conflict in {task_id}: {conflicting_files:?}"),
                 );
-                tui.status_bar.print_line(&msg)?;
+                tui.dashboard.push_log_line(&msg);
             }
 
             WorkerEventKind::OutputLines { worker_id, lines } => {
-                for line in lines {
-                    let prefixed = tui.mux_output.format_worker_line(*worker_id, line);
-                    tui.status_bar.print_line(&prefixed)?;
-                }
+                tui.dashboard.push_worker_output(*worker_id, lines);
             }
         }
 

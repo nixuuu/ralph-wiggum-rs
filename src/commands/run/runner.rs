@@ -9,6 +9,19 @@ use tokio::process::Command;
 
 use crate::shared::error::{RalphError, Result};
 
+/// Kill an entire process group by sending SIGKILL to -pgid.
+///
+/// Since we spawn children with `process_group(0)`, their PGID equals their PID.
+/// This ensures all sub-processes (e.g., Node.js children spawned by Claude CLI)
+/// are killed, not just the top-level process.
+#[cfg(unix)]
+pub(crate) fn kill_process_group(pid: u32) {
+    // SAFETY: libc::kill with negative pid sends signal to the process group
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+}
+
 /// Token usage information from claude
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Usage {
@@ -224,6 +237,9 @@ impl ClaudeRunner {
             .spawn()
             .map_err(|e| RalphError::ClaudeProcess(format!("Failed to spawn claude: {}", e)))?;
 
+        // Save PID for process-group kill on shutdown
+        let child_pid = child.id();
+
         let stdout = child
             .stdout
             .take()
@@ -251,7 +267,11 @@ impl ClaudeRunner {
                 biased;
 
                 _ = &mut shutdown_check => {
-                    // Shutdown requested - kill child and return
+                    // Shutdown requested — kill entire process group, then the child
+                    #[cfg(unix)]
+                    if let Some(pid) = child_pid {
+                        kill_process_group(pid);
+                    }
                     child.kill().await.ok();
                     return Err(RalphError::Interrupted);
                 }

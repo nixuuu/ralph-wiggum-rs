@@ -72,11 +72,15 @@ impl WorktreeManager {
     pub async fn create_worktree(&self, worker_id: u32, task_id: &str) -> Result<WorktreeInfo> {
         let path = self.worktree_path(worker_id);
         let branch = Self::branch_name(worker_id, task_id);
+
+        // Prune FIRST — clear stale git tracking before any inspection
+        self.prune().await.ok();
+
         let branch_exists = self.branch_exists(&branch).await;
 
         if path.exists() {
             if branch_exists && self.worktree_has_branch(&path, &branch).await {
-                // Worktree exists with correct branch — reuse it
+                // Worktree exists with correct branch — reuse it (resume)
                 return Ok(WorktreeInfo {
                     path,
                     branch,
@@ -84,16 +88,16 @@ impl WorktreeManager {
                     task_id: task_id.to_string(),
                 });
             }
-            // Wrong branch or stale directory — remove first
-            self.remove_worktree(&path).await.ok();
-            // If path still exists (remove_worktree failed), force-remove directory
-            if path.exists() {
-                tokio::fs::remove_dir_all(&path).await.ok();
-            }
+
+            // Wrong branch or stale directory — force cleanup (errors propagated!)
+            self.force_cleanup_path(&path).await?;
+
+            // Prune again after removing directory
+            self.prune().await.ok();
         }
 
-        // Prune stale worktree entries so git doesn't think the branch is checked out elsewhere
-        self.prune().await.ok();
+        // Re-check branch after cleanup (prune may have freed it)
+        let branch_exists = self.branch_exists(&branch).await;
 
         if branch_exists {
             // Branch exists from a previous run — attach it to a new worktree
@@ -109,7 +113,9 @@ impl WorktreeManager {
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(RalphError::WorktreeError(format!(
-                    "git worktree add (existing branch) failed: {stderr}"
+                    "git worktree add (branch '{}') failed: {}\nHint: try 'ralph task clean'",
+                    branch,
+                    stderr.trim(),
                 )));
             }
         } else {
@@ -126,7 +132,9 @@ impl WorktreeManager {
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(RalphError::WorktreeError(format!(
-                    "git worktree add failed: {stderr}"
+                    "git worktree add -b '{}' failed: {}\nHint: try 'ralph task clean'",
+                    branch,
+                    stderr.trim(),
                 )));
             }
         }
@@ -245,6 +253,43 @@ impl WorktreeManager {
         Ok(orphans)
     }
 
+    /// Force-remove a worktree path from both git tracking and the filesystem.
+    /// Returns error with actionable hint if path cannot be removed.
+    async fn force_cleanup_path(&self, path: &Path) -> Result<()> {
+        // Try git worktree remove (best-effort — git may not track this path)
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .current_dir(&self.project_root)
+            .output()
+            .await;
+
+        // If still exists, force-remove from filesystem
+        if path.exists() {
+            tokio::fs::remove_dir_all(path).await.map_err(|e| {
+                RalphError::WorktreeError(format!(
+                    "Cannot remove stale worktree '{}': {e}\n\
+                     Hint: rm -rf '{}'",
+                    path.display(),
+                    path.display(),
+                ))
+            })?;
+        }
+
+        // Verify (race condition guard)
+        if path.exists() {
+            return Err(RalphError::WorktreeError(format!(
+                "Worktree '{}' still exists after cleanup.\n\
+                 Another ralph instance may be using it.\n\
+                 Hint: check running processes, then: rm -rf '{}'",
+                path.display(),
+                path.display(),
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Prune stale worktree entries from git's tracking.
     pub async fn prune(&self) -> Result<()> {
         let output = Command::new("git")
@@ -319,5 +364,14 @@ mod tests {
         let mgr = WorktreeManager::new(PathBuf::from("/home/user/ralph-wiggum-rs"), None);
         let path = mgr.worktree_path(2);
         assert_eq!(path, PathBuf::from("/home/user/ralph-wiggum-rs-ralph-w2"));
+    }
+
+    #[tokio::test]
+    async fn test_force_cleanup_nonexistent_path() {
+        let mgr = WorktreeManager::new(PathBuf::from("/tmp/ralph-test-wt"), None);
+        let result = mgr
+            .force_cleanup_path(Path::new("/tmp/ralph-test-nonexistent-xxxxx"))
+            .await;
+        assert!(result.is_ok());
     }
 }
