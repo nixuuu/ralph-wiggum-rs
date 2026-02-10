@@ -17,6 +17,8 @@ pub enum TaskCommands {
     Orchestrate(OrchestrateArgs),
     /// Clean up orphaned worktrees, branches, and state files
     Clean,
+    /// Generate task dependencies using AI and update PROGRESS.md frontmatter
+    GenerateDeps(GenerateDepsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -113,6 +115,13 @@ pub struct OrchestrateArgs {
     /// Filter specific tasks (comma-separated IDs, e.g. "T01,T03,T07")
     #[arg(long)]
     pub tasks: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct GenerateDepsArgs {
+    /// Claude model to use for dependency analysis
+    #[arg(short, long)]
+    pub model: Option<String>,
 }
 
 #[cfg(test)]
@@ -276,5 +285,25 @@ mod tests {
     fn test_clean_command() {
         let cli = TestCli::parse_from(["test", "clean"]);
         assert!(matches!(cli.command, super::TaskCommands::Clean));
+    }
+
+    #[test]
+    fn test_generate_deps_defaults() {
+        let cli = TestCli::parse_from(["test", "generate-deps"]);
+        if let super::TaskCommands::GenerateDeps(args) = cli.command {
+            assert!(args.model.is_none());
+        } else {
+            panic!("Expected GenerateDeps command");
+        }
+    }
+
+    #[test]
+    fn test_generate_deps_with_model() {
+        let cli = TestCli::parse_from(["test", "generate-deps", "--model", "claude-opus-4-6"]);
+        if let super::TaskCommands::GenerateDeps(args) = cli.command {
+            assert_eq!(args.model.as_deref(), Some("claude-opus-4-6"));
+        } else {
+            panic!("Expected GenerateDeps command");
+        }
     }
 }

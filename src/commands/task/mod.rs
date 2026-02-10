@@ -3,6 +3,7 @@ pub mod args;
 mod clean;
 mod continue_cmd;
 mod edit;
+mod generate_deps_cmd;
 mod input;
 pub mod orchestrate;
 mod prd;
@@ -30,5 +31,6 @@ pub async fn execute(command: TaskCommands, file_config: &FileConfig) -> Result<
             orch.execute().await
         }
         TaskCommands::Clean => clean::execute(file_config).await,
+        TaskCommands::GenerateDeps(args) => generate_deps_cmd::execute(args, file_config).await,
     }
 }
