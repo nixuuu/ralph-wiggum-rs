@@ -1,3 +1,5 @@
+pub mod ai;
+pub mod dry_run;
 pub mod events;
 pub mod merge;
 pub mod orchestrator;
