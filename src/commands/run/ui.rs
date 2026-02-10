@@ -287,6 +287,30 @@ impl StatusTerminal {
         Ok(())
     }
 
+    /// Draw multiple styled lines into the status bar area (for orchestrator mode).
+    ///
+    /// Each `Line` occupies exactly one row. Uses `Layout::vertical` with
+    /// `Constraint::Length(1)` per line.
+    pub fn draw_lines(&mut self, lines: &[Line<'static>]) -> Result<()> {
+        if !self.enabled || lines.is_empty() {
+            return Ok(());
+        }
+        self.terminal.draw(|frame| {
+            let area = frame.area();
+            let constraints: Vec<Constraint> =
+                lines.iter().map(|_| Constraint::Length(1)).collect();
+            let chunks = Layout::vertical(constraints).split(area);
+            for (i, line) in lines.iter().enumerate() {
+                if i < chunks.len() {
+                    let p = Paragraph::new(line.clone());
+                    frame.render_widget(p, chunks[i]);
+                }
+            }
+            strip_trailing_spaces(frame.buffer_mut());
+        })?;
+        Ok(())
+    }
+
     /// Print a line above the status bar
     pub fn print_line(&mut self, text: &str) -> Result<()> {
         if !self.enabled {

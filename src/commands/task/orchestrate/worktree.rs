@@ -64,31 +64,71 @@ impl WorktreeManager {
 
     /// Create a git worktree for a worker to work on a specific task.
     ///
-    /// Creates a new branch from HEAD and a worktree directory as a sibling
-    /// to the project root.
+    /// Handles resumption after interruption:
+    /// - If worktree + branch exist and match → reuse (continue previous work)
+    /// - If branch exists but worktree is gone → prune + attach existing branch
+    /// - If worktree exists with wrong branch → remove + create fresh
+    /// - Nothing exists → create new branch + worktree
     pub async fn create_worktree(&self, worker_id: u32, task_id: &str) -> Result<WorktreeInfo> {
         let path = self.worktree_path(worker_id);
         let branch = Self::branch_name(worker_id, task_id);
+        let branch_exists = self.branch_exists(&branch).await;
 
-        // Remove existing worktree if it exists (from a previous run)
         if path.exists() {
-            self.remove_worktree(&path).await?;
+            if branch_exists && self.worktree_has_branch(&path, &branch).await {
+                // Worktree exists with correct branch — reuse it
+                return Ok(WorktreeInfo {
+                    path,
+                    branch,
+                    worker_id,
+                    task_id: task_id.to_string(),
+                });
+            }
+            // Wrong branch or stale directory — remove first
+            self.remove_worktree(&path).await.ok();
+            // If path still exists (remove_worktree failed), force-remove directory
+            if path.exists() {
+                tokio::fs::remove_dir_all(&path).await.ok();
+            }
         }
 
-        let output = Command::new("git")
-            .args(["worktree", "add", "-b", &branch])
-            .arg(&path)
-            .arg("HEAD")
-            .current_dir(&self.project_root)
-            .output()
-            .await
-            .map_err(|e| RalphError::WorktreeError(format!("Failed to spawn git: {e}")))?;
+        // Prune stale worktree entries so git doesn't think the branch is checked out elsewhere
+        self.prune().await.ok();
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RalphError::WorktreeError(format!(
-                "git worktree add failed: {stderr}"
-            )));
+        if branch_exists {
+            // Branch exists from a previous run — attach it to a new worktree
+            let output = Command::new("git")
+                .args(["worktree", "add"])
+                .arg(&path)
+                .arg(&branch)
+                .current_dir(&self.project_root)
+                .output()
+                .await
+                .map_err(|e| RalphError::WorktreeError(format!("Failed to spawn git: {e}")))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(RalphError::WorktreeError(format!(
+                    "git worktree add (existing branch) failed: {stderr}"
+                )));
+            }
+        } else {
+            // Fresh start — create new branch from HEAD
+            let output = Command::new("git")
+                .args(["worktree", "add", "-b", &branch])
+                .arg(&path)
+                .arg("HEAD")
+                .current_dir(&self.project_root)
+                .output()
+                .await
+                .map_err(|e| RalphError::WorktreeError(format!("Failed to spawn git: {e}")))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(RalphError::WorktreeError(format!(
+                    "git worktree add failed: {stderr}"
+                )));
+            }
         }
 
         Ok(WorktreeInfo {
@@ -97,6 +137,34 @@ impl WorktreeManager {
             worker_id,
             task_id: task_id.to_string(),
         })
+    }
+
+    /// Check if a git branch exists.
+    async fn branch_exists(&self, branch: &str) -> bool {
+        Command::new("git")
+            .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+            .current_dir(&self.project_root)
+            .output()
+            .await
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// Check if a worktree directory is on the expected branch.
+    async fn worktree_has_branch(&self, worktree_path: &Path, expected_branch: &str) -> bool {
+        Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(worktree_path)
+            .output()
+            .await
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .is_some_and(|b| b == expected_branch)
     }
 
     /// Remove a git worktree directory.

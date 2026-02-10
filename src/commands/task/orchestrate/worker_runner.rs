@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc;
 
+use crate::commands::run::output::OutputFormatter;
 use crate::commands::run::runner::{ClaudeEvent, ClaudeRunner, ContentBlock};
 use crate::commands::task::orchestrate::events::{WorkerEvent, WorkerEventKind, WorkerPhase};
 use crate::shared::error::Result;
@@ -19,6 +20,7 @@ pub struct WorkerRunner {
     task_id: String,
     event_tx: mpsc::Sender<WorkerEvent>,
     shutdown: Arc<AtomicBool>,
+    use_nerd_font: bool,
 }
 
 impl WorkerRunner {
@@ -27,12 +29,14 @@ impl WorkerRunner {
         task_id: String,
         event_tx: mpsc::Sender<WorkerEvent>,
         shutdown: Arc<AtomicBool>,
+        use_nerd_font: bool,
     ) -> Self {
         Self {
             worker_id,
             task_id,
             event_tx,
             shutdown,
+            use_nerd_font,
         }
     }
 
@@ -65,6 +69,8 @@ impl WorkerRunner {
         // Track cost/tokens across events for this phase
         let worker_id = self.worker_id;
         let tx = self.event_tx.clone();
+        let tx_output = self.event_tx.clone();
+        let mut formatter = OutputFormatter::new(self.use_nerd_font);
 
         let result = runner
             .run(
@@ -88,6 +94,17 @@ impl WorkerRunner {
                         });
                         // Best-effort send — don't block on channel full
                         let _ = tx.try_send(cost_event);
+                    }
+
+                    // Format and forward output lines for live TUI display
+                    let lines = formatter.format_event(event);
+                    if !lines.is_empty() {
+                        let _ = tx_output.try_send(WorkerEvent::new(
+                            WorkerEventKind::OutputLines {
+                                worker_id,
+                                lines,
+                            },
+                        ));
                     }
                 },
                 || {},
@@ -228,7 +245,7 @@ mod tests {
     fn test_worker_runner_creation() {
         let (tx, _rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, false);
         assert_eq!(runner.worker_id, 1);
         assert_eq!(runner.task_id, "T01");
     }
@@ -237,7 +254,7 @@ mod tests {
     async fn test_send_event() {
         let (tx, mut rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, false);
 
         runner
             .send_event(WorkerEventKind::TaskStarted {

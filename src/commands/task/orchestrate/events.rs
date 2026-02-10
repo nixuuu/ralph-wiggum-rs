@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -89,9 +88,15 @@ pub enum WorkerEventKind {
         task_id: String,
         conflicting_files: Vec<String>,
     },
+    /// Batch of formatted output lines from a worker's Claude session.
+    OutputLines {
+        worker_id: u32,
+        lines: Vec<String>,
+    },
 }
 
 /// Command sent from orchestrator to a worker.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command")]
 pub enum OrchestratorCommand {
@@ -330,6 +335,10 @@ mod tests {
                 worker_id: 1,
                 task_id: "T01".to_string(),
                 conflicting_files: vec![],
+            },
+            WorkerEventKind::OutputLines {
+                worker_id: 1,
+                lines: vec!["Hello world".to_string()],
             },
         ];
 

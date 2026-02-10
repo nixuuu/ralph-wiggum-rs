@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::shared::dag::TaskDag;
@@ -149,14 +148,17 @@ impl TaskScheduler {
         self.failed_retries.get(task_id).copied().unwrap_or(0)
     }
 
+    #[allow(dead_code)]
     pub fn done_tasks(&self) -> &HashSet<String> {
         &self.done
     }
 
+    #[allow(dead_code)]
     pub fn blocked_tasks(&self) -> &HashSet<String> {
         &self.blocked
     }
 
+    #[allow(dead_code)]
     pub fn in_progress_tasks(&self) -> &HashSet<String> {
         &self.in_progress
     }

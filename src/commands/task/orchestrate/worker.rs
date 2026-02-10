@@ -34,6 +34,7 @@ pub struct Worker {
     shutdown: Arc<AtomicBool>,
     system_prompt: String,
     max_retries: u32,
+    use_nerd_font: bool,
 }
 
 impl Worker {
@@ -43,6 +44,7 @@ impl Worker {
         shutdown: Arc<AtomicBool>,
         system_prompt: String,
         max_retries: u32,
+        use_nerd_font: bool,
     ) -> Self {
         Self {
             id,
@@ -50,6 +52,7 @@ impl Worker {
             shutdown,
             system_prompt,
             max_retries,
+            use_nerd_font,
         }
     }
 
@@ -83,6 +86,7 @@ impl Worker {
                 task_id.to_string(),
                 self.event_tx.clone(),
                 self.shutdown.clone(),
+                self.use_nerd_font,
             );
 
             // Phase 1: Implement
@@ -324,7 +328,7 @@ mod tests {
     fn test_worker_creation() {
         let (tx, _rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let worker = Worker::new(1, tx, shutdown, "system prompt".to_string(), 3);
+        let worker = Worker::new(1, tx, shutdown, "system prompt".to_string(), 3, false);
         assert_eq!(worker.id, 1);
         assert_eq!(worker.max_retries, 3);
     }
@@ -333,7 +337,7 @@ mod tests {
     async fn test_worker_send_event() {
         let (tx, mut rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let worker = Worker::new(2, tx, shutdown, "system prompt".to_string(), 3);
+        let worker = Worker::new(2, tx, shutdown, "system prompt".to_string(), 3, false);
 
         worker
             .send_event(WorkerEventKind::TaskStarted {

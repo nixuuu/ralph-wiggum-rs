@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,6 +26,7 @@ pub struct MultiplexedOutput {
     /// Per-worker current task assignment
     worker_tasks: HashMap<u32, String>,
     /// Combined JSONL log file (optional)
+    #[allow(dead_code)]
     combined_log: Option<std::fs::File>,
 }
 
@@ -107,6 +107,7 @@ impl MultiplexedOutput {
     }
 
     /// Get total tokens across all workers.
+    #[allow(dead_code)]
     pub fn total_tokens(&self) -> (u64, u64) {
         let input: u64 = self.worker_costs.values().map(|(_, i, _)| i).sum();
         let output: u64 = self.worker_costs.values().map(|(_, _, o)| o).sum();
@@ -114,6 +115,7 @@ impl MultiplexedOutput {
     }
 
     /// Write a line to the combined log (if configured).
+    #[allow(dead_code)]
     pub fn log_line(&mut self, line: &str) {
         if let Some(log) = &mut self.combined_log {
             writeln!(log, "{line}").ok();
@@ -121,6 +123,7 @@ impl MultiplexedOutput {
     }
 
     /// Get the log file path (for reference).
+    #[allow(dead_code)]
     pub fn log_path(&self) -> Option<PathBuf> {
         // We don't store the path, but callers can track it
         None

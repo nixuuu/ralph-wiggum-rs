@@ -1,16 +1,20 @@
-#![allow(dead_code)]
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::mpsc;
 
-use crate::commands::task::orchestrate::events::{EventLogger, WorkerEvent, WorkerEventKind};
+use crate::commands::task::orchestrate::events::{EventLogger, WorkerEvent, WorkerEventKind, WorkerPhase};
 use crate::commands::task::orchestrate::merge::{self, MergeResult};
+use crate::commands::task::orchestrate::output::MultiplexedOutput;
 use crate::commands::task::orchestrate::scheduler::TaskScheduler;
 use crate::commands::task::orchestrate::state::{Lockfile, OrchestrateState};
+use crate::commands::task::orchestrate::status::{
+    OrchestratorInputThread, OrchestratorStatus, OrchestratorStatusBar, WorkerState, WorkerStatus,
+};
+use crate::commands::task::orchestrate::summary::{self, TaskSummaryEntry};
 use crate::commands::task::orchestrate::worker::{TaskResult, Worker};
 use crate::commands::task::orchestrate::worktree::{WorktreeInfo, WorktreeManager};
 use crate::shared::dag::TaskDag;
@@ -18,31 +22,47 @@ use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
 use crate::shared::progress::{self, ProgressSummary, ProgressTask};
 
+// ── Worker slot tracking ────────────────────────────────────────────
+
 /// Per-worker tracking state within the orchestrator.
 #[derive(Debug, Clone)]
 enum WorkerSlot {
     Idle,
     Busy {
+        #[allow(dead_code)]
         task_id: String,
         worktree: WorktreeInfo,
     },
 }
 
+// ── TUI context ─────────────────────────────────────────────────────
+
+/// Groups all TUI-related mutable state to keep function signatures clean.
+struct TuiContext {
+    status_bar: OrchestratorStatusBar,
+    mux_output: MultiplexedOutput,
+    worker_statuses: HashMap<u32, WorkerStatus>,
+    task_start_times: HashMap<String, Instant>,
+    task_summaries: Vec<TaskSummaryEntry>,
+}
+
+// ── Resolved config ─────────────────────────────────────────────────
+
 /// Configuration resolved from CLI args + file config for orchestration.
-///
-/// This struct holds the final merged values from CLI flags, .ralph.toml,
-/// and hardcoded defaults.
 pub struct ResolvedConfig {
     pub workers: u32,
     pub max_retries: u32,
     pub model: Option<String>,
     pub worktree_prefix: Option<String>,
+    #[allow(dead_code)]
     pub verbose: bool,
     pub resume: bool,
+    #[allow(dead_code)]
     pub dry_run: bool,
     pub no_merge: bool,
     pub max_cost: Option<f64>,
     pub timeout: Option<Duration>,
+    #[allow(dead_code)]
     pub task_filter: Option<Vec<String>>,
 }
 
@@ -112,18 +132,16 @@ fn parse_duration(s: &str) -> Option<Duration> {
     }
 }
 
+// ── Orchestrator ────────────────────────────────────────────────────
+
 /// Main orchestrator — coordinates workers, scheduler, merges, and state.
 pub struct Orchestrator {
-    /// Resolved configuration
     config: ResolvedConfig,
-    /// Project root directory
     project_root: PathBuf,
-    /// Path to PROGRESS.md
     progress_path: PathBuf,
-    /// System prompt for workers
     system_prompt: String,
-    /// Verification commands extracted from system prompt
     verification_commands: String,
+    use_nerd_font: bool,
 }
 
 impl Orchestrator {
@@ -141,7 +159,6 @@ impl Orchestrator {
             String::new()
         };
 
-        // Extract verification commands from system prompt (look for ```bash blocks or similar)
         let verification_commands = extract_verification_commands(&system_prompt);
 
         Ok(Self {
@@ -150,6 +167,7 @@ impl Orchestrator {
             progress_path,
             system_prompt,
             verification_commands,
+            use_nerd_font: file_config.ui.nerd_font,
         })
     }
 
@@ -166,6 +184,19 @@ impl Orchestrator {
 
         if let Some(cycle) = dag.detect_cycles() {
             return Err(RalphError::DagCycle(cycle));
+        }
+
+        // 2b. Dry-run mode — show DAG visualization and exit without side effects
+        if self.config.dry_run {
+            use crate::commands::task::orchestrate::dry_run;
+
+            let viz = dry_run::visualize_dag(&dag, &progress);
+            let dag_output = dry_run::format_dag(&viz, self.config.workers);
+            println!("{dag_output}");
+            println!();
+            let dep_list = dry_run::format_dep_list(&dag, &progress);
+            println!("Task dependency list:\n{dep_list}");
+            return Ok(());
         }
 
         // 3. Acquire lockfile
@@ -192,7 +223,7 @@ impl Orchestrator {
         };
 
         // 7. Initialize event channel and logger
-        let (event_tx, event_rx) = mpsc::channel::<WorkerEvent>(256);
+        let (event_tx, event_rx) = mpsc::channel::<WorkerEvent>(1024);
         let log_dir = ralph_dir.join("logs");
         let combined_log_path = ralph_dir.join("orchestrate.log");
         let event_logger = EventLogger::new(log_dir, Some(&combined_log_path))?;
@@ -207,23 +238,52 @@ impl Orchestrator {
         // 9. Shutdown signaling
         let shutdown = Arc::new(AtomicBool::new(false));
         let graceful_shutdown = Arc::new(AtomicBool::new(false));
+        let resize_flag = Arc::new(AtomicBool::new(false));
 
-        // 10. Run the main orchestration loop
-        self.run_loop(
-            &mut scheduler,
-            &worktree_manager,
-            &mut state,
-            &state_path,
-            event_tx,
-            event_rx,
-            event_logger,
-            &mut worker_slots,
-            &progress,
-            shutdown,
-            graceful_shutdown,
-            lockfile,
-        )
-        .await
+        // 10. Initialize TUI
+        let output_log_path = ralph_dir.join("orchestrate-output.log");
+        let mut tui = TuiContext {
+            status_bar: OrchestratorStatusBar::new(worker_count, self.use_nerd_font)?,
+            mux_output: MultiplexedOutput::new(Some(&output_log_path)),
+            worker_statuses: (1..=worker_count)
+                .map(|i| (i, WorkerStatus::idle(i)))
+                .collect(),
+            task_start_times: HashMap::new(),
+            task_summaries: Vec::new(),
+        };
+
+        // 11. Spawn input thread (dedicated OS thread for crossterm)
+        let input_thread = OrchestratorInputThread::spawn(
+            shutdown.clone(),
+            graceful_shutdown.clone(),
+            resize_flag.clone(),
+        );
+
+        // 12. Run the main orchestration loop
+        let result = self
+            .run_loop(
+                &mut scheduler,
+                &worktree_manager,
+                &mut state,
+                &state_path,
+                event_tx,
+                event_rx,
+                event_logger,
+                &mut worker_slots,
+                &progress,
+                shutdown,
+                graceful_shutdown,
+                resize_flag,
+                lockfile,
+                &mut tui,
+            )
+            .await;
+
+        // 13. Cleanup TUI
+        tui.status_bar.cleanup()?;
+        input_thread.stop();
+
+        result
     }
 
     /// The main orchestration loop.
@@ -241,15 +301,16 @@ impl Orchestrator {
         progress: &ProgressSummary,
         shutdown: Arc<AtomicBool>,
         graceful_shutdown: Arc<AtomicBool>,
+        resize_flag: Arc<AtomicBool>,
         mut lockfile: Lockfile,
+        tui: &mut TuiContext,
     ) -> Result<()> {
-        let mut total_cost: f64 = 0.0;
         let mut worker_join_handles: HashMap<u32, tokio::task::JoinHandle<Result<TaskResult>>> =
             HashMap::new();
         let mut progress_mtime = get_mtime(&self.progress_path);
-        let mut last_heartbeat = std::time::Instant::now();
-        let mut last_hot_reload = std::time::Instant::now();
-        let started_at = std::time::Instant::now();
+        let mut last_heartbeat = Instant::now();
+        let mut last_hot_reload = Instant::now();
+        let started_at = Instant::now();
 
         // Build task lookup for merge
         let task_lookup: HashMap<String, ProgressTask> = progress
@@ -258,36 +319,48 @@ impl Orchestrator {
             .map(|t| (t.id.clone(), t.clone()))
             .collect();
 
-        eprintln!(
-            "Orchestrator started: {} workers, {} tasks ({} done, {} remaining)",
+        // Print startup message
+        let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+            "Started: {} workers, {} tasks ({} done, {} remaining)",
             self.config.workers,
             progress.total(),
             progress.done,
             progress.remaining()
-        );
+        ));
+        tui.status_bar.print_line(&msg)?;
+
+        // Initial status bar render
+        self.update_status_bar(tui, scheduler, started_at)?;
 
         loop {
             // Check budget limits
             if let Some(max_cost) = self.config.max_cost
-                && total_cost >= max_cost
+                && tui.mux_output.total_cost() >= max_cost
             {
-                eprintln!("Budget limit reached: ${total_cost:.4} >= ${max_cost:.4}");
+                let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+                    "Budget limit reached: ${:.4} >= ${max_cost:.4}",
+                    tui.mux_output.total_cost()
+                ));
+                tui.status_bar.print_line(&msg)?;
                 break;
             }
             if let Some(timeout) = self.config.timeout
                 && started_at.elapsed() >= timeout
             {
-                eprintln!("Timeout reached");
+                let msg =
+                    MultiplexedOutput::format_orchestrator_line("Timeout reached");
+                tui.status_bar.print_line(&msg)?;
                 break;
             }
 
             // Check completion
             if scheduler.is_complete() {
                 let status = scheduler.status();
-                eprintln!(
+                let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                     "All tasks complete: {} done, {} blocked",
                     status.done, status.blocked
-                );
+                ));
+                tui.status_bar.print_line(&msg)?;
                 break;
             }
 
@@ -301,6 +374,7 @@ impl Orchestrator {
                     &event_tx,
                     &shutdown,
                     progress,
+                    tui,
                 )
                 .await?;
             }
@@ -309,8 +383,10 @@ impl Orchestrator {
             tokio::select! {
                 // Process worker events
                 Some(event) = event_rx.recv() => {
-                    // Log the event
-                    if let Some(worker_id) = extract_worker_id(&event.kind) {
+                    // Log structural events (skip verbose OutputLines)
+                    if !matches!(event.kind, WorkerEventKind::OutputLines { .. })
+                        && let Some(worker_id) = extract_worker_id(&event.kind)
+                    {
                         event_logger.log_event(&event, worker_id).ok();
                     }
 
@@ -322,28 +398,40 @@ impl Orchestrator {
                         &mut worker_join_handles,
                         state,
                         &task_lookup,
-                        &mut total_cost,
+                        tui,
                     ).await?;
+
+                    // Refresh status bar after event
+                    if resize_flag.swap(false, Ordering::SeqCst) {
+                        tui.status_bar.cleanup()?;
+                        tui.status_bar = OrchestratorStatusBar::new(
+                            self.config.workers, self.use_nerd_font
+                        )?;
+                    }
+                    self.update_status_bar(tui, scheduler, started_at)?;
                 }
 
-                // Ctrl+C signal handling
+                // Ctrl+C signal handling (backup — input thread handles q/Ctrl+C too)
                 _ = tokio::signal::ctrl_c() => {
                     if graceful_shutdown.load(Ordering::Relaxed) {
                         // Second Ctrl+C — force shutdown
-                        eprintln!("\nForce shutdown — aborting all workers");
+                        let msg = MultiplexedOutput::format_orchestrator_line(
+                            "Force shutdown — aborting all workers"
+                        );
+                        tui.status_bar.print_line(&msg)?;
                         shutdown.store(true, Ordering::Relaxed);
-                        // Abort all join handles
                         for (_, handle) in worker_join_handles.drain() {
                             handle.abort();
                         }
                         break;
                     } else {
                         // First Ctrl+C — graceful drain
-                        eprintln!("\nGraceful shutdown — waiting for in-progress tasks to finish...");
-                        eprintln!("Press Ctrl+C again to force quit");
+                        let msg = MultiplexedOutput::format_orchestrator_line(
+                            "Graceful shutdown — waiting for in-progress tasks..."
+                        );
+                        tui.status_bar.print_line(&msg)?;
                         graceful_shutdown.store(true, Ordering::Relaxed);
 
-                        // If no workers are busy, exit immediately
                         let any_busy = worker_slots.values().any(|s| matches!(s, WorkerSlot::Busy { .. }));
                         if !any_busy {
                             break;
@@ -351,12 +439,33 @@ impl Orchestrator {
                     }
                 }
 
-                // Periodic timer: heartbeat, hot reload, state save
+                // Periodic timer: heartbeat, hot reload, state save, status refresh
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    // Check if input thread triggered shutdown
+                    if shutdown.load(Ordering::SeqCst) {
+                        let msg = MultiplexedOutput::format_orchestrator_line(
+                            "Force shutdown — aborting all workers"
+                        );
+                        tui.status_bar.print_line(&msg)?;
+                        for (_, handle) in worker_join_handles.drain() {
+                            handle.abort();
+                        }
+                        break;
+                    }
+                    if graceful_shutdown.load(Ordering::SeqCst)
+                        && !worker_slots.values().any(|s| matches!(s, WorkerSlot::Busy { .. }))
+                    {
+                        let msg = MultiplexedOutput::format_orchestrator_line(
+                            "All workers drained — exiting"
+                        );
+                        tui.status_bar.print_line(&msg)?;
+                        break;
+                    }
+
                     // Heartbeat every 5 seconds
                     if last_heartbeat.elapsed() >= Duration::from_secs(5) {
                         lockfile.heartbeat().ok();
-                        last_heartbeat = std::time::Instant::now();
+                        last_heartbeat = Instant::now();
                     }
 
                     // Hot reload PROGRESS.md every 15 seconds
@@ -365,7 +474,6 @@ impl Orchestrator {
                             && progress_mtime.is_none_or(|old| new_mtime > old)
                         {
                             progress_mtime = Some(new_mtime);
-                            // Reload DAG
                             if let Ok(new_content) = std::fs::read_to_string(&self.progress_path) {
                                 let new_progress = progress::parse_progress(&new_content);
                                 if let Some(fm) = &new_progress.frontmatter {
@@ -374,17 +482,17 @@ impl Orchestrator {
                                 }
                             }
                         }
-                        last_hot_reload = std::time::Instant::now();
+                        last_hot_reload = Instant::now();
                     }
 
-                    // In graceful shutdown, check if all workers are done
-                    if graceful_shutdown.load(Ordering::Relaxed) {
-                        let any_busy = worker_slots.values().any(|s| matches!(s, WorkerSlot::Busy { .. }));
-                        if !any_busy {
-                            eprintln!("All workers drained — exiting");
-                            break;
-                        }
+                    // Refresh status bar
+                    if resize_flag.swap(false, Ordering::SeqCst) {
+                        tui.status_bar.cleanup()?;
+                        tui.status_bar = OrchestratorStatusBar::new(
+                            self.config.workers, self.use_nerd_font
+                        )?;
                     }
+                    self.update_status_bar(tui, scheduler, started_at)?;
                 }
             }
         }
@@ -395,14 +503,31 @@ impl Orchestrator {
         // Release lockfile
         lockfile.release().ok();
 
-        // Summary
+        // Print summary
         let elapsed = started_at.elapsed();
-        eprintln!(
-            "\nSession complete: ${total_cost:.4} total | {:.0}s elapsed",
-            elapsed.as_secs_f64()
-        );
+        let summary_text = summary::format_summary(&tui.task_summaries, elapsed);
+        println!("\n{summary_text}");
 
         Ok(())
+    }
+
+    /// Build and render the current status bar.
+    fn update_status_bar(
+        &self,
+        tui: &mut TuiContext,
+        scheduler: &TaskScheduler,
+        started_at: Instant,
+    ) -> Result<()> {
+        let mut workers: Vec<WorkerStatus> = tui.worker_statuses.values().cloned().collect();
+        workers.sort_by_key(|w| w.worker_id);
+
+        let orch_status = OrchestratorStatus {
+            scheduler: scheduler.status(),
+            workers,
+            total_cost: tui.mux_output.total_cost(),
+            elapsed: started_at.elapsed(),
+        };
+        tui.status_bar.update(&orch_status)
     }
 
     /// Assign ready tasks to idle workers.
@@ -416,6 +541,7 @@ impl Orchestrator {
         event_tx: &mpsc::Sender<WorkerEvent>,
         shutdown: &Arc<AtomicBool>,
         progress: &ProgressSummary,
+        tui: &mut TuiContext,
     ) -> Result<()> {
         // Find idle workers
         let idle_workers: Vec<u32> = worker_slots
@@ -426,14 +552,12 @@ impl Orchestrator {
 
         for worker_id in idle_workers {
             let Some(task_id) = scheduler.next_ready_task() else {
-                break; // No more ready tasks
+                break;
             };
 
             // Find task info from progress
-            let task_desc = progress
-                .tasks
-                .iter()
-                .find(|t| t.id == task_id)
+            let task_info = progress.tasks.iter().find(|t| t.id == task_id);
+            let task_desc = task_info
                 .map(|t| format!("{} [{}] {}", t.id, t.component, t.name))
                 .unwrap_or_else(|| task_id.clone());
 
@@ -445,10 +569,29 @@ impl Orchestrator {
                 .create_worktree(worker_id, &task_id)
                 .await?;
 
-            eprintln!("[W{worker_id}] Assigned: {task_id} → {}", worktree.branch);
+            // Print assignment via TUI
+            let msg = tui.mux_output.format_worker_line(
+                worker_id,
+                &format!("Assigned: {task_id} → {}", worktree.branch),
+            );
+            tui.status_bar.print_line(&msg)?;
 
             // Mark task as started in scheduler
             scheduler.mark_started(&task_id);
+
+            // Update TUI worker status
+            tui.mux_output.assign_worker(worker_id, &task_id);
+            if let Some(ws) = tui.worker_statuses.get_mut(&worker_id) {
+                ws.state = WorkerState::Implementing;
+                ws.task_id = Some(task_id.clone());
+                ws.component = task_info.map(|t| t.component.clone());
+                ws.phase = Some(WorkerPhase::Implement);
+                ws.cost_usd = 0.0;
+                ws.input_tokens = 0;
+                ws.output_tokens = 0;
+            }
+            tui.task_start_times
+                .insert(task_id.clone(), Instant::now());
 
             // Update worker slot
             worker_slots.insert(
@@ -466,6 +609,7 @@ impl Orchestrator {
                 shutdown.clone(),
                 self.system_prompt.clone(),
                 self.config.max_retries,
+                self.use_nerd_font,
             );
 
             let worktree_path = worktree.path.clone();
@@ -503,9 +647,75 @@ impl Orchestrator {
         join_handles: &mut HashMap<u32, tokio::task::JoinHandle<Result<TaskResult>>>,
         state: &mut OrchestrateState,
         task_lookup: &HashMap<String, ProgressTask>,
-        total_cost: &mut f64,
+        tui: &mut TuiContext,
     ) -> Result<()> {
         match &event.kind {
+            WorkerEventKind::TaskStarted {
+                worker_id,
+                task_id,
+            } => {
+                if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
+                    ws.state = WorkerState::Implementing;
+                    ws.task_id = Some(task_id.clone());
+                    ws.component = task_lookup.get(task_id).map(|t| t.component.clone());
+                    ws.phase = Some(WorkerPhase::Implement);
+                }
+                let msg = tui
+                    .mux_output
+                    .format_worker_line(*worker_id, &format!("Started: {task_id}"));
+                tui.status_bar.print_line(&msg)?;
+            }
+
+            WorkerEventKind::PhaseStarted {
+                worker_id,
+                task_id,
+                phase,
+            } => {
+                if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
+                    ws.phase = Some(phase.clone());
+                    ws.state = match phase {
+                        WorkerPhase::Implement => WorkerState::Implementing,
+                        WorkerPhase::ReviewFix => WorkerState::Reviewing,
+                        WorkerPhase::Verify => WorkerState::Verifying,
+                    };
+                }
+                let msg = tui
+                    .mux_output
+                    .format_worker_line(*worker_id, &format!("{task_id} → phase: {phase}"));
+                tui.status_bar.print_line(&msg)?;
+            }
+
+            WorkerEventKind::PhaseCompleted {
+                worker_id,
+                task_id,
+                phase,
+                success,
+            } => {
+                let status_text = if *success { "ok" } else { "FAILED" };
+                let msg = tui.mux_output.format_worker_line(
+                    *worker_id,
+                    &format!("{task_id} ← phase: {phase} [{status_text}]"),
+                );
+                tui.status_bar.print_line(&msg)?;
+            }
+
+            WorkerEventKind::CostUpdate {
+                worker_id,
+                cost_usd,
+                input_tokens,
+                output_tokens,
+            } => {
+                tui.mux_output
+                    .update_cost(*worker_id, *cost_usd, *input_tokens, *output_tokens);
+                if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
+                    let (total_cost, total_in, total_out) =
+                        tui.mux_output.worker_cost(*worker_id);
+                    ws.cost_usd = total_cost;
+                    ws.input_tokens = total_in;
+                    ws.output_tokens = total_out;
+                }
+            }
+
             WorkerEventKind::TaskCompleted {
                 worker_id,
                 task_id,
@@ -513,27 +723,40 @@ impl Orchestrator {
                 cost_usd,
                 ..
             } => {
-                *total_cost += cost_usd;
-
                 // Wait for the worker's join handle to complete
                 if let Some(handle) = join_handles.remove(worker_id) {
                     let _ = handle.await;
                 }
+
+                // Record summary entry
+                let duration = tui
+                    .task_start_times
+                    .remove(task_id)
+                    .map(|s| s.elapsed())
+                    .unwrap_or_default();
 
                 if *success && !self.config.no_merge {
                     // Attempt squash merge
                     if let Some(WorkerSlot::Busy { worktree, .. }) = worker_slots.get(worker_id)
                         && let Some(task) = task_lookup.get(task_id)
                     {
+                        // Show merging state
+                        if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
+                            ws.state = WorkerState::Merging;
+                        }
+
                         let merge_result =
                             merge::squash_merge(&self.project_root, worktree, task).await?;
 
                         match merge_result {
                             MergeResult::Success { commit_hash } => {
-                                eprintln!("[W{worker_id}] Merged: {task_id} → {commit_hash}");
+                                let msg = tui.mux_output.format_worker_line(
+                                    *worker_id,
+                                    &format!("Merged: {task_id} → {commit_hash}"),
+                                );
+                                tui.status_bar.print_line(&msg)?;
                                 scheduler.mark_done(task_id);
 
-                                // Update state
                                 state.tasks.insert(
                                     task_id.clone(),
                                     crate::commands::task::orchestrate::state::TaskState {
@@ -544,13 +767,23 @@ impl Orchestrator {
                                     },
                                 );
 
-                                // Cleanup worktree
                                 worktree_manager.remove_worktree(&worktree.path).await.ok();
                                 worktree_manager.remove_branch(&worktree.branch).await.ok();
+
+                                tui.task_summaries.push(TaskSummaryEntry {
+                                    task_id: task_id.clone(),
+                                    status: "Done".to_string(),
+                                    cost_usd: *cost_usd,
+                                    duration,
+                                    retries: scheduler.retry_count(task_id),
+                                });
                             }
                             MergeResult::Conflict { files } => {
-                                eprintln!("[W{worker_id}] Merge conflict in {task_id}: {files:?}");
-                                // Abort merge and block the task for now
+                                let msg = tui.mux_output.format_worker_line(
+                                    *worker_id,
+                                    &format!("Merge conflict in {task_id}: {files:?}"),
+                                );
+                                tui.status_bar.print_line(&msg)?;
                                 merge::abort_merge(&self.project_root).await.ok();
                                 scheduler.mark_blocked(task_id);
 
@@ -563,29 +796,80 @@ impl Orchestrator {
                                         cost: *cost_usd,
                                     },
                                 );
+
+                                tui.task_summaries.push(TaskSummaryEntry {
+                                    task_id: task_id.clone(),
+                                    status: "Blocked".to_string(),
+                                    cost_usd: *cost_usd,
+                                    duration,
+                                    retries: scheduler.retry_count(task_id),
+                                });
                             }
                             MergeResult::Failed { error } => {
-                                eprintln!("[W{worker_id}] Merge failed for {task_id}: {error}");
+                                let msg = tui.mux_output.format_worker_line(
+                                    *worker_id,
+                                    &format!("Merge failed for {task_id}: {error}"),
+                                );
+                                tui.status_bar.print_line(&msg)?;
                                 scheduler.mark_blocked(task_id);
+
+                                tui.task_summaries.push(TaskSummaryEntry {
+                                    task_id: task_id.clone(),
+                                    status: "Blocked".to_string(),
+                                    cost_usd: *cost_usd,
+                                    duration,
+                                    retries: scheduler.retry_count(task_id),
+                                });
                             }
                         }
                     }
                 } else if *success {
-                    // --no-merge mode: mark done without merging
+                    // --no-merge mode
                     scheduler.mark_done(task_id);
-                    eprintln!("[W{worker_id}] Done (no merge): {task_id}");
+                    let msg = tui
+                        .mux_output
+                        .format_worker_line(*worker_id, &format!("Done (no merge): {task_id}"));
+                    tui.status_bar.print_line(&msg)?;
+
+                    tui.task_summaries.push(TaskSummaryEntry {
+                        task_id: task_id.clone(),
+                        status: "Done".to_string(),
+                        cost_usd: *cost_usd,
+                        duration,
+                        retries: scheduler.retry_count(task_id),
+                    });
                 } else {
                     // Task failed
                     let requeued = scheduler.mark_failed(task_id);
                     if requeued {
-                        eprintln!("[W{worker_id}] Task {task_id} failed, re-queued for retry");
+                        let msg = tui.mux_output.format_worker_line(
+                            *worker_id,
+                            &format!("Task {task_id} failed, re-queued for retry"),
+                        );
+                        tui.status_bar.print_line(&msg)?;
                     } else {
-                        eprintln!("[W{worker_id}] Task {task_id} blocked after max retries");
+                        let msg = tui.mux_output.format_worker_line(
+                            *worker_id,
+                            &format!("Task {task_id} blocked after max retries"),
+                        );
+                        tui.status_bar.print_line(&msg)?;
+
+                        tui.task_summaries.push(TaskSummaryEntry {
+                            task_id: task_id.clone(),
+                            status: "Blocked".to_string(),
+                            cost_usd: *cost_usd,
+                            duration,
+                            retries: scheduler.retry_count(task_id),
+                        });
                     }
                 }
 
-                // Free the worker slot
+                // Free the worker slot and reset status
                 worker_slots.insert(*worker_id, WorkerSlot::Idle);
+                if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
+                    *ws = WorkerStatus::idle(*worker_id);
+                }
+                tui.mux_output.clear_worker(*worker_id);
             }
 
             WorkerEventKind::TaskFailed {
@@ -594,43 +878,68 @@ impl Orchestrator {
                 error,
                 retries_left,
             } => {
-                if *retries_left == 0 {
-                    eprintln!("[W{worker_id}] Task {task_id} failed permanently: {error}");
+                let msg = if *retries_left == 0 {
+                    tui.mux_output.format_worker_line(
+                        *worker_id,
+                        &format!("Task {task_id} failed permanently: {error}"),
+                    )
                 } else {
-                    eprintln!(
-                        "[W{worker_id}] Task {task_id} failed ({retries_left} retries left): {error}"
-                    );
+                    tui.mux_output.format_worker_line(
+                        *worker_id,
+                        &format!(
+                            "Task {task_id} failed ({retries_left} retries left): {error}"
+                        ),
+                    )
+                };
+                tui.status_bar.print_line(&msg)?;
+            }
+
+            WorkerEventKind::MergeStarted {
+                worker_id,
+                task_id,
+            } => {
+                if let Some(ws) = tui.worker_statuses.get_mut(worker_id) {
+                    ws.state = WorkerState::Merging;
+                }
+                let msg = tui
+                    .mux_output
+                    .format_worker_line(*worker_id, &format!("Merging: {task_id}"));
+                tui.status_bar.print_line(&msg)?;
+            }
+
+            WorkerEventKind::MergeCompleted {
+                worker_id,
+                task_id,
+                success,
+                commit_hash,
+            } => {
+                let hash = commit_hash.as_deref().unwrap_or("???");
+                let status_text = if *success { "ok" } else { "FAILED" };
+                let msg = tui.mux_output.format_worker_line(
+                    *worker_id,
+                    &format!("Merge {task_id}: {status_text} ({hash})"),
+                );
+                tui.status_bar.print_line(&msg)?;
+            }
+
+            WorkerEventKind::MergeConflict {
+                worker_id,
+                task_id,
+                conflicting_files,
+            } => {
+                let msg = tui.mux_output.format_worker_line(
+                    *worker_id,
+                    &format!("Merge conflict in {task_id}: {conflicting_files:?}"),
+                );
+                tui.status_bar.print_line(&msg)?;
+            }
+
+            WorkerEventKind::OutputLines { worker_id, lines } => {
+                for line in lines {
+                    let prefixed = tui.mux_output.format_worker_line(*worker_id, line);
+                    tui.status_bar.print_line(&prefixed)?;
                 }
             }
-
-            WorkerEventKind::CostUpdate {
-                worker_id: _,
-                cost_usd,
-                ..
-            } => {
-                *total_cost += cost_usd;
-            }
-
-            WorkerEventKind::PhaseStarted {
-                worker_id,
-                task_id,
-                phase,
-            } => {
-                eprintln!("[W{worker_id}] {task_id} → phase: {phase}");
-            }
-
-            WorkerEventKind::PhaseCompleted {
-                worker_id,
-                task_id,
-                phase,
-                success,
-            } => {
-                let status = if *success { "ok" } else { "FAILED" };
-                eprintln!("[W{worker_id}] {task_id} ← phase: {phase} [{status}]");
-            }
-
-            // Other events: log only (MergeStarted, MergeCompleted, MergeConflict, TaskStarted)
-            _ => {}
         }
 
         Ok(())
@@ -638,7 +947,6 @@ impl Orchestrator {
 
     /// Resolve the model to use for a specific task.
     fn resolve_model(&self, task_id: &str, progress: &ProgressSummary) -> Option<String> {
-        // Priority: per-task model from frontmatter > CLI --model > config default
         if let Some(fm) = &progress.frontmatter {
             if let Some(model) = fm.models.get(task_id) {
                 return Some(model.clone());
@@ -651,8 +959,9 @@ impl Orchestrator {
     }
 }
 
+// ── Helpers ─────────────────────────────────────────────────────────
+
 /// Extract verification commands from the system prompt.
-/// Looks for ```bash or ```sh fenced code blocks, or lines starting with `$`.
 fn extract_verification_commands(system_prompt: &str) -> String {
     let mut commands = Vec::new();
     let mut in_code_block = false;
@@ -675,7 +984,6 @@ fn extract_verification_commands(system_prompt: &str) -> String {
     }
 
     if commands.is_empty() {
-        // Fallback: look for common verification commands
         "cargo check && cargo test && cargo clippy --all-targets -- -D warnings".to_string()
     } else {
         commands.join("\n")
@@ -698,7 +1006,8 @@ fn extract_worker_id(kind: &WorkerEventKind) -> Option<u32> {
         | WorkerEventKind::CostUpdate { worker_id, .. }
         | WorkerEventKind::MergeStarted { worker_id, .. }
         | WorkerEventKind::MergeCompleted { worker_id, .. }
-        | WorkerEventKind::MergeConflict { worker_id, .. } => Some(*worker_id),
+        | WorkerEventKind::MergeConflict { worker_id, .. }
+        | WorkerEventKind::OutputLines { worker_id, .. } => Some(*worker_id),
     }
 }
 
@@ -809,14 +1118,13 @@ mod tests {
             progress_path: PathBuf::from("/tmp/test/PROGRESS.md"),
             system_prompt: String::new(),
             verification_commands: String::new(),
+            use_nerd_font: false,
         };
 
-        // Per-task model takes priority
         assert_eq!(
             orch.resolve_model("T01", &progress),
             Some("claude-opus-4-6".to_string())
         );
-        // Frontmatter default for unknown task
         assert_eq!(
             orch.resolve_model("T99", &progress),
             Some("claude-sonnet-4-5-20250929".to_string())
@@ -861,6 +1169,7 @@ mod tests {
             progress_path: PathBuf::from("/tmp/test/PROGRESS.md"),
             system_prompt: String::new(),
             verification_commands: String::new(),
+            use_nerd_font: false,
         };
 
         assert_eq!(
@@ -936,8 +1245,8 @@ mod tests {
         let file_config = FileConfig::default();
         let config = ResolvedConfig::from_args(&cli_args, &file_config);
 
-        assert_eq!(config.workers, 4); // from CLI
-        assert_eq!(config.max_retries, 3); // default from file config
+        assert_eq!(config.workers, 4);
+        assert_eq!(config.max_retries, 3);
         assert_eq!(config.model.as_deref(), Some("cli-model"));
         assert!(config.verbose);
         assert_eq!(config.max_cost, Some(5.0));
