@@ -3,6 +3,7 @@ pub mod args;
 mod continue_cmd;
 mod edit;
 mod input;
+pub mod orchestrate;
 mod prd;
 mod status;
 

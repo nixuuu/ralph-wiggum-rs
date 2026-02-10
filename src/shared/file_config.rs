@@ -69,6 +69,9 @@ pub struct TaskConfig {
     pub adaptive_iterations: bool,
     #[serde(default)]
     pub files: TaskFilesConfig,
+    /// Orchestration settings (`[task.orchestrate]` in .ralph.toml)
+    #[serde(default)]
+    pub orchestrate: OrchestrateConfig,
 }
 
 impl Default for TaskConfig {
@@ -82,8 +85,46 @@ impl Default for TaskConfig {
             auto_continue: false,
             adaptive_iterations: true,
             files: TaskFilesConfig::default(),
+            orchestrate: OrchestrateConfig::default(),
         }
     }
+}
+
+/// Configuration for task orchestration (`[task.orchestrate]` in .ralph.toml)
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct OrchestrateConfig {
+    /// Number of parallel workers (default: 2)
+    #[serde(default = "default_workers")]
+    pub workers: u32,
+    /// Max retries per task before marking as blocked (default: 3)
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Prefix for worktree directory names
+    #[serde(default)]
+    pub worktree_prefix: Option<String>,
+    /// Default Claude model for workers
+    #[serde(default)]
+    pub default_model: Option<String>,
+}
+
+impl Default for OrchestrateConfig {
+    fn default() -> Self {
+        Self {
+            workers: default_workers(),
+            max_retries: default_max_retries(),
+            worktree_prefix: None,
+            default_model: None,
+        }
+    }
+}
+
+fn default_workers() -> u32 {
+    2
+}
+
+fn default_max_retries() -> u32 {
+    3
 }
 
 fn default_progress_file() -> PathBuf {
@@ -435,5 +476,62 @@ questions = "QS.md"
             config.task.files.questions,
             std::path::PathBuf::from("QS.md")
         );
+    }
+
+    // --- Orchestrate config tests ---
+
+    #[test]
+    fn test_orchestrate_config_defaults() {
+        let config = FileConfig::default();
+        assert_eq!(config.task.orchestrate.workers, 2);
+        assert_eq!(config.task.orchestrate.max_retries, 3);
+        assert!(config.task.orchestrate.worktree_prefix.is_none());
+        assert!(config.task.orchestrate.default_model.is_none());
+    }
+
+    #[test]
+    fn test_orchestrate_config_backward_compat() {
+        // Existing .ralph.toml without [task.orchestrate] should still work
+        let toml_content = r#"
+[task]
+progress_file = "PROGRESS.md"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.workers, 2);
+        assert_eq!(config.task.orchestrate.max_retries, 3);
+    }
+
+    #[test]
+    fn test_orchestrate_config_full() {
+        let toml_content = r#"
+[task.orchestrate]
+workers = 4
+max_retries = 5
+worktree_prefix = "my-project-ralph-w"
+default_model = "claude-sonnet-4-5-20250929"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.workers, 4);
+        assert_eq!(config.task.orchestrate.max_retries, 5);
+        assert_eq!(
+            config.task.orchestrate.worktree_prefix.as_deref(),
+            Some("my-project-ralph-w")
+        );
+        assert_eq!(
+            config.task.orchestrate.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+    }
+
+    #[test]
+    fn test_orchestrate_config_partial() {
+        let toml_content = r#"
+[task.orchestrate]
+workers = 6
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.workers, 6);
+        assert_eq!(config.task.orchestrate.max_retries, 3); // default
+        assert!(config.task.orchestrate.worktree_prefix.is_none());
     }
 }

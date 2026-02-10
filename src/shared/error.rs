@@ -31,6 +31,30 @@ pub enum RalphError {
 
     #[error("Task setup error: {0}")]
     TaskSetup(String),
+
+    #[error("Orchestration error: {0}")]
+    #[allow(dead_code)]
+    Orchestrate(String),
+
+    #[error("Git worktree error: {0}")]
+    #[allow(dead_code)]
+    WorktreeError(String),
+
+    #[error("Merge conflict: {0}")]
+    #[allow(dead_code)]
+    MergeConflict(String),
+
+    #[error("DAG cycle detected: {0:?}")]
+    #[allow(dead_code)]
+    DagCycle(Vec<String>),
+
+    #[error("Lockfile held by another process: {0}")]
+    #[allow(dead_code)]
+    LockfileHeld(String),
+
+    #[error("Session resume error: {0}")]
+    #[allow(dead_code)]
+    SessionResume(String),
 }
 
 pub type Result<T> = std::result::Result<T, RalphError>;
