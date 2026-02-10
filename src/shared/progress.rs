@@ -231,7 +231,6 @@ pub fn load_progress(path: &Path) -> Result<ProgressSummary> {
 }
 
 /// Convert a TaskStatus to its markdown checkbox marker.
-#[allow(dead_code)]
 fn status_marker(status: &TaskStatus) -> &'static str {
     match status {
         TaskStatus::Todo => "[ ]",
@@ -245,7 +244,6 @@ fn status_marker(status: &TaskStatus) -> &'static str {
 ///
 /// Reads the file, finds the line matching `- [S] {task_id} ...`,
 /// replaces the status marker, and writes the file back.
-#[allow(dead_code)]
 pub fn update_task_status(path: &Path, task_id: &str, new_status: TaskStatus) -> Result<()> {
     batch_update_statuses(path, &[(task_id.to_string(), new_status)])
 }
@@ -254,7 +252,6 @@ pub fn update_task_status(path: &Path, task_id: &str, new_status: TaskStatus) ->
 ///
 /// Reads the file once, applies all status changes, writes back once.
 /// Tasks not found in the file are silently skipped.
-#[allow(dead_code)]
 pub fn batch_update_statuses(path: &Path, updates: &[(String, TaskStatus)]) -> Result<()> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| RalphError::MissingFile(format!("{}: {}", path.display(), e)))?;

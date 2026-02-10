@@ -21,7 +21,7 @@ use crate::commands::task::orchestrate::worktree::{WorktreeInfo, WorktreeManager
 use crate::shared::dag::TaskDag;
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
-use crate::shared::progress::{self, ProgressSummary, ProgressTask};
+use crate::shared::progress::{self, ProgressSummary, ProgressTask, TaskStatus};
 
 // ── Worker slot tracking ────────────────────────────────────────────
 
@@ -414,6 +414,7 @@ impl Orchestrator {
                     &shutdown,
                     progress,
                     tui,
+                    &mut progress_mtime,
                 )
                 .await?;
             }
@@ -438,6 +439,7 @@ impl Orchestrator {
                         state,
                         &task_lookup,
                         tui,
+                        &mut progress_mtime,
                     ).await?;
 
                     // Handle resize after event
@@ -625,6 +627,7 @@ impl Orchestrator {
         shutdown: &Arc<AtomicBool>,
         progress: &ProgressSummary,
         tui: &mut TuiContext,
+        progress_mtime: &mut Option<SystemTime>,
     ) -> Result<()> {
         // Find idle workers
         let idle_workers: Vec<u32> = worker_slots
@@ -632,6 +635,8 @@ impl Orchestrator {
             .filter(|(_, slot)| matches!(slot, WorkerSlot::Idle))
             .map(|(id, _)| *id)
             .collect();
+
+        let mut started_ids: Vec<String> = Vec::new();
 
         for worker_id in idle_workers {
             let Some(task_id) = scheduler.next_ready_task() else {
@@ -661,6 +666,7 @@ impl Orchestrator {
 
             // Mark task as started in scheduler
             scheduler.mark_started(&task_id);
+            started_ids.push(task_id.clone());
 
             // Update TUI worker status
             tui.mux_output.assign_worker(worker_id, &task_id);
@@ -718,6 +724,22 @@ impl Orchestrator {
             join_handles.insert(worker_id, handle);
         }
 
+        // Batch-update PROGRESS.md for all newly started tasks
+        if !started_ids.is_empty() {
+            let updates: Vec<(String, TaskStatus)> = started_ids
+                .into_iter()
+                .map(|id| (id, TaskStatus::InProgress))
+                .collect();
+            if let Err(e) = progress::batch_update_statuses(&self.progress_path, &updates) {
+                let msg = MultiplexedOutput::format_orchestrator_line(
+                    &format!("Warning: PROGRESS.md batch update failed: {e}"),
+                );
+                tui.dashboard.push_log_line(&msg);
+            } else if let Some(mt) = get_mtime(&self.progress_path) {
+                *progress_mtime = Some(mt);
+            }
+        }
+
         Ok(())
     }
 
@@ -733,6 +755,7 @@ impl Orchestrator {
         state: &mut OrchestrateState,
         task_lookup: &HashMap<String, ProgressTask>,
         tui: &mut TuiContext,
+        progress_mtime: &mut Option<SystemTime>,
     ) -> Result<()> {
         match &event.kind {
             WorkerEventKind::TaskStarted {
@@ -862,6 +885,9 @@ impl Orchestrator {
                                 );
                                 tui.dashboard.push_log_line(&msg);
                                 scheduler.mark_done(task_id);
+                                if let Some(mt) = self.update_progress_file(task_id, TaskStatus::Done, tui) {
+                                    *progress_mtime = Some(mt);
+                                }
 
                                 state.tasks.insert(
                                     task_id.clone(),
@@ -892,6 +918,9 @@ impl Orchestrator {
                                 tui.dashboard.push_log_line(&msg);
                                 merge::abort_merge(&self.project_root).await.ok();
                                 scheduler.mark_blocked(task_id);
+                                if let Some(mt) = self.update_progress_file(task_id, TaskStatus::Blocked, tui) {
+                                    *progress_mtime = Some(mt);
+                                }
 
                                 state.tasks.insert(
                                     task_id.clone(),
@@ -918,6 +947,9 @@ impl Orchestrator {
                                 );
                                 tui.dashboard.push_log_line(&msg);
                                 scheduler.mark_blocked(task_id);
+                                if let Some(mt) = self.update_progress_file(task_id, TaskStatus::Blocked, tui) {
+                                    *progress_mtime = Some(mt);
+                                }
 
                                 tui.task_summaries.push(TaskSummaryEntry {
                                     task_id: task_id.clone(),
@@ -932,6 +964,9 @@ impl Orchestrator {
                 } else if *success {
                     // --no-merge mode
                     scheduler.mark_done(task_id);
+                    if let Some(mt) = self.update_progress_file(task_id, TaskStatus::Done, tui) {
+                        *progress_mtime = Some(mt);
+                    }
                     let msg = tui
                         .mux_output
                         .format_worker_line(*worker_id, &format!("Done (no merge): {task_id}"));
@@ -959,6 +994,9 @@ impl Orchestrator {
                             &format!("Task {task_id} blocked after max retries"),
                         );
                         tui.dashboard.push_log_line(&msg);
+                        if let Some(mt) = self.update_progress_file(task_id, TaskStatus::Blocked, tui) {
+                            *progress_mtime = Some(mt);
+                        }
 
                         tui.task_summaries.push(TaskSummaryEntry {
                             task_id: task_id.clone(),
@@ -1054,6 +1092,24 @@ impl Orchestrator {
         }
 
         Ok(())
+    }
+
+    /// Update PROGRESS.md status for a task. Non-fatal — logs warning on failure.
+    /// Returns new mtime if successful.
+    fn update_progress_file(
+        &self,
+        task_id: &str,
+        new_status: TaskStatus,
+        tui: &mut TuiContext,
+    ) -> Option<SystemTime> {
+        if let Err(e) = progress::update_task_status(&self.progress_path, task_id, new_status) {
+            let msg = MultiplexedOutput::format_orchestrator_line(
+                &format!("Warning: PROGRESS.md update failed for {task_id}: {e}"),
+            );
+            tui.dashboard.push_log_line(&msg);
+            return None;
+        }
+        get_mtime(&self.progress_path)
     }
 
     /// Resolve the model to use for a specific task.
