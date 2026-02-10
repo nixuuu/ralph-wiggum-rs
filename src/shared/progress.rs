@@ -274,9 +274,7 @@ pub fn batch_update_statuses(path: &Path, updates: &[(String, TaskStatus)]) -> R
         {
             // Extract task_id: first token after "- [S] "
             let after_bracket = &trimmed[6..]; // after "- [S] "
-            let id_end = after_bracket
-                .find(' ')
-                .unwrap_or(after_bracket.len());
+            let id_end = after_bracket.find(' ').unwrap_or(after_bracket.len());
             let found_id = &after_bracket[..id_end];
 
             if let Some(new_status) = lookup.get(found_id) {
@@ -561,7 +559,10 @@ default_model: claude-sonnet-4-5-20250929
         let fm = summary.frontmatter.as_ref().unwrap();
         assert_eq!(fm.deps.len(), 1);
         assert_eq!(fm.models.len(), 1);
-        assert_eq!(fm.default_model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+        assert_eq!(
+            fm.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
     }
 
     #[test]
@@ -637,7 +638,10 @@ deps:
         let (parsed, body) = parse_frontmatter(&written);
         let parsed = parsed.unwrap();
         assert_eq!(parsed.deps["T02"], vec!["T01"]);
-        assert_eq!(parsed.default_model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+        assert_eq!(
+            parsed.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
         assert!(body.trim().is_empty());
     }
 
@@ -670,7 +674,10 @@ default_model: claude-sonnet-4-5-20250929
         assert_eq!(fm.deps["1.1.2"], vec!["1.1.1"]);
         assert_eq!(fm.deps["1.1.4"], vec!["1.1.2", "1.1.3"]);
         assert_eq!(fm.models["3.2.1"], "claude-opus-4-6");
-        assert_eq!(fm.default_model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+        assert_eq!(
+            fm.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
     }
 
     // --- Status update tests ---
@@ -770,8 +777,7 @@ deps:
         std::fs::write(&path, content).unwrap();
 
         let mut fm = ProgressFrontmatter::default();
-        fm.deps
-            .insert("T01".to_string(), Vec::new());
+        fm.deps.insert("T01".to_string(), Vec::new());
         update_progress_frontmatter(&path, &fm).unwrap();
 
         let result = std::fs::read_to_string(&path).unwrap();
@@ -797,8 +803,7 @@ deps:
         std::fs::write(&path, content).unwrap();
 
         let mut fm = ProgressFrontmatter::default();
-        fm.deps
-            .insert("T02".to_string(), vec!["T01".to_string()]);
+        fm.deps.insert("T02".to_string(), vec!["T01".to_string()]);
         fm.default_model = Some("claude-sonnet-4-5-20250929".to_string());
         update_progress_frontmatter(&path, &fm).unwrap();
 
