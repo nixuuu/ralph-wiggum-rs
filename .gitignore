@@ -2,3 +2,10 @@
 .claude/ralph-loop.local.md
 PROGRESS.md
 .ralph.toml
+
+CHANGENOTES.md
+CURRENT_TASK.md
+IMPLEMENTATION_ISSUES.md
+OPEN_QUESTIONS.md
+SPEC.md
+SYSTEM_PROMPT.md
