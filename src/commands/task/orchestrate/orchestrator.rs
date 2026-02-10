@@ -29,7 +29,10 @@ enum WorkerSlot {
 }
 
 /// Configuration resolved from CLI args + file config for orchestration.
-pub struct OrchestrateArgs {
+///
+/// This struct holds the final merged values from CLI flags, .ralph.toml,
+/// and hardcoded defaults.
+pub struct ResolvedConfig {
     pub workers: u32,
     pub max_retries: u32,
     pub model: Option<String>,
@@ -43,10 +46,79 @@ pub struct OrchestrateArgs {
     pub task_filter: Option<Vec<String>>,
 }
 
+impl ResolvedConfig {
+    /// Build resolved config from CLI args + file config.
+    ///
+    /// Priority: CLI flags > .ralph.toml orchestrate section > hardcoded defaults.
+    pub fn from_args(
+        cli: &crate::commands::task::args::OrchestrateArgs,
+        file_config: &FileConfig,
+    ) -> Self {
+        let orch_cfg = &file_config.task.orchestrate;
+
+        let workers = cli.workers.unwrap_or(orch_cfg.workers);
+        let max_retries = cli.max_retries.unwrap_or(orch_cfg.max_retries);
+        let model = cli
+            .model
+            .clone()
+            .or_else(|| orch_cfg.default_model.clone());
+        let worktree_prefix = cli
+            .worktree_prefix
+            .clone()
+            .or_else(|| orch_cfg.worktree_prefix.clone());
+        let timeout = cli.timeout.as_deref().and_then(parse_duration);
+        let task_filter = cli
+            .tasks
+            .as_ref()
+            .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
+
+        Self {
+            workers,
+            max_retries,
+            model,
+            worktree_prefix,
+            verbose: cli.verbose,
+            resume: cli.resume,
+            dry_run: cli.dry_run,
+            no_merge: cli.no_merge,
+            max_cost: cli.max_cost,
+            timeout,
+            task_filter,
+        }
+    }
+}
+
+/// Parse a human-readable duration string like "2h", "30m", "45s", "1h30m".
+fn parse_duration(s: &str) -> Option<Duration> {
+    let mut total_secs: u64 = 0;
+    let mut current_num = String::new();
+
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            current_num.push(ch);
+        } else {
+            let n: u64 = current_num.parse().ok()?;
+            current_num.clear();
+            match ch {
+                'h' => total_secs += n * 3600,
+                'm' => total_secs += n * 60,
+                's' => total_secs += n,
+                _ => return None,
+            }
+        }
+    }
+
+    if total_secs > 0 {
+        Some(Duration::from_secs(total_secs))
+    } else {
+        None
+    }
+}
+
 /// Main orchestrator — coordinates workers, scheduler, merges, and state.
 pub struct Orchestrator {
     /// Resolved configuration
-    args: OrchestrateArgs,
+    config: ResolvedConfig,
     /// Project root directory
     project_root: PathBuf,
     /// Path to PROGRESS.md
@@ -59,7 +131,7 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     pub fn new(
-        args: OrchestrateArgs,
+        config: ResolvedConfig,
         file_config: &FileConfig,
         project_root: PathBuf,
     ) -> Result<Self> {
@@ -76,7 +148,7 @@ impl Orchestrator {
         let verification_commands = extract_verification_commands(&system_prompt);
 
         Ok(Self {
-            args,
+            config,
             project_root,
             progress_path,
             system_prompt,
@@ -110,21 +182,21 @@ impl Orchestrator {
 
         // 4. Initialize scheduler
         let mut scheduler =
-            TaskScheduler::new(dag, &progress, self.args.max_retries);
+            TaskScheduler::new(dag, &progress, self.config.max_retries);
 
         // 5. Initialize worktree manager
         let worktree_manager = WorktreeManager::new(
             self.project_root.clone(),
-            self.args.worktree_prefix.clone(),
+            self.config.worktree_prefix.clone(),
         );
 
         // 6. Initialize state
         let state_path = ralph_dir.join("orchestrate.yaml");
-        let mut state = if self.args.resume && state_path.exists() {
+        let mut state = if self.config.resume && state_path.exists() {
             OrchestrateState::load(&state_path)?
         } else {
             OrchestrateState::new(
-                self.args.workers,
+                self.config.workers,
                 frontmatter.deps.clone(),
             )
         };
@@ -136,7 +208,7 @@ impl Orchestrator {
         let event_logger = EventLogger::new(log_dir, Some(&combined_log_path))?;
 
         // 8. Initialize worker slots
-        let worker_count = self.args.workers;
+        let worker_count = self.config.workers;
         let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
         for i in 1..=worker_count {
             worker_slots.insert(i, WorkerSlot::Idle);
@@ -198,7 +270,7 @@ impl Orchestrator {
 
         eprintln!(
             "Orchestrator started: {} workers, {} tasks ({} done, {} remaining)",
-            self.args.workers,
+            self.config.workers,
             progress.total(),
             progress.done,
             progress.remaining()
@@ -206,13 +278,13 @@ impl Orchestrator {
 
         loop {
             // Check budget limits
-            if let Some(max_cost) = self.args.max_cost
+            if let Some(max_cost) = self.config.max_cost
                 && total_cost >= max_cost
             {
                 eprintln!("Budget limit reached: ${total_cost:.4} >= ${max_cost:.4}");
                 break;
             }
-            if let Some(timeout) = self.args.timeout
+            if let Some(timeout) = self.config.timeout
                 && started_at.elapsed() >= timeout
             {
                 eprintln!("Timeout reached");
@@ -406,7 +478,7 @@ impl Orchestrator {
                 event_tx.clone(),
                 shutdown.clone(),
                 self.system_prompt.clone(),
-                self.args.max_retries,
+                self.config.max_retries,
             );
 
             let worktree_path = worktree.path.clone();
@@ -461,7 +533,7 @@ impl Orchestrator {
                     let _ = handle.await;
                 }
 
-                if *success && !self.args.no_merge {
+                if *success && !self.config.no_merge {
                     // Attempt squash merge
                     if let Some(WorkerSlot::Busy { worktree, .. }) =
                         worker_slots.get(worker_id)
@@ -603,7 +675,7 @@ impl Orchestrator {
                 return Some(model.clone());
             }
         }
-        self.args.model.clone()
+        self.config.model.clone()
     }
 }
 
@@ -745,7 +817,7 @@ mod tests {
             frontmatter: Some(fm),
         };
 
-        let args = OrchestrateArgs {
+        let config = ResolvedConfig {
             workers: 2,
             max_retries: 3,
             model: Some("fallback-model".to_string()),
@@ -760,7 +832,7 @@ mod tests {
         };
 
         let orch = Orchestrator {
-            args,
+            config,
             project_root: PathBuf::from("/tmp/test"),
             progress_path: PathBuf::from("/tmp/test/PROGRESS.md"),
             system_prompt: String::new(),
@@ -797,7 +869,7 @@ mod tests {
             frontmatter: None,
         };
 
-        let args = OrchestrateArgs {
+        let config = ResolvedConfig {
             workers: 2,
             max_retries: 3,
             model: Some("cli-model".to_string()),
@@ -812,7 +884,7 @@ mod tests {
         };
 
         let orch = Orchestrator {
-            args,
+            config,
             project_root: PathBuf::from("/tmp/test"),
             progress_path: PathBuf::from("/tmp/test/PROGRESS.md"),
             system_prompt: String::new(),
@@ -840,5 +912,67 @@ mod tests {
             },
         };
         assert!(matches!(busy, WorkerSlot::Busy { .. }));
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        assert_eq!(parse_duration("30m"), Some(Duration::from_secs(1800)));
+    }
+
+    #[test]
+    fn test_parse_duration_seconds() {
+        assert_eq!(parse_duration("45s"), Some(Duration::from_secs(45)));
+    }
+
+    #[test]
+    fn test_parse_duration_combined() {
+        assert_eq!(
+            parse_duration("1h30m"),
+            Some(Duration::from_secs(3600 + 1800))
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_invalid() {
+        assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("abc"), None);
+    }
+
+    #[test]
+    fn test_resolved_config_from_args() {
+        use crate::commands::task::args::OrchestrateArgs;
+
+        let cli_args = OrchestrateArgs {
+            workers: Some(4),
+            model: Some("cli-model".to_string()),
+            max_retries: None,
+            verbose: true,
+            resume: false,
+            dry_run: false,
+            worktree_prefix: None,
+            no_merge: false,
+            max_cost: Some(5.0),
+            timeout: Some("1h".to_string()),
+            tasks: Some("T01,T03".to_string()),
+        };
+
+        let file_config = FileConfig::default();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+
+        assert_eq!(config.workers, 4); // from CLI
+        assert_eq!(config.max_retries, 3); // default from file config
+        assert_eq!(config.model.as_deref(), Some("cli-model"));
+        assert!(config.verbose);
+        assert_eq!(config.max_cost, Some(5.0));
+        assert_eq!(config.timeout, Some(Duration::from_secs(3600)));
+        assert_eq!(
+            config.task_filter,
+            Some(vec!["T01".to_string(), "T03".to_string()])
+        );
     }
 }

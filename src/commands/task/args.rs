@@ -13,6 +13,10 @@ pub enum TaskCommands {
     Edit(EditArgs),
     /// Show task status dashboard
     Status,
+    /// Orchestrate parallel workers on tasks from PROGRESS.md
+    Orchestrate(OrchestrateArgs),
+    /// Clean up orphaned worktrees, branches, and state files
+    Clean,
 }
 
 #[derive(Args, Debug)]
@@ -62,6 +66,53 @@ pub struct EditArgs {
     /// Claude model to use
     #[arg(short, long)]
     pub model: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct OrchestrateArgs {
+    /// Number of parallel workers
+    #[arg(short, long)]
+    pub workers: Option<u32>,
+
+    /// Default Claude model for workers
+    #[arg(short, long)]
+    pub model: Option<String>,
+
+    /// Max retries per task before marking as blocked
+    #[arg(long)]
+    pub max_retries: Option<u32>,
+
+    /// Enable verbose event logging (JSONL)
+    #[arg(short, long)]
+    pub verbose: bool,
+
+    /// Resume a previous orchestration session
+    #[arg(long)]
+    pub resume: bool,
+
+    /// Show DAG plan without running workers
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Prefix for worktree directory names
+    #[arg(long)]
+    pub worktree_prefix: Option<String>,
+
+    /// Skip merging — keep worktrees intact
+    #[arg(long)]
+    pub no_merge: bool,
+
+    /// Maximum session cost in USD (e.g. 5.0)
+    #[arg(long)]
+    pub max_cost: Option<f64>,
+
+    /// Maximum session duration (e.g. "2h", "30m")
+    #[arg(long)]
+    pub timeout: Option<String>,
+
+    /// Filter specific tasks (comma-separated IDs, e.g. "T01,T03,T07")
+    #[arg(long)]
+    pub tasks: Option<String>,
 }
 
 #[cfg(test)]
@@ -154,5 +205,76 @@ mod tests {
         } else {
             panic!("Expected Prd command");
         }
+    }
+
+    #[test]
+    fn test_orchestrate_defaults() {
+        let cli = TestCli::parse_from(["test", "orchestrate"]);
+        if let super::TaskCommands::Orchestrate(args) = cli.command {
+            assert!(args.workers.is_none());
+            assert!(args.model.is_none());
+            assert!(args.max_retries.is_none());
+            assert!(!args.verbose);
+            assert!(!args.resume);
+            assert!(!args.dry_run);
+            assert!(!args.no_merge);
+            assert!(args.max_cost.is_none());
+            assert!(args.timeout.is_none());
+            assert!(args.tasks.is_none());
+        } else {
+            panic!("Expected Orchestrate command");
+        }
+    }
+
+    #[test]
+    fn test_orchestrate_all_flags() {
+        let cli = TestCli::parse_from([
+            "test",
+            "orchestrate",
+            "--workers",
+            "4",
+            "--model",
+            "claude-opus-4-6",
+            "--max-retries",
+            "5",
+            "--verbose",
+            "--resume",
+            "--no-merge",
+            "--max-cost",
+            "10.0",
+            "--timeout",
+            "2h",
+            "--tasks",
+            "T01,T03,T07",
+        ]);
+        if let super::TaskCommands::Orchestrate(args) = cli.command {
+            assert_eq!(args.workers, Some(4));
+            assert_eq!(args.model.as_deref(), Some("claude-opus-4-6"));
+            assert_eq!(args.max_retries, Some(5));
+            assert!(args.verbose);
+            assert!(args.resume);
+            assert!(args.no_merge);
+            assert_eq!(args.max_cost, Some(10.0));
+            assert_eq!(args.timeout.as_deref(), Some("2h"));
+            assert_eq!(args.tasks.as_deref(), Some("T01,T03,T07"));
+        } else {
+            panic!("Expected Orchestrate command");
+        }
+    }
+
+    #[test]
+    fn test_orchestrate_dry_run() {
+        let cli = TestCli::parse_from(["test", "orchestrate", "--dry-run"]);
+        if let super::TaskCommands::Orchestrate(args) = cli.command {
+            assert!(args.dry_run);
+        } else {
+            panic!("Expected Orchestrate command");
+        }
+    }
+
+    #[test]
+    fn test_clean_command() {
+        let cli = TestCli::parse_from(["test", "clean"]);
+        assert!(matches!(cli.command, super::TaskCommands::Clean));
     }
 }
