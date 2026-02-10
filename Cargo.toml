@@ -41,3 +41,6 @@ ansi-to-tui = "8"
 
 # HTTP client for update checking and self-update
 reqwest = { version = "0.13", features = ["json", "blocking", "rustls"], default-features = false }
+
+# Unix process utilities (PID checking for lockfile)
+libc = "0.2"
