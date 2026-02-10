@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -79,6 +79,10 @@ pub struct OrchestratorStatus {
 /// - Line 1: Overall progress bar + cost + elapsed
 /// - Lines 2..N+1: Per-worker status (icon, task, phase, tokens, cost)
 /// - Line N+2: Queue info (ready, in-progress, blocked, pending)
+///
+/// Note: Replaced by `Dashboard` for fullscreen mode, but kept for tests
+/// and potential future inline-mode fallback.
+#[allow(dead_code)]
 pub struct OrchestratorStatusBar {
     terminal: StatusTerminal,
     #[allow(dead_code)]
@@ -87,6 +91,7 @@ pub struct OrchestratorStatusBar {
     worker_count: u32,
 }
 
+#[allow(dead_code)]
 impl OrchestratorStatusBar {
     pub fn new(worker_count: u32, use_nerd_font: bool) -> Result<Self> {
         let height = worker_count as u16 + 2;
@@ -342,12 +347,16 @@ impl OrchestratorStatusBar {
 ///
 /// Runs on a dedicated OS thread (never tokio::spawn!) because
 /// crossterm::event::poll() is blocking and would starve the async runtime.
+///
+/// Note: Replaced by `DashboardInputThread`, kept for potential fallback.
+#[allow(dead_code)]
 pub struct OrchestratorInputThread {
     handle: Option<std::thread::JoinHandle<()>>,
     running: Arc<AtomicBool>,
 }
 
 impl OrchestratorInputThread {
+    #[allow(dead_code)]
     pub fn spawn(
         shutdown: Arc<AtomicBool>,
         graceful_shutdown: Arc<AtomicBool>,
@@ -397,6 +406,7 @@ impl OrchestratorInputThread {
         }
     }
 
+    #[allow(dead_code)]
     pub fn stop(mut self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
@@ -414,7 +424,7 @@ impl Drop for OrchestratorInputThread {
 // ── Helpers ─────────────────────────────────────────────────────────
 
 /// Render a Unicode progress bar.
-fn render_progress_bar(done: usize, total: usize, width: usize) -> String {
+pub fn render_progress_bar(done: usize, total: usize, width: usize) -> String {
     if total == 0 {
         return format!("[{}]", " ".repeat(width));
     }
@@ -424,7 +434,7 @@ fn render_progress_bar(done: usize, total: usize, width: usize) -> String {
 }
 
 /// Format a duration as human-readable string.
-fn format_duration(d: Duration) -> String {
+pub fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
         format!("{secs}s")
@@ -436,13 +446,156 @@ fn format_duration(d: Duration) -> String {
 }
 
 /// Format token count for display (e.g., 1234 -> "1.2k").
-fn format_tokens(tokens: u64) -> String {
+pub fn format_tokens(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {
         format!("{:.1}k", tokens as f64 / 1_000.0)
     } else {
         tokens.to_string()
+    }
+}
+
+// ── Dashboard input thread (extended key support) ────────────────────
+
+/// Keyboard/resize input thread for the fullscreen dashboard.
+///
+/// Extends `OrchestratorInputThread` with Tab/Esc/1-9/arrows for
+/// panel focus and scroll control. Runs on a dedicated OS thread.
+pub struct DashboardInputThread {
+    handle: Option<std::thread::JoinHandle<()>>,
+    running: Arc<AtomicBool>,
+}
+
+impl DashboardInputThread {
+    pub fn spawn(
+        shutdown: Arc<AtomicBool>,
+        graceful_shutdown: Arc<AtomicBool>,
+        resize_flag: Arc<AtomicBool>,
+        focused_worker: Arc<AtomicU32>,
+        worker_count: u32,
+        scroll_delta: Arc<AtomicI32>,
+    ) -> Self {
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("dash-input".into())
+            .spawn(move || {
+                while running_clone.load(Ordering::SeqCst) {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                        match crossterm::event::read() {
+                            Ok(crossterm::event::Event::Key(key)) => {
+                                use crossterm::event::{KeyCode, KeyModifiers};
+
+                                // Quit: q or Ctrl+C
+                                let is_quit = matches!(key.code, KeyCode::Char('q'))
+                                    || (key.code == KeyCode::Char('c')
+                                        && key.modifiers.contains(KeyModifiers::CONTROL));
+
+                                if is_quit {
+                                    if graceful_shutdown.load(Ordering::SeqCst) {
+                                        shutdown.store(true, Ordering::SeqCst);
+                                    } else {
+                                        graceful_shutdown.store(true, Ordering::SeqCst);
+                                    }
+                                    continue;
+                                }
+
+                                // Tab: cycle focus forward
+                                if key.code == KeyCode::Tab
+                                    && !key.modifiers.contains(KeyModifiers::SHIFT)
+                                {
+                                    let current = focused_worker.load(Ordering::Relaxed);
+                                    let next = if current >= worker_count {
+                                        0
+                                    } else {
+                                        current + 1
+                                    };
+                                    focused_worker.store(next, Ordering::Relaxed);
+                                    scroll_delta.store(0, Ordering::Relaxed);
+                                    continue;
+                                }
+
+                                // Shift+Tab: cycle focus backward
+                                if key.code == KeyCode::BackTab {
+                                    let current = focused_worker.load(Ordering::Relaxed);
+                                    let next = if current == 0 {
+                                        worker_count
+                                    } else {
+                                        current - 1
+                                    };
+                                    focused_worker.store(next, Ordering::Relaxed);
+                                    scroll_delta.store(0, Ordering::Relaxed);
+                                    continue;
+                                }
+
+                                // Esc: unfocus
+                                if key.code == KeyCode::Esc {
+                                    focused_worker.store(0, Ordering::Relaxed);
+                                    scroll_delta.store(0, Ordering::Relaxed);
+                                    continue;
+                                }
+
+                                // 1-9: direct focus
+                                if let KeyCode::Char(ch) = key.code
+                                    && ch.is_ascii_digit()
+                                    && ch != '0'
+                                {
+                                    let n = ch as u32 - '0' as u32;
+                                    if n <= worker_count {
+                                        focused_worker.store(n, Ordering::Relaxed);
+                                        scroll_delta.store(0, Ordering::Relaxed);
+                                    }
+                                    continue;
+                                }
+
+                                // Up/Down arrows: scroll focused panel
+                                if key.code == KeyCode::Up {
+                                    scroll_delta.fetch_sub(1, Ordering::Relaxed);
+                                    continue;
+                                }
+                                if key.code == KeyCode::Down {
+                                    scroll_delta.fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                }
+
+                                // End: reset scroll (signal via large positive value)
+                                if key.code == KeyCode::End {
+                                    scroll_delta.store(i32::MAX, Ordering::Relaxed);
+                                    continue;
+                                }
+                            }
+                            Ok(crossterm::event::Event::Resize(_, _)) => {
+                                resize_flag.store(true, Ordering::SeqCst);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            })
+            .expect("Failed to spawn dashboard input thread");
+
+        Self {
+            handle: Some(handle),
+            running,
+        }
+    }
+
+    pub fn stop(mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for DashboardInputThread {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
     }
 }
 

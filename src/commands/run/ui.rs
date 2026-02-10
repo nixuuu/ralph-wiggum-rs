@@ -291,6 +291,7 @@ impl StatusTerminal {
     ///
     /// Each `Line` occupies exactly one row. Uses `Layout::vertical` with
     /// `Constraint::Length(1)` per line.
+    #[allow(dead_code)]
     pub fn draw_lines(&mut self, lines: &[Line<'static>]) -> Result<()> {
         if !self.enabled || lines.is_empty() {
             return Ok(());

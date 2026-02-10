@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod dashboard;
 pub mod dry_run;
 pub mod events;
 pub mod merge;
