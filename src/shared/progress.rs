@@ -1,6 +1,24 @@
+use std::collections::HashMap;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use crate::shared::error::{RalphError, Result};
+
+/// YAML frontmatter from PROGRESS.md containing dependency graph,
+/// per-task model overrides, and default model.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ProgressFrontmatter {
+    /// Task dependency map: task_id → list of task_ids it depends on
+    #[serde(default)]
+    pub deps: HashMap<String, Vec<String>>,
+    /// Per-task model overrides: task_id → model name
+    #[serde(default)]
+    pub models: HashMap<String, String>,
+    /// Default model for all tasks (overridden by `models` entries)
+    #[serde(default)]
+    pub default_model: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskStatus {
@@ -25,6 +43,9 @@ pub struct ProgressSummary {
     pub in_progress: usize,
     pub blocked: usize,
     pub todo: usize,
+    /// Parsed YAML frontmatter (None if no frontmatter present)
+    #[allow(dead_code)]
+    pub frontmatter: Option<ProgressFrontmatter>,
 }
 
 impl ProgressSummary {
@@ -101,16 +122,77 @@ fn parse_task_line(line: &str) -> Option<ProgressTask> {
     })
 }
 
+/// Extract YAML frontmatter between `---` markers and return it with the remaining body.
+///
+/// Returns `(Some(frontmatter), body)` if valid YAML frontmatter is found,
+/// or `(None, original_content)` on missing/malformed frontmatter.
+pub fn parse_frontmatter(content: &str) -> (Option<ProgressFrontmatter>, &str) {
+    // Frontmatter must start with "---" on the first line
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return (None, content);
+    }
+
+    // Skip opening "---" and the newline after it
+    let after_opening = &trimmed[3..];
+    let after_opening = after_opening.strip_prefix('\n').unwrap_or(after_opening);
+
+    // Find the closing "---" at the start of a line
+    // It can be at the very beginning (empty frontmatter) or after a newline
+    let (yaml_str, body) = if let Some(rest) = after_opening.strip_prefix("---") {
+        // Empty frontmatter: ---\n---
+        ("", rest.strip_prefix('\n').unwrap_or(rest))
+    } else if let Some(close_pos) = after_opening.find("\n---") {
+        let yaml = &after_opening[..close_pos];
+        let rest = &after_opening[close_pos + 4..]; // skip "\n---"
+        (yaml, rest.strip_prefix('\n').unwrap_or(rest))
+    } else {
+        return (None, content);
+    };
+
+    // Empty YAML block → default frontmatter
+    if yaml_str.trim().is_empty() {
+        return (Some(ProgressFrontmatter::default()), body);
+    }
+
+    match serde_yaml::from_str::<ProgressFrontmatter>(yaml_str) {
+        Ok(fm) => (Some(fm), body),
+        Err(_) => {
+            // Tolerant: malformed YAML → treat as no frontmatter
+            (None, content)
+        }
+    }
+}
+
+/// Serialize a ProgressFrontmatter back to a YAML string with `---` delimiters.
+///
+/// Produces a string like:
+/// ```text
+/// ---
+/// deps:
+///   T02:
+///   - T01
+/// ---
+/// ```
+#[allow(dead_code)]
+pub fn write_frontmatter(fm: &ProgressFrontmatter) -> String {
+    let yaml = serde_yaml::to_string(fm).unwrap_or_default();
+    format!("---\n{}---\n", yaml)
+}
+
 /// Tolerant parser for PROGRESS.md content.
+/// Parses YAML frontmatter (if present) and task lines.
 /// Lines that don't match the expected format are silently skipped.
 pub fn parse_progress(content: &str) -> ProgressSummary {
+    let (frontmatter, body) = parse_frontmatter(content);
+
     let mut tasks = Vec::new();
     let mut done = 0;
     let mut in_progress = 0;
     let mut blocked = 0;
     let mut todo = 0;
 
-    for line in content.lines() {
+    for line in body.lines() {
         if let Some(task) = parse_task_line(line) {
             match task.status {
                 TaskStatus::Done => done += 1,
@@ -128,6 +210,7 @@ pub fn parse_progress(content: &str) -> ProgressSummary {
         in_progress,
         blocked,
         todo,
+        frontmatter,
     }
 }
 
@@ -145,6 +228,95 @@ pub fn load_progress(path: &Path) -> Result<ProgressSummary> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| RalphError::MissingFile(format!("{}: {}", path.display(), e)))?;
     Ok(parse_progress(&content))
+}
+
+/// Convert a TaskStatus to its markdown checkbox marker.
+#[allow(dead_code)]
+fn status_marker(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Todo => "[ ]",
+        TaskStatus::Done => "[x]",
+        TaskStatus::InProgress => "[~]",
+        TaskStatus::Blocked => "[!]",
+    }
+}
+
+/// Update the status of a single task in PROGRESS.md.
+///
+/// Reads the file, finds the line matching `- [S] {task_id} ...`,
+/// replaces the status marker, and writes the file back.
+#[allow(dead_code)]
+pub fn update_task_status(path: &Path, task_id: &str, new_status: TaskStatus) -> Result<()> {
+    batch_update_statuses(path, &[(task_id.to_string(), new_status)])
+}
+
+/// Atomically update the status of multiple tasks in PROGRESS.md.
+///
+/// Reads the file once, applies all status changes, writes back once.
+/// Tasks not found in the file are silently skipped.
+#[allow(dead_code)]
+pub fn batch_update_statuses(path: &Path, updates: &[(String, TaskStatus)]) -> Result<()> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| RalphError::MissingFile(format!("{}: {}", path.display(), e)))?;
+
+    let lookup: HashMap<&str, &TaskStatus> = updates
+        .iter()
+        .map(|(id, status)| (id.as_str(), status))
+        .collect();
+
+    let mut result = String::with_capacity(content.len());
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Check if this is a task line: "- [S] TASK_ID ..."
+        if trimmed.starts_with("- [")
+            && trimmed.len() > 5
+            && trimmed.as_bytes().get(4) == Some(&b']')
+        {
+            // Extract task_id: first token after "- [S] "
+            let after_bracket = &trimmed[6..]; // after "- [S] "
+            let id_end = after_bracket.find(' ').unwrap_or(after_bracket.len());
+            let found_id = &after_bracket[..id_end];
+
+            if let Some(new_status) = lookup.get(found_id) {
+                // Replace the status marker in the original line (preserving indentation)
+                let bracket_pos = line.find("- [").unwrap();
+                result.push_str(&line[..bracket_pos + 2]);
+                result.push_str(status_marker(new_status));
+                result.push_str(&line[bracket_pos + 5..]);
+                result.push('\n');
+                continue;
+            }
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    // Preserve original trailing newline behavior
+    if !content.ends_with('\n') {
+        result.pop();
+    }
+
+    std::fs::write(path, &result)
+        .map_err(|e| RalphError::Orchestrate(format!("Failed to write {}: {e}", path.display())))
+}
+
+/// Atomically update the YAML frontmatter in PROGRESS.md while preserving the body.
+///
+/// If no frontmatter exists, inserts new frontmatter at the top.
+/// If frontmatter exists, replaces it with the new version.
+#[allow(dead_code)]
+pub fn update_progress_frontmatter(path: &Path, fm: &ProgressFrontmatter) -> Result<()> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| RalphError::MissingFile(format!("{}: {}", path.display(), e)))?;
+
+    let (_, body) = parse_frontmatter(&content);
+    let new_fm = write_frontmatter(fm);
+
+    let mut result = new_fm;
+    result.push_str(body);
+
+    std::fs::write(path, &result)
+        .map_err(|e| RalphError::Orchestrate(format!("Failed to write {}: {e}", path.display())))
 }
 
 #[cfg(test)]
@@ -327,5 +499,338 @@ Some random text here
         let summary = parse_progress(content);
         assert_eq!(summary.tasks.len(), 1);
         assert_eq!(summary.tasks[0].id, "1.2");
+    }
+
+    // --- Frontmatter tests ---
+
+    #[test]
+    fn test_frontmatter_deps_only() {
+        let content = "\
+---
+deps:
+  T02: [T01]
+  T03: [T01, T02]
+---
+- [ ] T01 [api] First
+- [ ] T02 [api] Second
+- [ ] T03 [ui] Third";
+
+        let summary = parse_progress(content);
+        assert_eq!(summary.tasks.len(), 3);
+        let fm = summary.frontmatter.as_ref().unwrap();
+        assert_eq!(fm.deps.len(), 2);
+        assert_eq!(fm.deps["T02"], vec!["T01"]);
+        assert_eq!(fm.deps["T03"], vec!["T01", "T02"]);
+        assert!(fm.models.is_empty());
+        assert!(fm.default_model.is_none());
+    }
+
+    #[test]
+    fn test_frontmatter_models_only() {
+        let content = "\
+---
+models:
+  T01: claude-opus-4-6
+  T03: claude-haiku-4-5-20251001
+---
+- [ ] T01 [api] First";
+
+        let summary = parse_progress(content);
+        let fm = summary.frontmatter.as_ref().unwrap();
+        assert!(fm.deps.is_empty());
+        assert_eq!(fm.models.len(), 2);
+        assert_eq!(fm.models["T01"], "claude-opus-4-6");
+    }
+
+    #[test]
+    fn test_frontmatter_all_fields() {
+        let content = "\
+---
+deps:
+  T02: [T01]
+models:
+  T01: claude-opus-4-6
+default_model: claude-sonnet-4-5-20250929
+---
+- [ ] T01 [api] First
+- [ ] T02 [api] Second";
+
+        let summary = parse_progress(content);
+        let fm = summary.frontmatter.as_ref().unwrap();
+        assert_eq!(fm.deps.len(), 1);
+        assert_eq!(fm.models.len(), 1);
+        assert_eq!(
+            fm.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+    }
+
+    #[test]
+    fn test_frontmatter_empty_yaml() {
+        let content = "\
+---
+---
+- [ ] T01 [api] First";
+
+        let summary = parse_progress(content);
+        let fm = summary.frontmatter.as_ref().unwrap();
+        assert!(fm.deps.is_empty());
+        assert!(fm.models.is_empty());
+        assert!(fm.default_model.is_none());
+    }
+
+    #[test]
+    fn test_frontmatter_backward_compat_no_frontmatter() {
+        let content = "\
+# PROGRESS
+- [ ] T01 [api] First
+- [x] T02 [api] Second";
+
+        let summary = parse_progress(content);
+        assert!(summary.frontmatter.is_none());
+        assert_eq!(summary.tasks.len(), 2);
+    }
+
+    #[test]
+    fn test_frontmatter_malformed_yaml() {
+        let content = "\
+---
+deps: [invalid: yaml: structure
+  broken
+---
+- [ ] T01 [api] First";
+
+        let summary = parse_progress(content);
+        // Malformed YAML → no frontmatter, tasks still parsed from full content
+        assert!(summary.frontmatter.is_none());
+        assert_eq!(summary.tasks.len(), 1);
+    }
+
+    #[test]
+    fn test_frontmatter_empty_deps() {
+        let content = "\
+---
+deps:
+  T01: []
+  T02: []
+---
+- [ ] T01 [api] First
+- [ ] T02 [api] Second";
+
+        let summary = parse_progress(content);
+        let fm = summary.frontmatter.as_ref().unwrap();
+        assert_eq!(fm.deps.len(), 2);
+        assert!(fm.deps["T01"].is_empty());
+        assert!(fm.deps["T02"].is_empty());
+    }
+
+    #[test]
+    fn test_write_frontmatter_roundtrip() {
+        let mut fm = ProgressFrontmatter::default();
+        fm.deps.insert("T02".to_string(), vec!["T01".to_string()]);
+        fm.default_model = Some("claude-sonnet-4-5-20250929".to_string());
+
+        let written = write_frontmatter(&fm);
+        assert!(written.starts_with("---\n"));
+        assert!(written.ends_with("---\n"));
+
+        // Parse it back
+        let (parsed, body) = parse_frontmatter(&written);
+        let parsed = parsed.unwrap();
+        assert_eq!(parsed.deps["T02"], vec!["T01"]);
+        assert_eq!(
+            parsed.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+        assert!(body.trim().is_empty());
+    }
+
+    #[test]
+    fn test_frontmatter_with_real_progress() {
+        // Test with the actual PROGRESS.md format from this project
+        let content = "\
+---
+deps:
+  1.1.2: [1.1.1]
+  1.1.3: [1.1.1]
+  1.1.4: [1.1.2, 1.1.3]
+models:
+  3.2.1: claude-opus-4-6
+default_model: claude-sonnet-4-5-20250929
+---
+
+# PROGRESS
+
+## Epic 1: YAML Frontmatter Parser
+- [ ] 1.1.1 [progress] Define struct
+- [ ] 1.1.2 [progress] Parse frontmatter
+- [ ] 1.1.3 [progress] Write frontmatter
+- [ ] 1.1.4 [progress] Unit tests";
+
+        let summary = parse_progress(content);
+        assert_eq!(summary.tasks.len(), 4);
+        let fm = summary.frontmatter.as_ref().unwrap();
+        assert_eq!(fm.deps.len(), 3);
+        assert_eq!(fm.deps["1.1.2"], vec!["1.1.1"]);
+        assert_eq!(fm.deps["1.1.4"], vec!["1.1.2", "1.1.3"]);
+        assert_eq!(fm.models["3.2.1"], "claude-opus-4-6");
+        assert_eq!(
+            fm.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+    }
+
+    // --- Status update tests ---
+
+    #[test]
+    fn test_update_task_status_single() {
+        let dir = std::env::temp_dir().join("ralph_test_status_single");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("PROGRESS.md");
+        let content = "\
+- [ ] T01 [api] First task
+- [~] T02 [api] Second task
+- [ ] T03 [ui] Third task
+";
+        std::fs::write(&path, content).unwrap();
+
+        update_task_status(&path, "T02", TaskStatus::Done).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("- [x] T02 [api] Second task"));
+        // Others unchanged
+        assert!(result.contains("- [ ] T01 [api] First task"));
+        assert!(result.contains("- [ ] T03 [ui] Third task"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_batch_update_statuses() {
+        let dir = std::env::temp_dir().join("ralph_test_batch_status");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("PROGRESS.md");
+        let content = "\
+- [ ] T01 [api] First task
+- [ ] T02 [api] Second task
+- [ ] T03 [ui] Third task
+";
+        std::fs::write(&path, content).unwrap();
+
+        let updates = vec![
+            ("T01".to_string(), TaskStatus::InProgress),
+            ("T03".to_string(), TaskStatus::Blocked),
+        ];
+        batch_update_statuses(&path, &updates).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("- [~] T01 [api] First task"));
+        assert!(result.contains("- [ ] T02 [api] Second task")); // unchanged
+        assert!(result.contains("- [!] T03 [ui] Third task"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_update_task_status_missing_task() {
+        let dir = std::env::temp_dir().join("ralph_test_missing_task");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("PROGRESS.md");
+        let content = "- [ ] T01 [api] First task\n";
+        std::fs::write(&path, content).unwrap();
+
+        // Updating a non-existent task is silently skipped
+        update_task_status(&path, "T99", TaskStatus::Done).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("- [ ] T01 [api] First task"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_update_task_status_with_frontmatter() {
+        let dir = std::env::temp_dir().join("ralph_test_status_fm");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("PROGRESS.md");
+        let content = "\
+---
+deps:
+  T02: [T01]
+---
+- [ ] T01 [api] First task
+- [ ] T02 [api] Second task
+";
+        std::fs::write(&path, content).unwrap();
+
+        update_task_status(&path, "T01", TaskStatus::Done).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("- [x] T01 [api] First task"));
+        assert!(result.contains("deps:"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_update_progress_frontmatter_insert() {
+        let dir = std::env::temp_dir().join("ralph_test_fm_insert");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("PROGRESS.md");
+        let content = "# Progress\n- [ ] T01 [api] First\n";
+        std::fs::write(&path, content).unwrap();
+
+        let mut fm = ProgressFrontmatter::default();
+        fm.deps.insert("T01".to_string(), Vec::new());
+        update_progress_frontmatter(&path, &fm).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.starts_with("---\n"));
+        assert!(result.contains("T01"));
+        assert!(result.contains("# Progress"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_update_progress_frontmatter_replace() {
+        let dir = std::env::temp_dir().join("ralph_test_fm_replace");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("PROGRESS.md");
+        let content = "\
+---
+deps:
+  T02: [T01]
+---
+- [ ] T01 [api] First
+- [ ] T02 [api] Second
+";
+        std::fs::write(&path, content).unwrap();
+
+        let mut fm = ProgressFrontmatter::default();
+        fm.deps.insert("T02".to_string(), vec!["T01".to_string()]);
+        fm.default_model = Some("claude-sonnet-4-5-20250929".to_string());
+        update_progress_frontmatter(&path, &fm).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("default_model"));
+        assert!(result.contains("- [ ] T01 [api] First"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_status_marker() {
+        assert_eq!(status_marker(&TaskStatus::Todo), "[ ]");
+        assert_eq!(status_marker(&TaskStatus::Done), "[x]");
+        assert_eq!(status_marker(&TaskStatus::InProgress), "[~]");
+        assert_eq!(status_marker(&TaskStatus::Blocked), "[!]");
+    }
+
+    #[test]
+    fn test_frontmatter_no_closing_marker() {
+        let content = "\
+---
+deps:
+  T02: [T01]
+- [ ] T01 [api] First";
+
+        let summary = parse_progress(content);
+        // No closing --- → no frontmatter
+        assert!(summary.frontmatter.is_none());
     }
 }

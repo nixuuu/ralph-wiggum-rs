@@ -1,6 +1,6 @@
 [package]
 name = "ralph-wiggum"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 description = "Run claude in a loop until completion promise is found"
 authors = ["nix"]
@@ -41,3 +41,6 @@ ansi-to-tui = "8"
 
 # HTTP client for update checking and self-update
 reqwest = { version = "0.13", features = ["json", "blocking", "rustls"], default-features = false }
+
+# Unix process utilities (PID checking for lockfile)
+libc = "0.2"

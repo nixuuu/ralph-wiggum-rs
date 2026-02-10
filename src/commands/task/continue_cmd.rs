@@ -69,3 +69,73 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
 
     crate::commands::run::execute(args).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_execute_validates_progress_file() {
+        let config = FileConfig {
+            task: crate::shared::file_config::TaskConfig {
+                progress_file: PathBuf::from("/nonexistent/PROGRESS.md"),
+                system_prompt_file: PathBuf::from("/nonexistent/CURRENT_TASK.md"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute(&config));
+
+        assert!(result.is_err());
+        if let Err(RalphError::MissingFile(msg)) = result {
+            assert!(msg.contains("PROGRESS.md"));
+            assert!(msg.contains("not found"));
+        } else {
+            panic!("Expected MissingFile error");
+        }
+    }
+
+    #[test]
+    fn test_execute_validates_system_prompt_file() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Use unique filename to avoid race conditions in parallel tests
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir();
+        let progress_path = temp_dir.join(format!("test_progress_{}.md", timestamp));
+
+        std::fs::write(&progress_path, "# Progress\n\n- [ ] Task 1").unwrap();
+
+        let config = FileConfig {
+            task: crate::shared::file_config::TaskConfig {
+                progress_file: progress_path.clone(),
+                system_prompt_file: PathBuf::from("/nonexistent/CURRENT_TASK.md"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute(&config));
+
+        // Cleanup - ensure file is removed even if test fails
+        if progress_path.exists() {
+            std::fs::remove_file(&progress_path).expect("Failed to cleanup test file");
+        }
+
+        assert!(result.is_err());
+        if let Err(RalphError::MissingFile(msg)) = result {
+            assert!(msg.contains("CURRENT_TASK.md"));
+            assert!(msg.contains("not found"));
+        } else {
+            panic!("Expected MissingFile error");
+        }
+    }
+}
+
