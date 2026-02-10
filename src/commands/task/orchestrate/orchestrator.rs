@@ -140,7 +140,7 @@ pub struct Orchestrator {
     project_root: PathBuf,
     progress_path: PathBuf,
     system_prompt: String,
-    verification_commands: String,
+    verification_commands: Option<String>,
     use_nerd_font: bool,
 }
 
@@ -159,7 +159,12 @@ impl Orchestrator {
             String::new()
         };
 
-        let verification_commands = extract_verification_commands(&system_prompt);
+        let verification_commands = file_config
+            .task
+            .orchestrate
+            .verify_commands
+            .clone()
+            .filter(|s| !s.trim().is_empty());
 
         Ok(Self {
             config,
@@ -328,6 +333,15 @@ impl Orchestrator {
             progress.remaining()
         ));
         tui.status_bar.print_line(&msg)?;
+
+        // Warn if no verification commands configured
+        if self.verification_commands.is_none() {
+            let warn = MultiplexedOutput::format_orchestrator_line(
+                "⚠ No verify_commands configured — skipping verify phase. \
+                 Set verify_commands in [task.orchestrate] in .ralph.toml",
+            );
+            tui.status_bar.print_line(&warn)?;
+        }
 
         // Initial status bar render
         self.update_status_bar(tui, scheduler, started_at)?;
@@ -625,7 +639,7 @@ impl Orchestrator {
                         &task_desc_owned,
                         model_owned.as_deref(),
                         &worktree_path,
-                        &verification_cmds,
+                        verification_cmds.as_deref(),
                     )
                     .await
             });
@@ -961,35 +975,6 @@ impl Orchestrator {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Extract verification commands from the system prompt.
-fn extract_verification_commands(system_prompt: &str) -> String {
-    let mut commands = Vec::new();
-    let mut in_code_block = false;
-    let mut is_bash_block = false;
-
-    for line in system_prompt.lines() {
-        if line.starts_with("```bash") || line.starts_with("```sh") {
-            in_code_block = true;
-            is_bash_block = true;
-            continue;
-        }
-        if line.starts_with("```") && in_code_block {
-            in_code_block = false;
-            is_bash_block = false;
-            continue;
-        }
-        if in_code_block && is_bash_block {
-            commands.push(line.to_string());
-        }
-    }
-
-    if commands.is_empty() {
-        "cargo check && cargo test && cargo clippy --all-targets -- -D warnings".to_string()
-    } else {
-        commands.join("\n")
-    }
-}
-
 /// Get file modification time.
 fn get_mtime(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
@@ -1014,28 +999,6 @@ fn extract_worker_id(kind: &WorkerEventKind) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_extract_verification_commands_bash_block() {
-        let prompt = "# Build\n\n```bash\ncargo build\ncargo test\n```\n\nSome text.";
-        let cmds = extract_verification_commands(prompt);
-        assert!(cmds.contains("cargo build"));
-        assert!(cmds.contains("cargo test"));
-    }
-
-    #[test]
-    fn test_extract_verification_commands_no_block() {
-        let prompt = "No code blocks here.";
-        let cmds = extract_verification_commands(prompt);
-        assert!(cmds.contains("cargo check"));
-    }
-
-    #[test]
-    fn test_extract_verification_commands_sh_block() {
-        let prompt = "```sh\nmake test\n```";
-        let cmds = extract_verification_commands(prompt);
-        assert!(cmds.contains("make test"));
-    }
 
     #[test]
     fn test_extract_worker_id() {
@@ -1117,7 +1080,7 @@ mod tests {
             project_root: PathBuf::from("/tmp/test"),
             progress_path: PathBuf::from("/tmp/test/PROGRESS.md"),
             system_prompt: String::new(),
-            verification_commands: String::new(),
+            verification_commands: None,
             use_nerd_font: false,
         };
 
@@ -1168,7 +1131,7 @@ mod tests {
             project_root: PathBuf::from("/tmp/test"),
             progress_path: PathBuf::from("/tmp/test/PROGRESS.md"),
             system_prompt: String::new(),
-            verification_commands: String::new(),
+            verification_commands: None,
             use_nerd_font: false,
         };
 

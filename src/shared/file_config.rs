@@ -106,6 +106,9 @@ pub struct OrchestrateConfig {
     /// Default Claude model for workers
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Shell commands to run for verification phase (e.g. "cargo test && cargo clippy")
+    #[serde(default)]
+    pub verify_commands: Option<String>,
 }
 
 impl Default for OrchestrateConfig {
@@ -115,6 +118,7 @@ impl Default for OrchestrateConfig {
             max_retries: default_max_retries(),
             worktree_prefix: None,
             default_model: None,
+            verify_commands: None,
         }
     }
 }
@@ -487,6 +491,7 @@ questions = "QS.md"
         assert_eq!(config.task.orchestrate.max_retries, 3);
         assert!(config.task.orchestrate.worktree_prefix.is_none());
         assert!(config.task.orchestrate.default_model.is_none());
+        assert!(config.task.orchestrate.verify_commands.is_none());
     }
 
     #[test]
@@ -520,6 +525,19 @@ default_model = "claude-sonnet-4-5-20250929"
         assert_eq!(
             config.task.orchestrate.default_model.as_deref(),
             Some("claude-sonnet-4-5-20250929")
+        );
+    }
+
+    #[test]
+    fn test_orchestrate_config_verify_commands() {
+        let toml_content = r#"
+[task.orchestrate]
+verify_commands = "cargo test && cargo clippy --all-targets -- -D warnings"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            config.task.orchestrate.verify_commands.as_deref(),
+            Some("cargo test && cargo clippy --all-targets -- -D warnings")
         );
     }
 

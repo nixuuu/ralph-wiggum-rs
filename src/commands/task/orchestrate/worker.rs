@@ -67,7 +67,7 @@ impl Worker {
         task_desc: &str,
         model: Option<&str>,
         worktree_path: &Path,
-        verification_commands: &str,
+        verification_commands: Option<&str>,
     ) -> Result<TaskResult> {
         self.send_event(WorkerEventKind::TaskStarted {
             worker_id: self.id,
@@ -125,23 +125,27 @@ impl Worker {
                 .await
                 .ok();
 
-            // Phase 3: Verify
-            let verified = match runner
-                .run_verify(verification_commands, model, worktree_path)
-                .await
-            {
-                Ok(passed) => passed,
-                Err(e) => {
-                    return self
-                        .handle_failure(task_id, &e.to_string(), retries, total_cost)
-                        .await;
+            // Phase 3: Verify (skipped when no verify_commands configured)
+            let verified = if let Some(verify_cmds) = verification_commands {
+                match runner
+                    .run_verify(verify_cmds, model, worktree_path)
+                    .await
+                {
+                    Ok(passed) => {
+                        self.git_commit(worktree_path, task_id, &WorkerPhase::Verify)
+                            .await
+                            .ok();
+                        passed
+                    }
+                    Err(e) => {
+                        return self
+                            .handle_failure(task_id, &e.to_string(), retries, total_cost)
+                            .await;
+                    }
                 }
+            } else {
+                true
             };
-
-            // Commit after verify phase
-            self.git_commit(worktree_path, task_id, &WorkerPhase::Verify)
-                .await
-                .ok();
 
             if verified {
                 // Get changed files
