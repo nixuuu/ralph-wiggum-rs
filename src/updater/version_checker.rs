@@ -10,7 +10,7 @@ const REPO_OWNER: &str = "nixuuu";
 const REPO_NAME: &str = "ralph-wiggum-rs";
 const CHECK_INTERVAL_SECS: u64 = 300;
 
-/// State of the in-app update process, shared via Arc<AtomicU8>
+/// State of the in-app update process, shared via `Arc<AtomicU8>`
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum UpdateState {
