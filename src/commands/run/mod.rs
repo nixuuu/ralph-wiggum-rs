@@ -4,7 +4,7 @@ mod events;
 mod once;
 mod output;
 mod prompt;
-mod runner;
+pub(crate) mod runner;
 pub(crate) mod state;
 mod ui;
 
