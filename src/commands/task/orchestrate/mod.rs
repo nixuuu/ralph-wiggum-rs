@@ -1,8 +1,11 @@
 pub mod events;
 pub mod merge;
 pub mod orchestrator;
+pub mod output;
 pub mod scheduler;
 pub mod state;
+pub mod status;
+pub mod summary;
 pub mod worker;
 pub mod worker_runner;
 pub mod worktree;
