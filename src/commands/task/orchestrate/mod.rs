@@ -1,5 +1,6 @@
 pub mod events;
 pub mod merge;
+pub mod orchestrator;
 pub mod scheduler;
 pub mod state;
 pub mod worker;
