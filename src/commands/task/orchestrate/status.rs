@@ -63,6 +63,17 @@ impl std::fmt::Display for WorkerState {
     }
 }
 
+/// Shutdown phase for display purposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShutdownState {
+    #[default]
+    Running,
+    /// First q/Ctrl+C — waiting for in-progress tasks to finish
+    Draining,
+    /// Second q/Ctrl+C — force-aborting all workers
+    Aborting,
+}
+
 /// Snapshot of the orchestrator's status for rendering.
 #[derive(Debug, Clone)]
 pub struct OrchestratorStatus {
@@ -70,6 +81,7 @@ pub struct OrchestratorStatus {
     pub workers: Vec<WorkerStatus>,
     pub total_cost: f64,
     pub elapsed: Duration,
+    pub shutdown_state: ShutdownState,
 }
 
 // ── Status bar (owns StatusTerminal) ────────────────────────────────
@@ -475,6 +487,7 @@ impl DashboardInputThread {
         focused_worker: Arc<AtomicU32>,
         worker_count: u32,
         scroll_delta: Arc<AtomicI32>,
+        render_notify: Arc<tokio::sync::Notify>,
     ) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
@@ -502,6 +515,7 @@ impl DashboardInputThread {
                                     } else {
                                         graceful_shutdown.store(true, Ordering::SeqCst);
                                     }
+                                    render_notify.notify_one();
                                     continue;
                                 }
 
@@ -517,6 +531,7 @@ impl DashboardInputThread {
                                     };
                                     focused_worker.store(next, Ordering::Relaxed);
                                     scroll_delta.store(0, Ordering::Relaxed);
+                                    render_notify.notify_one();
                                     continue;
                                 }
 
@@ -530,6 +545,7 @@ impl DashboardInputThread {
                                     };
                                     focused_worker.store(next, Ordering::Relaxed);
                                     scroll_delta.store(0, Ordering::Relaxed);
+                                    render_notify.notify_one();
                                     continue;
                                 }
 
@@ -537,6 +553,7 @@ impl DashboardInputThread {
                                 if key.code == KeyCode::Esc {
                                     focused_worker.store(0, Ordering::Relaxed);
                                     scroll_delta.store(0, Ordering::Relaxed);
+                                    render_notify.notify_one();
                                     continue;
                                 }
 
@@ -549,6 +566,7 @@ impl DashboardInputThread {
                                     if n <= worker_count {
                                         focused_worker.store(n, Ordering::Relaxed);
                                         scroll_delta.store(0, Ordering::Relaxed);
+                                        render_notify.notify_one();
                                     }
                                     continue;
                                 }
@@ -556,21 +574,25 @@ impl DashboardInputThread {
                                 // Up/Down arrows: scroll focused panel
                                 if key.code == KeyCode::Up {
                                     scroll_delta.fetch_sub(1, Ordering::Relaxed);
+                                    render_notify.notify_one();
                                     continue;
                                 }
                                 if key.code == KeyCode::Down {
                                     scroll_delta.fetch_add(1, Ordering::Relaxed);
+                                    render_notify.notify_one();
                                     continue;
                                 }
 
                                 // End: reset scroll (signal via large positive value)
                                 if key.code == KeyCode::End {
                                     scroll_delta.store(i32::MAX, Ordering::Relaxed);
+                                    render_notify.notify_one();
                                     continue;
                                 }
                             }
                             Ok(crossterm::event::Event::Resize(_, _)) => {
                                 resize_flag.store(true, Ordering::SeqCst);
+                                render_notify.notify_one();
                             }
                             _ => {}
                         }
@@ -638,6 +660,7 @@ mod tests {
             workers: vec![],
             total_cost: 0.25,
             elapsed: Duration::from_secs(120),
+            shutdown_state: ShutdownState::Running,
         }
     }
 
@@ -695,6 +718,7 @@ mod tests {
             workers: vec![],
             total_cost: 0.0,
             elapsed: Duration::from_secs(0),
+            shutdown_state: ShutdownState::Running,
         };
         let line = OrchestratorStatusBar::render_queue_text(&status);
         assert!(line.contains("3 ready"));
@@ -754,6 +778,7 @@ mod tests {
             ],
             total_cost: 0.01,
             elapsed: Duration::from_secs(45),
+            shutdown_state: ShutdownState::Running,
         };
 
         // render_text requires an instance, but we can test the static methods

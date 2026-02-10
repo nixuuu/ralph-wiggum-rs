@@ -9,11 +9,11 @@ use crossterm::terminal::{
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::commands::task::orchestrate::status::{
-    OrchestratorStatus, WorkerState, WorkerStatus, format_duration, format_tokens,
+    OrchestratorStatus, ShutdownState, WorkerState, WorkerStatus, format_duration, format_tokens,
     render_progress_bar,
 };
 use crate::shared::error::Result;
@@ -167,7 +167,7 @@ impl Dashboard {
             }
 
             // Render global status bar
-            let bar_widget = render_global_bar(status, worker_count, area.width);
+            let bar_widget = render_global_bar(status, focused);
             frame.render_widget(bar_widget, bar_area);
         })?;
 
@@ -396,19 +396,17 @@ fn compute_grid_rects(area: Rect, worker_count: u32) -> Vec<(u32, Rect)> {
 fn render_panel_widget<'a>(panel: &'a WorkerPanel, area: Rect, is_focused: bool) -> Paragraph<'a> {
     let ws = &panel.status;
 
-    // Title: W{N} [{task_id}: {component}]
-    let task_str = ws
-        .task_id
-        .as_deref()
-        .unwrap_or("---");
-    let comp_str = ws
-        .component
-        .as_deref()
-        .unwrap_or("");
+    // Title: ▶ W{N} [{task_id}: {component}] (▶ only when focused)
+    let task_str = ws.task_id.as_deref().unwrap_or("---");
+    let comp_str = ws.component.as_deref().unwrap_or("");
+    let focus_marker = if is_focused { "▶ " } else { "" };
     let title = if comp_str.is_empty() {
-        format!(" W{} [{}] ", panel.worker_id, task_str)
+        format!(" {focus_marker}W{} [{}] ", panel.worker_id, task_str)
     } else {
-        format!(" W{} [{}: {}] ", panel.worker_id, task_str, comp_str)
+        format!(
+            " {focus_marker}W{} [{}: {}] ",
+            panel.worker_id, task_str, comp_str
+        )
     };
 
     // Footer: $cost | tokens
@@ -419,11 +417,11 @@ fn render_panel_widget<'a>(panel: &'a WorkerPanel, area: Rect, is_focused: bool)
         format_tokens(ws.output_tokens)
     );
 
-    // Border color based on state
-    let border_color = if is_focused {
-        Color::Cyan
+    // Border: Double+Cyan for focused, Rounded+state_color for normal
+    let (border_type, border_color) = if is_focused {
+        (BorderType::Double, Color::Cyan)
     } else {
-        state_color(&ws.state)
+        (BorderType::Rounded, state_color(&ws.state))
     };
     let border_style = if is_focused {
         Style::default()
@@ -432,16 +430,21 @@ fn render_panel_widget<'a>(panel: &'a WorkerPanel, area: Rect, is_focused: bool)
     } else {
         Style::default().fg(border_color)
     };
+    let title_style = if is_focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(border_type)
         .border_style(border_style)
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ))
+        .title(Span::styled(title, title_style))
         .title_bottom(Span::styled(
             footer,
             Style::default().fg(Color::DarkGray),
@@ -520,7 +523,7 @@ fn state_icon(state: &WorkerState) -> (&'static str, Color) {
 // ── Global status bar ────────────────────────────────────────────────
 
 /// Render the 3-line global status bar at the bottom.
-fn render_global_bar<'a>(status: &OrchestratorStatus, _worker_count: u32, _width: u16) -> Paragraph<'a> {
+fn render_global_bar<'a>(status: &OrchestratorStatus, focused: Option<u32>) -> Paragraph<'a> {
     let total = status.scheduler.total;
     let done = status.scheduler.done;
     let pct = if total > 0 { (done * 100) / total } else { 0 };
@@ -557,6 +560,15 @@ fn render_global_bar<'a>(status: &OrchestratorStatus, _worker_count: u32, _width
         ),
     ]);
 
+    let focus_span = if let Some(wid) = focused {
+        Span::styled(
+            format!("Focus: W{wid}"),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("No focus", Style::default().fg(Color::DarkGray))
+    };
+
     let queue_line = Line::from(vec![
         Span::raw(" Queue: "),
         Span::styled(
@@ -578,17 +590,36 @@ fn render_global_bar<'a>(status: &OrchestratorStatus, _worker_count: u32, _width
             format!("{} pending", status.scheduler.pending),
             Style::default().fg(Color::DarkGray),
         ),
+        Span::raw("  │  "),
+        focus_span,
         Span::raw("    "),
         Span::styled(
-            "q=quit Tab=focus ↑↓=scroll Esc=unfocus",
+            "q Tab ↑↓ Esc",
             Style::default().fg(Color::DarkGray),
         ),
     ]);
 
-    let separator = Line::from(vec![Span::styled(
-        "─".repeat(200),
-        Style::default().fg(Color::DarkGray),
-    )]);
+    // Separator or shutdown banner
+    let separator = match status.shutdown_state {
+        ShutdownState::Running => Line::from(vec![Span::styled(
+            "─".repeat(200),
+            Style::default().fg(Color::DarkGray),
+        )]),
+        ShutdownState::Draining => Line::from(vec![Span::styled(
+            " ⏳ SHUTTING DOWN — waiting for in-progress tasks to finish... (press q again to force) ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        ShutdownState::Aborting => Line::from(vec![Span::styled(
+            " ⚠ FORCE SHUTDOWN — aborting all workers... ",
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )]),
+    };
 
     Paragraph::new(vec![separator, progress_line, queue_line])
 }
