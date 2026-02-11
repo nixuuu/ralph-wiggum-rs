@@ -21,21 +21,22 @@ impl Orchestrator {
         ctx: &mut RunLoopContext<'_>,
     ) -> Result<()> {
         match &event.kind {
-            WorkerEventKind::TaskStarted {
-                worker_id,
-                task_id,
-            } => {
+            WorkerEventKind::TaskStarted { worker_id, task_id } => {
                 let ws = WorkerStatus {
                     state: WorkerState::Implementing,
                     task_id: Some(task_id.clone()),
-                    component: ctx.task_lookup.get(task_id.as_str()).map(|t| t.component.clone()),
+                    component: ctx
+                        .task_lookup
+                        .get(task_id.as_str())
+                        .map(|t| t.component.clone()),
                     phase: Some(WorkerPhase::Implement),
                     cost_usd: 0.0,
                     input_tokens: 0,
                     output_tokens: 0,
                 };
                 ctx.tui.dashboard.update_worker_status(*worker_id, ws);
-                let msg = ctx.tui
+                let msg = ctx
+                    .tui
                     .mux_output
                     .format_worker_line(*worker_id, &format!("Started: {task_id}"));
                 ctx.tui.dashboard.push_log_line(&msg);
@@ -56,14 +57,18 @@ impl Orchestrator {
                 let ws = WorkerStatus {
                     state: new_state,
                     task_id: Some(task_id.clone()),
-                    component: ctx.task_lookup.get(task_id.as_str()).map(|t| t.component.clone()),
+                    component: ctx
+                        .task_lookup
+                        .get(task_id.as_str())
+                        .map(|t| t.component.clone()),
                     phase: Some(phase.clone()),
                     cost_usd: cost,
                     input_tokens: input,
                     output_tokens: output,
                 };
                 ctx.tui.dashboard.update_worker_status(*worker_id, ws);
-                let msg = ctx.tui
+                let msg = ctx
+                    .tui
                     .mux_output
                     .format_worker_line(*worker_id, &format!("{task_id} → phase: {phase}"));
                 ctx.tui.dashboard.push_log_line(&msg);
@@ -89,11 +94,15 @@ impl Orchestrator {
                 input_tokens,
                 output_tokens,
             } => {
-                ctx.tui.mux_output
-                    .update_cost(*worker_id, *cost_usd, *input_tokens, *output_tokens);
-                let (total_cost, total_in, total_out) =
-                    ctx.tui.mux_output.worker_cost(*worker_id);
-                ctx.tui.dashboard
+                ctx.tui.mux_output.update_cost(
+                    *worker_id,
+                    *cost_usd,
+                    *input_tokens,
+                    *output_tokens,
+                );
+                let (total_cost, total_in, total_out) = ctx.tui.mux_output.worker_cost(*worker_id);
+                ctx.tui
+                    .dashboard
                     .update_worker_cost(*worker_id, total_cost, total_in, total_out);
             }
 
@@ -109,7 +118,8 @@ impl Orchestrator {
                     let _ = handle.await;
                 }
 
-                let duration = ctx.tui
+                let duration = ctx
+                    .tui
                     .task_start_times
                     .remove(task_id)
                     .map(|s| s.elapsed())
@@ -162,7 +172,8 @@ impl Orchestrator {
                     if let Some(mt) = self.update_tasks_file(task_id, TaskStatus::Done, ctx.tui) {
                         ctx.progress_mtime = Some(mt);
                     }
-                    let msg = ctx.tui
+                    let msg = ctx
+                        .tui
                         .mux_output
                         .format_worker_line(*worker_id, &format!("Done (no merge): {task_id}"));
                     ctx.tui.dashboard.push_log_line(&msg);
@@ -177,7 +188,8 @@ impl Orchestrator {
 
                     // Free the worker slot
                     ctx.worker_slots.insert(*worker_id, WorkerSlot::Idle);
-                    ctx.tui.dashboard
+                    ctx.tui
+                        .dashboard
                         .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
                     ctx.tui.mux_output.clear_worker(*worker_id);
                 } else {
@@ -195,7 +207,9 @@ impl Orchestrator {
                             &format!("Task {task_id} blocked after max retries"),
                         );
                         ctx.tui.dashboard.push_log_line(&msg);
-                        if let Some(mt) = self.update_tasks_file(task_id, TaskStatus::Blocked, ctx.tui) {
+                        if let Some(mt) =
+                            self.update_tasks_file(task_id, TaskStatus::Blocked, ctx.tui)
+                        {
                             ctx.progress_mtime = Some(mt);
                         }
 
@@ -210,7 +224,8 @@ impl Orchestrator {
 
                     // Free the worker slot
                     ctx.worker_slots.insert(*worker_id, WorkerSlot::Idle);
-                    ctx.tui.dashboard
+                    ctx.tui
+                        .dashboard
                         .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
                     ctx.tui.mux_output.clear_worker(*worker_id);
                 }
@@ -230,30 +245,29 @@ impl Orchestrator {
                 } else {
                     ctx.tui.mux_output.format_worker_line(
                         *worker_id,
-                        &format!(
-                            "Task {task_id} failed ({retries_left} retries left): {error}"
-                        ),
+                        &format!("Task {task_id} failed ({retries_left} retries left): {error}"),
                     )
                 };
                 ctx.tui.dashboard.push_log_line(&msg);
             }
 
-            WorkerEventKind::MergeStarted {
-                worker_id,
-                task_id,
-            } => {
+            WorkerEventKind::MergeStarted { worker_id, task_id } => {
                 let (cost, input, output) = ctx.tui.mux_output.worker_cost(*worker_id);
                 let ws = WorkerStatus {
                     state: WorkerState::Merging,
                     task_id: Some(task_id.clone()),
-                    component: ctx.task_lookup.get(task_id.as_str()).map(|t| t.component.clone()),
+                    component: ctx
+                        .task_lookup
+                        .get(task_id.as_str())
+                        .map(|t| t.component.clone()),
                     phase: None,
                     cost_usd: cost,
                     input_tokens: input,
                     output_tokens: output,
                 };
                 ctx.tui.dashboard.update_worker_status(*worker_id, ws);
-                let msg = ctx.tui
+                let msg = ctx
+                    .tui
                     .mux_output
                     .format_worker_line(*worker_id, &format!("Merging: {task_id}"));
                 ctx.tui.dashboard.push_log_line(&msg);
@@ -285,9 +299,16 @@ impl Orchestrator {
                     }
 
                     // Worktree cleanup
-                    if let Some(WorkerSlot::Busy { worktree, .. }) = ctx.worker_slots.get(worker_id) {
-                        ctx.worktree_manager.remove_worktree(&worktree.path).await.ok();
-                        ctx.worktree_manager.remove_branch(&worktree.branch).await.ok();
+                    if let Some(WorkerSlot::Busy { worktree, .. }) = ctx.worker_slots.get(worker_id)
+                    {
+                        ctx.worktree_manager
+                            .remove_worktree(&worktree.path)
+                            .await
+                            .ok();
+                        ctx.worktree_manager
+                            .remove_branch(&worktree.branch)
+                            .await
+                            .ok();
                     }
 
                     // Update state
@@ -311,7 +332,8 @@ impl Orchestrator {
                     });
                 } else {
                     ctx.scheduler.mark_blocked(task_id);
-                    if let Some(mt) = self.update_tasks_file(task_id, TaskStatus::Blocked, ctx.tui) {
+                    if let Some(mt) = self.update_tasks_file(task_id, TaskStatus::Blocked, ctx.tui)
+                    {
                         ctx.progress_mtime = Some(mt);
                     }
 
@@ -337,7 +359,8 @@ impl Orchestrator {
 
                 // Free the worker slot
                 ctx.worker_slots.insert(*worker_id, WorkerSlot::Idle);
-                ctx.tui.dashboard
+                ctx.tui
+                    .dashboard
                     .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
                 ctx.tui.mux_output.clear_worker(*worker_id);
 
@@ -370,7 +393,10 @@ impl Orchestrator {
                 let ws = WorkerStatus {
                     state: WorkerState::ResolvingConflicts,
                     task_id: Some(task_id.clone()),
-                    component: ctx.task_lookup.get(task_id.as_str()).map(|t| t.component.clone()),
+                    component: ctx
+                        .task_lookup
+                        .get(task_id.as_str())
+                        .map(|t| t.component.clone()),
                     phase: None,
                     cost_usd: cost,
                     input_tokens: input,

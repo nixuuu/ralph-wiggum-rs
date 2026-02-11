@@ -89,23 +89,28 @@ pub struct TaskConfig {
     #[serde(default = "default_tasks_file")]
     pub tasks_file: PathBuf,
     #[serde(default = "default_system_prompt_file")]
-    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future SYSTEM_PROMPT.md features
+    #[allow(dead_code)]
+    // Serde field: deserialized from .ralph.toml but reserved for future SYSTEM_PROMPT.md features
     pub system_prompt_file: PathBuf,
     #[serde(default = "default_current_task_file")]
-    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future CURRENT_TASK.md features
+    #[allow(dead_code)]
+    // Serde field: deserialized from .ralph.toml but reserved for future CURRENT_TASK.md features
     pub current_task_file: PathBuf,
     #[serde(default)]
     pub output_dir: Option<PathBuf>,
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future auto-continue features
+    #[allow(dead_code)]
+    // Serde field: deserialized from .ralph.toml but reserved for future auto-continue features
     pub auto_continue: bool,
     #[serde(default = "default_true")]
-    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future adaptive iteration features
+    #[allow(dead_code)]
+    // Serde field: deserialized from .ralph.toml but reserved for future adaptive iteration features
     pub adaptive_iterations: bool,
     #[serde(default)]
-    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future auxiliary file tracking
+    #[allow(dead_code)]
+    // Serde field: deserialized from .ralph.toml but reserved for future auxiliary file tracking
     pub files: TaskFilesConfig,
     /// Orchestration settings (`[task.orchestrate]` in .ralph.toml)
     #[serde(default)]
@@ -207,13 +212,16 @@ fn default_current_task_file() -> PathBuf {
 #[derive(Debug, Deserialize)]
 pub struct TaskFilesConfig {
     #[serde(default = "default_changenotes")]
-    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future CHANGENOTES.md tracking
+    #[allow(dead_code)]
+    // Serde field: deserialized from .ralph.toml but reserved for future CHANGENOTES.md tracking
     pub changenotes: PathBuf,
     #[serde(default = "default_issues")]
-    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future IMPLEMENTATION_ISSUES.md tracking
+    #[allow(dead_code)]
+    // Serde field: deserialized from .ralph.toml but reserved for future IMPLEMENTATION_ISSUES.md tracking
     pub issues: PathBuf,
     #[serde(default = "default_questions")]
-    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future OPEN_QUESTIONS.md tracking
+    #[allow(dead_code)]
+    // Serde field: deserialized from .ralph.toml but reserved for future OPEN_QUESTIONS.md tracking
     pub questions: PathBuf,
 }
 
@@ -632,9 +640,18 @@ setup_commands = ["npm install", "cp .env.example .env"]
 "#;
         let config: FileConfig = toml::from_str(toml_content).unwrap();
         assert_eq!(config.task.orchestrate.setup_commands.len(), 2);
-        assert_eq!(config.task.orchestrate.setup_commands[0].command(), "npm install");
-        assert_eq!(config.task.orchestrate.setup_commands[0].label(), "npm install");
-        assert_eq!(config.task.orchestrate.setup_commands[1].command(), "cp .env.example .env");
+        assert_eq!(
+            config.task.orchestrate.setup_commands[0].command(),
+            "npm install"
+        );
+        assert_eq!(
+            config.task.orchestrate.setup_commands[0].label(),
+            "npm install"
+        );
+        assert_eq!(
+            config.task.orchestrate.setup_commands[1].command(),
+            "cp .env.example .env"
+        );
     }
 
     #[test]
@@ -653,9 +670,18 @@ run = "npm install"
             config.task.orchestrate.setup_commands[0].command(),
             "cp {ROOT_DIR}/.env {WORKTREE_DIR}/.env"
         );
-        assert_eq!(config.task.orchestrate.setup_commands[0].label(), "Copy env file");
-        assert_eq!(config.task.orchestrate.setup_commands[1].command(), "npm install");
-        assert_eq!(config.task.orchestrate.setup_commands[1].label(), "npm install");
+        assert_eq!(
+            config.task.orchestrate.setup_commands[0].label(),
+            "Copy env file"
+        );
+        assert_eq!(
+            config.task.orchestrate.setup_commands[1].command(),
+            "npm install"
+        );
+        assert_eq!(
+            config.task.orchestrate.setup_commands[1].label(),
+            "npm install"
+        );
     }
 
     #[test]

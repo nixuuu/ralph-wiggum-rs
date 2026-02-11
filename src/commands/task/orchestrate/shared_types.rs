@@ -3,8 +3,8 @@
 //! This module contains data types and helper functions used by both the
 //! orchestrator core and the dashboard TUI.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 
 use crate::commands::task::orchestrate::events::WorkerPhase;

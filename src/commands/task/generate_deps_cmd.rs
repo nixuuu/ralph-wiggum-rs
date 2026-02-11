@@ -72,10 +72,7 @@ pub async fn execute(args: GenerateDepsArgs, file_config: &FileConfig) -> Result
             println!("  {} no cycles detected", "✓".green());
         }
     } else {
-        println!(
-            "{} no deps found after generation",
-            "⚠".yellow().bold()
-        );
+        println!("{} no deps found after generation", "⚠".yellow().bold());
     }
 
     let had_deps = before.deps_map().values().any(|v| !v.is_empty());

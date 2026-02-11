@@ -78,8 +78,7 @@ impl Worker {
 
         // Phase 0: Setup (raw shell commands, non-fatal)
         if !setup_commands.is_empty() {
-            self.run_setup(task_id, setup_commands, worktree_path)
-                .await;
+            self.run_setup(task_id, setup_commands, worktree_path).await;
         }
 
         let total_cost = 0.0_f64;
@@ -134,10 +133,7 @@ impl Worker {
 
             // Phase 3: Verify (skipped when no verify_commands configured)
             let verified = if let Some(verify_cmds) = verification_commands {
-                match runner
-                    .run_verify(verify_cmds, model, worktree_path)
-                    .await
-                {
+                match runner.run_verify(verify_cmds, model, worktree_path).await {
                     Ok(passed) => {
                         self.git_commit(worktree_path, task_id, &WorkerPhase::Verify)
                             .await
@@ -210,12 +206,7 @@ impl Worker {
 
     /// Run setup commands sequentially in the worktree.
     /// On error: logs warning, continues to next command.
-    async fn run_setup(
-        &self,
-        task_id: &str,
-        commands: &[(String, String)],
-        worktree_path: &Path,
-    ) {
+    async fn run_setup(&self, task_id: &str, commands: &[(String, String)], worktree_path: &Path) {
         self.send_event(WorkerEventKind::PhaseStarted {
             worker_id: self.id,
             task_id: task_id.to_string(),

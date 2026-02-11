@@ -159,16 +159,22 @@ impl Dashboard {
             // Small terminal: show single panel + 1-line status
             if area.width < 60 || area.height < 12 {
                 let preview_active = tasks_file.is_some();
-                Self::render_compact(frame, area, panels, status, focused, log_lines, worker_count, preview_active);
+                Self::render_compact(
+                    frame,
+                    area,
+                    panels,
+                    status,
+                    focused,
+                    log_lines,
+                    worker_count,
+                    preview_active,
+                );
                 return;
             }
 
             // Split: worker grid + 3 lines for global bar
-            let vertical = Layout::vertical([
-                Constraint::Min(1),
-                Constraint::Length(3),
-            ])
-            .split(area);
+            let vertical =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(area);
 
             let grid_area = vertical[0];
             let bar_area = vertical[1];
@@ -512,30 +518,21 @@ impl Dashboard {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(
-                "Press ",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled("Press ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "q",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                " to exit, ",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(" to exit, ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "p",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                " to view tasks",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(" to view tasks", Style::default().fg(Color::DarkGray)),
         ]));
 
         // Build block with green border
@@ -554,7 +551,9 @@ impl Dashboard {
                     .add_modifier(Modifier::BOLD),
             ));
 
-        let widget = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        let widget = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(widget, area);
     }
 
@@ -587,17 +586,18 @@ impl Dashboard {
                     TaskStatus::Todo => ("○", Color::White),
                 };
 
-                let component = node
-                    .component
-                    .as_deref()
-                    .unwrap_or("general")
-                    .to_string();
+                let component = node.component.as_deref().unwrap_or("general").to_string();
 
                 let mut spans = vec![
                     Span::raw(indent.clone()),
                     Span::styled(icon.to_string(), Style::default().fg(icon_color)),
                     Span::raw(" "),
-                    Span::styled(node.id.clone(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        node.id.clone(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(": "),
                     Span::raw(node.name.clone()),
                     Span::raw(" ["),
@@ -618,9 +618,12 @@ impl Dashboard {
             } else {
                 // Parent task: show as bold header
                 let header = format!("{}{} {}", indent, node.id, node.name);
-                lines.push(Line::from(vec![
-                    Span::styled(header, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    header,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )]));
             }
 
             // Recurse into subtasks
@@ -643,10 +646,16 @@ impl Dashboard {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Double)
-                .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .border_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .title(Span::styled(
                     " Task List (p to close) ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ));
             let widget = Paragraph::new(vec![Line::from("No tasks found")])
                 .block(block)
@@ -659,19 +668,31 @@ impl Dashboard {
         let max_scroll = total_lines.saturating_sub(inner_height).max(0);
         let clamped_offset = scroll_offset.min(max_scroll);
         let end = (clamped_offset + inner_height).min(total_lines);
-        let visible_lines: Vec<Line<'static>> = lines.into_iter().skip(clamped_offset).take(end - clamped_offset).collect();
+        let visible_lines: Vec<Line<'static>> = lines
+            .into_iter()
+            .skip(clamped_offset)
+            .take(end - clamped_offset)
+            .collect();
 
         // Build block with title
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
-            .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .border_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
             .title(Span::styled(
                 " Task List (p to close, ↑↓ to scroll) ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ));
 
-        let widget = Paragraph::new(visible_lines).block(block).wrap(Wrap { trim: false });
+        let widget = Paragraph::new(visible_lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(widget, area);
     }
 
@@ -847,10 +868,7 @@ fn render_panel_widget<'a>(panel: &'a WorkerPanel, area: Rect, is_focused: bool)
         .border_type(border_type)
         .border_style(border_style)
         .title(Span::styled(title, title_style))
-        .title_bottom(Span::styled(
-            footer,
-            Style::default().fg(Color::DarkGray),
-        ));
+        .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)));
 
     // Inner area height (minus 2 for borders)
     let inner_height = area.height.saturating_sub(2) as usize;
@@ -897,7 +915,9 @@ fn render_panel_widget<'a>(panel: &'a WorkerPanel, area: Rect, is_focused: bool)
         lines.extend(tail);
     }
 
-    Paragraph::new(lines).block(block).wrap(Wrap { trim: false })
+    Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
 }
 
 /// Get color for a worker state.
@@ -929,7 +949,11 @@ fn state_icon(state: &WorkerState) -> (&'static str, Color) {
 // ── Global status bar ────────────────────────────────────────────────
 
 /// Render the 3-line global status bar at the bottom.
-fn render_global_bar<'a>(status: &OrchestratorStatus, focused: Option<u32>, preview_active: bool) -> Paragraph<'a> {
+fn render_global_bar<'a>(
+    status: &OrchestratorStatus,
+    focused: Option<u32>,
+    preview_active: bool,
+) -> Paragraph<'a> {
     let total = status.scheduler.total;
     let done = status.scheduler.done;
     let pct = if total > 0 { (done * 100) / total } else { 0 };
@@ -961,16 +985,15 @@ fn render_global_bar<'a>(status: &OrchestratorStatus, focused: Option<u32>, prev
             Style::default().fg(Color::Yellow),
         ),
         Span::raw(" │ "),
-        Span::styled(
-            format!("⏱ {elapsed}"),
-            Style::default().fg(Color::White),
-        ),
+        Span::styled(format!("⏱ {elapsed}"), Style::default().fg(Color::White)),
     ]);
 
     let focus_span = if let Some(wid) = focused {
         Span::styled(
             format!("Focus: W{wid}"),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled("No focus", Style::default().fg(Color::DarkGray))
@@ -1040,9 +1063,15 @@ fn render_global_bar<'a>(status: &OrchestratorStatus, focused: Option<u32>, prev
         let blocked = status.scheduler.blocked;
         let total = status.scheduler.total;
         let msg = if blocked > 0 {
-            format!(" ✓ Completed — {}/{} done, {} blocked | q=exit p=tasks ", done, total, blocked)
+            format!(
+                " ✓ Completed — {}/{} done, {} blocked | q=exit p=tasks ",
+                done, total, blocked
+            )
         } else {
-            format!(" ✓ Completed — {}/{} tasks done | q=exit p=tasks ", done, total)
+            format!(
+                " ✓ Completed — {}/{} tasks done | q=exit p=tasks ",
+                done, total
+            )
         };
         Line::from(vec![Span::styled(
             msg,
@@ -1058,11 +1087,14 @@ fn render_global_bar<'a>(status: &OrchestratorStatus, focused: Option<u32>, prev
                 Style::default().fg(Color::DarkGray),
             )]),
             ShutdownState::Draining => {
-                let countdown = status.shutdown_remaining
+                let countdown = status
+                    .shutdown_remaining
                     .map(|d| format!(" (force-kill za {}s)", d.as_secs()))
                     .unwrap_or_default();
                 Line::from(vec![Span::styled(
-                    format!(" ⏳ SHUTTING DOWN — waiting for in-progress tasks to finish...{countdown} (press q again to force) "),
+                    format!(
+                        " ⏳ SHUTTING DOWN — waiting for in-progress tasks to finish...{countdown} (press q again to force) "
+                    ),
                     Style::default()
                         .fg(Color::Black)
                         .bg(Color::Yellow)
@@ -1102,10 +1134,7 @@ fn render_compact_bar(status: &OrchestratorStatus, preview_active: bool) -> Line
             Style::default().fg(Color::Yellow),
         ),
         Span::raw(" │ "),
-        Span::styled(
-            format!("⏱ {elapsed}"),
-            Style::default().fg(Color::White),
-        ),
+        Span::styled(format!("⏱ {elapsed}"), Style::default().fg(Color::White)),
     ];
 
     // Add completion indicator if all tasks are done
@@ -1113,7 +1142,9 @@ fn render_compact_bar(status: &OrchestratorStatus, preview_active: bool) -> Line
         spans.push(Span::raw(" │ "));
         spans.push(Span::styled(
             "✓ DONE",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -1247,7 +1278,12 @@ mod tests {
                     Span::raw(indent.clone()),
                     Span::styled(icon.to_string(), Style::default().fg(icon_color)),
                     Span::raw(" "),
-                    Span::styled(node.id.clone(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        node.id.clone(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(": "),
                     Span::raw(node.name.clone()),
                     Span::raw(" ["),
@@ -1266,9 +1302,12 @@ mod tests {
                 lines.push(Line::from(spans));
             } else {
                 let header = format!("{}{} {}", indent, node.id, node.name);
-                lines.push(Line::from(vec![
-                    Span::styled(header, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    header,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )]));
             }
 
             for child in &node.subtasks {
@@ -1284,36 +1323,32 @@ mod tests {
 
     #[test]
     fn test_render_task_preview_parent_tasks_bold() {
-        use crate::shared::tasks::TaskNode;
         use crate::shared::progress::TaskStatus;
+        use crate::shared::tasks::TaskNode;
 
-        let tasks = vec![
-            TaskNode {
-                id: "1".to_string(),
-                name: "Epic 1: Frontend".to_string(),
-                component: None,
-                status: None,
+        let tasks = vec![TaskNode {
+            id: "1".to_string(),
+            name: "Epic 1: Frontend".to_string(),
+            component: None,
+            status: None,
+            deps: vec![],
+            model: None,
+            description: None,
+            related_files: vec![],
+            implementation_steps: vec![],
+            subtasks: vec![TaskNode {
+                id: "1.1".to_string(),
+                name: "Build UI".to_string(),
+                component: Some("ui".to_string()),
+                status: Some(TaskStatus::Done),
                 deps: vec![],
                 model: None,
                 description: None,
                 related_files: vec![],
                 implementation_steps: vec![],
-                subtasks: vec![
-                    TaskNode {
-                        id: "1.1".to_string(),
-                        name: "Build UI".to_string(),
-                        component: Some("ui".to_string()),
-                        status: Some(TaskStatus::Done),
-                        deps: vec![],
-                        model: None,
-                        description: None,
-                        related_files: vec![],
-                        implementation_steps: vec![],
-                        subtasks: vec![],
-                    },
-                ],
-            },
-        ];
+                subtasks: vec![],
+            }],
+        }];
 
         let lines = render_task_lines(&tasks);
 
@@ -1323,7 +1358,12 @@ mod tests {
         let parent_line = &lines[0];
         assert!(parent_line.spans[0].content.contains("1 Epic 1: Frontend"));
         // Verify parent has bold modifier
-        assert!(parent_line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            parent_line.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
 
         // Second line should be leaf "1.1" with Done icon (✓)
         let leaf_line = &lines[1];
@@ -1356,8 +1396,8 @@ mod tests {
 
     #[test]
     fn test_render_task_preview_shows_deps() {
-        use crate::shared::tasks::TaskNode;
         use crate::shared::progress::TaskStatus;
+        use crate::shared::tasks::TaskNode;
 
         let tasks = vec![
             TaskNode {
@@ -1403,19 +1443,31 @@ mod tests {
         // Check: task "2" has deps shown
         assert_eq!(lines.len(), 3);
         let task2_line = &lines[1];
-        let task2_text = task2_line.spans.iter()
+        let task2_text = task2_line
+            .spans
+            .iter()
             .map(|s| s.content.as_ref())
             .collect::<Vec<_>>()
             .join("");
-        assert!(task2_text.contains("deps: 1"), "Expected 'deps: 1' in task 2 line: {}", task2_text);
+        assert!(
+            task2_text.contains("deps: 1"),
+            "Expected 'deps: 1' in task 2 line: {}",
+            task2_text
+        );
 
         // Check: task "3" has multiple deps
         let task3_line = &lines[2];
-        let task3_text = task3_line.spans.iter()
+        let task3_text = task3_line
+            .spans
+            .iter()
             .map(|s| s.content.as_ref())
             .collect::<Vec<_>>()
             .join("");
-        assert!(task3_text.contains("deps: 1, 2"), "Expected 'deps: 1, 2' in task 3 line: {}", task3_text);
+        assert!(
+            task3_text.contains("deps: 1, 2"),
+            "Expected 'deps: 1, 2' in task 3 line: {}",
+            task3_text
+        );
     }
 
     #[test]
@@ -1434,13 +1486,22 @@ mod tests {
 
     #[test]
     fn test_render_task_preview_deeply_nested_subtasks() {
-        use crate::shared::tasks::TaskNode;
         use crate::shared::progress::TaskStatus;
+        use crate::shared::tasks::TaskNode;
 
-        let tasks = vec![
-            TaskNode {
-                id: "1".to_string(),
-                name: "Epic 1".to_string(),
+        let tasks = vec![TaskNode {
+            id: "1".to_string(),
+            name: "Epic 1".to_string(),
+            component: None,
+            status: None,
+            deps: vec![],
+            model: None,
+            description: None,
+            related_files: vec![],
+            implementation_steps: vec![],
+            subtasks: vec![TaskNode {
+                id: "1.1".to_string(),
+                name: "Feature 1.1".to_string(),
                 component: None,
                 status: None,
                 deps: vec![],
@@ -1450,45 +1511,32 @@ mod tests {
                 implementation_steps: vec![],
                 subtasks: vec![
                     TaskNode {
-                        id: "1.1".to_string(),
-                        name: "Feature 1.1".to_string(),
-                        component: None,
-                        status: None,
+                        id: "1.1.1".to_string(),
+                        name: "Task 1.1.1".to_string(),
+                        component: Some("api".to_string()),
+                        status: Some(TaskStatus::Done),
                         deps: vec![],
                         model: None,
                         description: None,
                         related_files: vec![],
                         implementation_steps: vec![],
-                        subtasks: vec![
-                            TaskNode {
-                                id: "1.1.1".to_string(),
-                                name: "Task 1.1.1".to_string(),
-                                component: Some("api".to_string()),
-                                status: Some(TaskStatus::Done),
-                                deps: vec![],
-                                model: None,
-                                description: None,
-                                related_files: vec![],
-                                implementation_steps: vec![],
-                                subtasks: vec![],
-                            },
-                            TaskNode {
-                                id: "1.1.2".to_string(),
-                                name: "Task 1.1.2".to_string(),
-                                component: Some("api".to_string()),
-                                status: Some(TaskStatus::Todo),
-                                deps: vec!["1.1.1".to_string()],
-                                model: None,
-                                description: None,
-                                related_files: vec![],
-                                implementation_steps: vec![],
-                                subtasks: vec![],
-                            },
-                        ],
+                        subtasks: vec![],
+                    },
+                    TaskNode {
+                        id: "1.1.2".to_string(),
+                        name: "Task 1.1.2".to_string(),
+                        component: Some("api".to_string()),
+                        status: Some(TaskStatus::Todo),
+                        deps: vec!["1.1.1".to_string()],
+                        model: None,
+                        description: None,
+                        related_files: vec![],
+                        implementation_steps: vec![],
+                        subtasks: vec![],
                     },
                 ],
-            },
-        ];
+            }],
+        }];
 
         let lines = render_task_lines(&tasks);
 
@@ -1514,11 +1562,17 @@ mod tests {
         let task2_line = &lines[3];
         assert_eq!(task2_line.spans[0].content.as_ref(), "    "); // 4 spaces
         assert_eq!(task2_line.spans[1].content.as_ref(), "○"); // Todo icon
-        let task2_text = task2_line.spans.iter()
+        let task2_text = task2_line
+            .spans
+            .iter()
             .map(|s| s.content.as_ref())
             .collect::<Vec<_>>()
             .join("");
-        assert!(task2_text.contains("deps: 1.1.1"), "Expected 'deps: 1.1.1' in task 1.1.2 line: {}", task2_text);
+        assert!(
+            task2_text.contains("deps: 1.1.1"),
+            "Expected 'deps: 1.1.1' in task 1.1.2 line: {}",
+            task2_text
+        );
     }
 
     #[test]
@@ -1537,7 +1591,10 @@ mod tests {
     // ── Tests for render_completion_summary ──────────────────────────────
 
     /// Helper: collect lines from render_completion_summary
-    fn render_summary_lines(entries: &[TaskSummaryEntry], wall_clock: Duration) -> Vec<Line<'static>> {
+    fn render_summary_lines(
+        entries: &[TaskSummaryEntry],
+        wall_clock: Duration,
+    ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
         // Header: Green "All tasks complete" with checkmark
@@ -1715,30 +1772,21 @@ mod tests {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(
-                "Press ",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled("Press ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "q",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                " to exit, ",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(" to exit, ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "p",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                " to view tasks",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(" to view tasks", Style::default().fg(Color::DarkGray)),
         ]));
 
         lines
@@ -1765,7 +1813,12 @@ mod tests {
         // Verify it's green
         assert_eq!(header_line.spans[1].style.fg, Some(Color::Green));
         // Verify it's bold
-        assert!(header_line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            header_line.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
     }
 
     #[test]
@@ -1796,7 +1849,9 @@ mod tests {
         let header_line = &lines[table_header_idx];
 
         // Check header row has correct columns
-        let header_text = header_line.spans.iter()
+        let header_text = header_line
+            .spans
+            .iter()
             .map(|s| s.content.as_ref())
             .collect::<Vec<_>>()
             .join("");
@@ -1830,16 +1885,24 @@ mod tests {
         let lines = render_summary_lines(&entries, Duration::from_secs(100));
 
         // Find totals row (should contain "TOTAL" and "1/2 done")
-        let totals_text = lines.iter()
+        let totals_text = lines
+            .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.as_ref()))
             .collect::<Vec<_>>()
             .join("");
 
         // Check aggregates
         assert!(totals_text.contains("TOTAL"));
-        assert!(totals_text.contains("1/2 done"), "Expected '1/2 done' in totals, got: {}", totals_text);
+        assert!(
+            totals_text.contains("1/2 done"),
+            "Expected '1/2 done' in totals, got: {}",
+            totals_text
+        );
         // Total cost: 0.042 + 0.089 = 0.131
-        assert!(totals_text.contains("$0.131"), "Expected total cost in totals");
+        assert!(
+            totals_text.contains("$0.131"),
+            "Expected total cost in totals"
+        );
     }
 
     #[test]
@@ -1852,7 +1915,8 @@ mod tests {
         assert!(lines.len() >= 3);
 
         // Find the placeholder message
-        let all_text = lines.iter()
+        let all_text = lines
+            .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.as_ref()))
             .collect::<Vec<_>>()
             .join("");
@@ -1883,7 +1947,8 @@ mod tests {
         // Speedup should be 200/100 = 2.0x
         let lines = render_summary_lines(&entries, Duration::from_secs(100));
 
-        let all_text = lines.iter()
+        let all_text = lines
+            .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.as_ref()))
             .collect::<Vec<_>>()
             .join("");
@@ -1905,7 +1970,8 @@ mod tests {
 
         let lines = render_summary_lines(&entries, Duration::from_secs(0));
 
-        let all_text = lines.iter()
+        let all_text = lines
+            .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.as_ref()))
             .collect::<Vec<_>>()
             .join("");
@@ -1984,7 +2050,8 @@ mod tests {
         let lines = render_summary_lines(&entries, Duration::from_secs(45));
 
         // Find footer with hint
-        let all_text = lines.iter()
+        let all_text = lines
+            .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.as_ref()))
             .collect::<Vec<_>>()
             .join("");
@@ -1995,19 +2062,18 @@ mod tests {
     #[test]
     fn test_render_completion_summary_long_task_id() {
         // Test that column width adapts to longer task IDs
-        let entries = vec![
-            TaskSummaryEntry {
-                task_id: "feature/very-long-task-id".to_string(),
-                status: "Done".to_string(),
-                cost_usd: 0.042,
-                duration: Duration::from_secs(45),
-                retries: 0,
-            },
-        ];
+        let entries = vec![TaskSummaryEntry {
+            task_id: "feature/very-long-task-id".to_string(),
+            status: "Done".to_string(),
+            cost_usd: 0.042,
+            duration: Duration::from_secs(45),
+            retries: 0,
+        }];
 
         let lines = render_summary_lines(&entries, Duration::from_secs(45));
 
-        let all_text = lines.iter()
+        let all_text = lines
+            .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.as_ref()))
             .collect::<Vec<_>>()
             .join("");
@@ -2038,7 +2104,8 @@ mod tests {
 
         let lines = render_summary_lines(&entries, Duration::from_secs(100));
 
-        let all_text = lines.iter()
+        let all_text = lines
+            .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.as_ref()))
             .collect::<Vec<_>>()
             .join("");

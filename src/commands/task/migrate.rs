@@ -78,13 +78,22 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
 
     // 9. Print summary
     let leaves = tasks_file.flatten_leaves();
-    let done = leaves.iter().filter(|l| l.status == TaskStatus::Done).count();
-    let todo = leaves.iter().filter(|l| l.status == TaskStatus::Todo).count();
+    let done = leaves
+        .iter()
+        .filter(|l| l.status == TaskStatus::Done)
+        .count();
+    let todo = leaves
+        .iter()
+        .filter(|l| l.status == TaskStatus::Todo)
+        .count();
     let in_progress = leaves
         .iter()
         .filter(|l| l.status == TaskStatus::InProgress)
         .count();
-    let blocked = leaves.iter().filter(|l| l.status == TaskStatus::Blocked).count();
+    let blocked = leaves
+        .iter()
+        .filter(|l| l.status == TaskStatus::Blocked)
+        .count();
 
     println!("{}", "━".repeat(60).dark_grey());
     println!(
@@ -103,11 +112,7 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
     );
     if !deps_map.is_empty() {
         let deps_count = deps_map.values().filter(|v| !v.is_empty()).count();
-        println!(
-            "  {} {} deps migrated",
-            "Deps:".dark_grey(),
-            deps_count
-        );
+        println!("  {} {} deps migrated", "Deps:".dark_grey(), deps_count);
     }
     if !models_map.is_empty() {
         println!(

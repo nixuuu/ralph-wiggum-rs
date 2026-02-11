@@ -33,7 +33,8 @@ impl Orchestrator {
     ) -> Result<()> {
         // Apply focus from input thread
         let focus = ctx.flags.focused_worker.load(Ordering::Relaxed);
-        ctx.tui.dashboard
+        ctx.tui
+            .dashboard
             .set_focus(if focus == 0 { None } else { Some(focus) });
 
         // Apply scroll delta from input thread
@@ -70,12 +71,18 @@ impl Orchestrator {
         };
 
         // Pass TasksFile to dashboard if preview overlay is active
-        let tasks_file = if ctx.flags.show_task_preview.load(std::sync::atomic::Ordering::Relaxed) {
+        let tasks_file = if ctx
+            .flags
+            .show_task_preview
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             Some(ctx.cached_tasks_file.as_ref())
         } else {
             None
         };
 
-        ctx.tui.dashboard.render(&orch_status, tasks_file, &ctx.tui.task_summaries)
+        ctx.tui
+            .dashboard
+            .render(&orch_status, tasks_file, &ctx.tui.task_summaries)
     }
 }

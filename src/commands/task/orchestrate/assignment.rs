@@ -20,7 +20,8 @@ pub(super) enum WorkerSlot {
     Idle,
     Busy {
         /// Task ID tracked in worker slot for debugging and state consistency.
-        #[allow(dead_code)] // Tracked for debugging and consistency but not actively used in logic
+        #[allow(dead_code)]
+        // Tracked for debugging and consistency but not actively used in logic
         task_id: String,
         worktree: WorktreeInfo,
     },
@@ -30,16 +31,14 @@ pub(super) enum WorkerSlot {
 
 impl Orchestrator {
     /// Assign ready tasks to idle workers.
-    pub(super) async fn assign_tasks(
-        &self,
-        ctx: &mut RunLoopContext<'_>,
-    ) -> Result<()> {
+    pub(super) async fn assign_tasks(&self, ctx: &mut RunLoopContext<'_>) -> Result<()> {
         // Always refresh ready_queue before assigning — guards against
         // stale state from hot reload or missed refresh paths.
         ctx.scheduler.refresh_ready_queue();
 
         // Find idle workers
-        let idle_workers: Vec<u32> = ctx.worker_slots
+        let idle_workers: Vec<u32> = ctx
+            .worker_slots
             .iter()
             .filter(|(_, slot)| matches!(slot, WorkerSlot::Idle))
             .map(|(id, _)| *id)
@@ -64,7 +63,8 @@ impl Orchestrator {
             let model = self.resolve_model(&task_id, ctx.tasks_file);
 
             // Create worktree
-            let worktree = ctx.worktree_manager
+            let worktree = ctx
+                .worktree_manager
                 .create_worktree(worker_id, &task_id)
                 .await?;
 
@@ -91,7 +91,8 @@ impl Orchestrator {
                 output_tokens: 0,
             };
             ctx.tui.dashboard.update_worker_status(worker_id, ws);
-            ctx.tui.task_start_times
+            ctx.tui
+                .task_start_times
                 .insert(task_id.clone(), Instant::now());
 
             // Expand setup commands before worktree is moved into WorkerSlot
@@ -165,7 +166,12 @@ impl Orchestrator {
             if status.pending > 0 || status.ready > 0 {
                 let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                     "⚠ {} idle workers, scheduler: {} ready, {} pending, {} done, {} in_progress, {} blocked",
-                    remaining_idle, status.ready, status.pending, status.done, status.in_progress, status.blocked,
+                    remaining_idle,
+                    status.ready,
+                    status.pending,
+                    status.done,
+                    status.in_progress,
+                    status.blocked,
                 ));
                 ctx.tui.dashboard.push_log_line(&msg);
             }
@@ -178,9 +184,9 @@ impl Orchestrator {
                 .map(|id| (id, TaskStatus::InProgress))
                 .collect();
             if let Err(e) = TasksFile::batch_update_statuses(&self.tasks_path, &updates) {
-                let msg = MultiplexedOutput::format_orchestrator_line(
-                    &format!("Warning: tasks.yml batch update failed: {e}"),
-                );
+                let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+                    "Warning: tasks.yml batch update failed: {e}"
+                ));
                 ctx.tui.dashboard.push_log_line(&msg);
             } else if let Some(mt) = get_mtime(&self.tasks_path) {
                 ctx.progress_mtime = Some(mt);

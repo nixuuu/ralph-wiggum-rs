@@ -236,7 +236,6 @@ impl OutputFormatter {
         }
     }
 
-
     /// Format token summary lines for stats display
     fn format_token_lines(&self) -> Vec<String> {
         let input = self.display_input_tokens();

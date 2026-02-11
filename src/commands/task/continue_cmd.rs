@@ -3,7 +3,7 @@ use crossterm::style::Stylize;
 use crate::commands::run::RunArgs;
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
-use crate::shared::tasks::{format_task_prompt, TasksFile};
+use crate::shared::tasks::{TasksFile, format_task_prompt};
 use crate::templates;
 
 pub async fn execute(file_config: &FileConfig) -> Result<()> {
@@ -19,14 +19,13 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
     // Parse tasks.yml and find current task
     let tasks_file = TasksFile::load(tasks_path)?;
 
-    let current = tasks_file.current_task().ok_or_else(|| {
-        RalphError::TaskSetup("No pending tasks found in tasks.yml.".to_string())
-    })?;
+    let current = tasks_file
+        .current_task()
+        .ok_or_else(|| RalphError::TaskSetup("No pending tasks found in tasks.yml.".to_string()))?;
 
     // Build system prompt from embedded template
     let task_prompt = format_task_prompt(&current);
-    let prompt = templates::CONTINUE_SYSTEM_PROMPT
-        .replace("{current_task_prompt}", &task_prompt);
+    let prompt = templates::CONTINUE_SYSTEM_PROMPT.replace("{current_task_prompt}", &task_prompt);
 
     let summary = tasks_file.to_summary();
     let remaining = summary.remaining() as u32;

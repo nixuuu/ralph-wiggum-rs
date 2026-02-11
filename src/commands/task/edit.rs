@@ -102,7 +102,10 @@ pub async fn execute(args: EditArgs, file_config: &FileConfig) -> Result<()> {
 }
 
 /// Update the state file (if it exists) with new min_iterations from updated task count.
-fn update_state_file(file_config: &FileConfig, summary: &crate::shared::progress::ProgressSummary) -> Result<()> {
+fn update_state_file(
+    file_config: &FileConfig,
+    summary: &crate::shared::progress::ProgressSummary,
+) -> Result<()> {
     use crate::commands::run::state::StateManager;
     use std::path::PathBuf;
 

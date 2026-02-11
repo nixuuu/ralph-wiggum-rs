@@ -71,44 +71,42 @@ impl WorkerRunner {
         let tx_output = self.event_tx.clone();
         let mut formatter = OutputFormatter::new(self.use_nerd_font);
 
-        let result = runner
-            .run(
-                self.shutdown.clone(),
-                |event| {
-                    // Forward cost updates from Claude Result events
-                    if let ClaudeEvent::Result {
-                        cost_usd, usage, ..
-                    } = event
-                    {
-                        let (input_tokens, output_tokens) = usage
-                            .as_ref()
-                            .map(|u| (u.input_tokens, u.output_tokens))
-                            .unwrap_or((0, 0));
+        let result =
+            runner
+                .run(
+                    self.shutdown.clone(),
+                    |event| {
+                        // Forward cost updates from Claude Result events
+                        if let ClaudeEvent::Result {
+                            cost_usd, usage, ..
+                        } = event
+                        {
+                            let (input_tokens, output_tokens) = usage
+                                .as_ref()
+                                .map(|u| (u.input_tokens, u.output_tokens))
+                                .unwrap_or((0, 0));
 
-                        let cost_event = WorkerEvent::new(WorkerEventKind::CostUpdate {
-                            worker_id,
-                            cost_usd: cost_usd.unwrap_or(0.0),
-                            input_tokens,
-                            output_tokens,
-                        });
-                        // Best-effort send — don't block on channel full
-                        let _ = tx.try_send(cost_event);
-                    }
-
-                    // Format and forward output lines for live TUI display
-                    let lines = formatter.format_event(event);
-                    if !lines.is_empty() {
-                        let _ = tx_output.try_send(WorkerEvent::new(
-                            WorkerEventKind::OutputLines {
+                            let cost_event = WorkerEvent::new(WorkerEventKind::CostUpdate {
                                 worker_id,
-                                lines,
-                            },
-                        ));
-                    }
-                },
-                || {},
-            )
-            .await;
+                                cost_usd: cost_usd.unwrap_or(0.0),
+                                input_tokens,
+                                output_tokens,
+                            });
+                            // Best-effort send — don't block on channel full
+                            let _ = tx.try_send(cost_event);
+                        }
+
+                        // Format and forward output lines for live TUI display
+                        let lines = formatter.format_event(event);
+                        if !lines.is_empty() {
+                            let _ = tx_output.try_send(WorkerEvent::new(
+                                WorkerEventKind::OutputLines { worker_id, lines },
+                            ));
+                        }
+                    },
+                    || {},
+                )
+                .await;
 
         let success = result.is_ok();
         let output = match result {

@@ -147,10 +147,7 @@ fn setup_terminal(config: &Config) -> Result<Arc<Mutex<StatusTerminal>>> {
 }
 
 /// Show shutdown message, save state, cleanup terminal, print interrupted stats.
-fn cleanup_interrupted(
-    shared: &SharedState,
-    state_manager: &StateManager,
-) -> Result<()> {
+fn cleanup_interrupted(shared: &SharedState, state_manager: &StateManager) -> Result<()> {
     let mut term = shared.status_terminal.lock().unwrap();
     term.show_shutting_down()?;
     term.cleanup()?;
@@ -194,11 +191,7 @@ fn build_runner(config: &Config, state_manager: &StateManager) -> ClaudeRunner {
 }
 
 /// Event callback body: format event → update terminal.
-fn handle_event(
-    event: &ClaudeEvent,
-    shared: &SharedState,
-    shutdown: &Arc<AtomicBool>,
-) {
+fn handle_event(event: &ClaudeEvent, shared: &SharedState, shutdown: &Arc<AtomicBool>) {
     let (lines, mut status) = {
         let mut fmt = shared.formatter.lock().unwrap();
         let lines = fmt.format_event(event);
@@ -347,10 +340,7 @@ fn check_promise(
 }
 
 /// Handle max iterations reached: cleanup and return error.
-fn handle_max_iterations(
-    shared: &SharedState,
-    state_manager: &StateManager,
-) -> Result<()> {
+fn handle_max_iterations(shared: &SharedState, state_manager: &StateManager) -> Result<()> {
     let mut term = shared.status_terminal.lock().unwrap();
     term.cleanup()?;
     let lines = shared.formatter.lock().unwrap().format_stats(
@@ -363,10 +353,7 @@ fn handle_max_iterations(
 }
 
 /// Initialize all shared state needed for the run loop.
-fn setup_shared_state(
-    config: &Config,
-    shutdown: &Arc<AtomicBool>,
-) -> Result<SharedState> {
+fn setup_shared_state(config: &Config, shutdown: &Arc<AtomicBool>) -> Result<SharedState> {
     let version_checker = crate::updater::VersionChecker::new();
     let update_info = version_checker.update_info();
     let update_state = version_checker.update_state();
@@ -415,10 +402,7 @@ async fn run_iteration(
 }
 
 /// Handle shutdown: save state, cleanup terminal.
-async fn handle_shutdown(
-    shared: &SharedState,
-    state_manager: &mut StateManager,
-) -> Result<()> {
+async fn handle_shutdown(shared: &SharedState, state_manager: &mut StateManager) -> Result<()> {
     state_manager.save().await?;
     cleanup_interrupted(shared, state_manager)
 }

@@ -4,9 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::shared::error::{RalphError, Result};
-use crate::shared::progress::{
-    ProgressFrontmatter, ProgressSummary, ProgressTask, TaskStatus,
-};
+use crate::shared::progress::{ProgressFrontmatter, ProgressSummary, ProgressTask, TaskStatus};
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -74,11 +72,8 @@ impl TaskNode {
             return self.status.clone().unwrap_or(TaskStatus::Todo);
         }
 
-        let child_statuses: Vec<TaskStatus> = self
-            .subtasks
-            .iter()
-            .map(|c| c.computed_status())
-            .collect();
+        let child_statuses: Vec<TaskStatus> =
+            self.subtasks.iter().map(|c| c.computed_status()).collect();
 
         if child_statuses.iter().all(|s| *s == TaskStatus::Done) {
             TaskStatus::Done
@@ -212,11 +207,7 @@ impl TasksFile {
         leaves
     }
 
-    fn collect_leaves(
-        node: &TaskNode,
-        parent_component: Option<&str>,
-        out: &mut Vec<LeafTask>,
-    ) {
+    fn collect_leaves(node: &TaskNode, parent_component: Option<&str>, out: &mut Vec<LeafTask>) {
         let component = node
             .component
             .as_deref()
@@ -323,11 +314,7 @@ impl TasksFile {
         false
     }
 
-    fn update_node_status(
-        node: &mut TaskNode,
-        task_id: &str,
-        new_status: &TaskStatus,
-    ) -> bool {
+    fn update_node_status(node: &mut TaskNode, task_id: &str, new_status: &TaskStatus) -> bool {
         if node.id == task_id && node.is_leaf() {
             node.status = Some(new_status.clone());
             return true;
@@ -341,10 +328,7 @@ impl TasksFile {
     }
 
     /// Load, apply multiple status updates, save.
-    pub fn batch_update_statuses(
-        path: &Path,
-        updates: &[(String, TaskStatus)],
-    ) -> Result<()> {
+    pub fn batch_update_statuses(path: &Path, updates: &[(String, TaskStatus)]) -> Result<()> {
         let mut tf = Self::load(path)?;
         for (id, status) in updates {
             tf.update_status(id, status.clone());
@@ -394,7 +378,11 @@ pub fn format_task_prompt(leaf: &LeafTask) -> String {
 
     if !leaf.related_files.is_empty() {
         parts.push(String::new());
-        let files: Vec<String> = leaf.related_files.iter().map(|f| format!("- {f}")).collect();
+        let files: Vec<String> = leaf
+            .related_files
+            .iter()
+            .map(|f| format!("- {f}"))
+            .collect();
         parts.push(format!("**Related files:**\n{}", files.join("\n")));
     }
 
@@ -475,7 +463,10 @@ tasks:
     #[test]
     fn test_deserialize_roundtrip() {
         let tf: TasksFile = serde_yaml::from_str(sample_yaml()).unwrap();
-        assert_eq!(tf.default_model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+        assert_eq!(
+            tf.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
         assert_eq!(tf.tasks.len(), 2);
 
         // Serialize and re-parse
@@ -504,9 +495,9 @@ tasks:
         let summary = tf.to_summary();
 
         assert_eq!(summary.total(), 6);
-        assert_eq!(summary.done, 2);    // 1.1.1, 2.1
+        assert_eq!(summary.done, 2); // 1.1.1, 2.1
         assert_eq!(summary.in_progress, 1); // 1.2.1
-        assert_eq!(summary.todo, 2);    // 1.1.2, 1.2.2
+        assert_eq!(summary.todo, 2); // 1.1.2, 1.2.2
         assert_eq!(summary.blocked, 1); // 2.2
         assert_eq!(summary.remaining(), 3); // 2 todo + 1 in_progress
     }
@@ -592,9 +583,14 @@ tasks:
         let task_112 = leaves.iter().find(|l| l.id == "1.1.2").unwrap();
         assert_eq!(
             task_112.description.as_deref(),
-            Some("Parse YAML frontmatter from PROGRESS.md including deps, models, and default_model fields")
+            Some(
+                "Parse YAML frontmatter from PROGRESS.md including deps, models, and default_model fields"
+            )
         );
-        assert_eq!(task_112.related_files, vec!["src/shared/progress.rs", "docs/frontmatter-spec.md"]);
+        assert_eq!(
+            task_112.related_files,
+            vec!["src/shared/progress.rs", "docs/frontmatter-spec.md"]
+        );
         assert_eq!(task_112.implementation_steps.len(), 3);
 
         // Tasks without new fields should have None/empty
@@ -653,7 +649,10 @@ tasks:
             deps: Vec::new(),
             model: None,
             description: Some("Create REST endpoints for user authentication".to_string()),
-            related_files: vec!["src/routes/auth.rs".to_string(), "docs/auth-spec.md".to_string()],
+            related_files: vec![
+                "src/routes/auth.rs".to_string(),
+                "docs/auth-spec.md".to_string(),
+            ],
             implementation_steps: vec![
                 "Create auth route handler module".to_string(),
                 "Implement POST /login endpoint".to_string(),
@@ -759,7 +758,7 @@ tasks:
         let tf: TasksFile = serde_yaml::from_str(yaml).unwrap();
         let leaves = tf.flatten_leaves();
         assert_eq!(leaves[0].component, "api"); // inherited
-        assert_eq!(leaves[1].component, "ui");  // overridden
+        assert_eq!(leaves[1].component, "ui"); // overridden
     }
 
     #[test]
@@ -787,7 +786,10 @@ tasks:
         let fm = summary.frontmatter.as_ref().unwrap();
         assert_eq!(fm.deps["1.1.2"], vec!["1.1.1"]);
         assert_eq!(fm.models["1.1.2"], "claude-opus-4-6");
-        assert_eq!(fm.default_model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+        assert_eq!(
+            fm.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
     }
 
     #[test]

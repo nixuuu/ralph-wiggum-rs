@@ -59,14 +59,21 @@ impl Orchestrator {
     ) {
         merge_ctx.merge_in_progress = true;
         let root = project_root.to_path_buf();
-        let PendingMerge { worker_id, task_id, task_name, branch } = pending;
+        let PendingMerge {
+            worker_id,
+            task_id,
+            task_name,
+            branch,
+        } = pending;
 
         let handle = tokio::spawn(async move {
             // Emit MergeStarted
-            let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeStarted {
-                worker_id,
-                task_id: task_id.clone(),
-            })).await;
+            let _ = event_tx
+                .send(WorkerEvent::new(WorkerEventKind::MergeStarted {
+                    worker_id,
+                    task_id: task_id.clone(),
+                }))
+                .await;
 
             // Step 1: git merge --squash
             let (step1, conflict_files) = match merge::step_merge_squash(&root, &branch).await {
@@ -76,12 +83,14 @@ impl Orchestrator {
                         worker_id,
                         lines: vec![format!("Merge error: {e}")],
                     }));
-                    let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
-                        worker_id,
-                        task_id,
-                        success: false,
-                        commit_hash: None,
-                    })).await;
+                    let _ = event_tx
+                        .send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                            worker_id,
+                            task_id,
+                            success: false,
+                            commit_hash: None,
+                        }))
+                        .await;
                     return;
                 }
             };
@@ -107,12 +116,14 @@ impl Orchestrator {
                     // === AI Conflict Resolution ===
                     if shutdown.load(Ordering::Relaxed) {
                         merge::abort_merge(&root).await.ok();
-                        let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
-                            worker_id,
-                            task_id,
-                            success: false,
-                            commit_hash: None,
-                        })).await;
+                        let _ = event_tx
+                            .send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                                worker_id,
+                                task_id,
+                                success: false,
+                                commit_hash: None,
+                            }))
+                            .await;
                         return;
                     }
 
@@ -139,25 +150,37 @@ impl Orchestrator {
 
                     let event_tx_clone = event_tx.clone();
                     let wid = worker_id;
-                    let result = runner.run(
-                        Arc::clone(&shutdown),
-                        |claude_event| {
-                            // Forward text output to worker panel
-                            if let crate::commands::run::runner::ClaudeEvent::Assistant { message } = claude_event {
-                                for block in &message.content {
-                                    if let crate::commands::run::runner::ContentBlock::Text { text } = block {
-                                        let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-                                        if !lines.is_empty() {
-                                            let _ = event_tx_clone.try_send(WorkerEvent::new(
-                                                WorkerEventKind::MergeStepOutput { worker_id: wid, lines },
-                                            ));
+                    let result = runner
+                        .run(
+                            Arc::clone(&shutdown),
+                            |claude_event| {
+                                // Forward text output to worker panel
+                                if let crate::commands::run::runner::ClaudeEvent::Assistant {
+                                    message,
+                                } = claude_event
+                                {
+                                    for block in &message.content {
+                                        if let crate::commands::run::runner::ContentBlock::Text {
+                                            text,
+                                        } = block
+                                        {
+                                            let lines: Vec<String> =
+                                                text.lines().map(|l| l.to_string()).collect();
+                                            if !lines.is_empty() {
+                                                let _ = event_tx_clone.try_send(WorkerEvent::new(
+                                                    WorkerEventKind::MergeStepOutput {
+                                                        worker_id: wid,
+                                                        lines,
+                                                    },
+                                                ));
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        },
-                        || {},
-                    ).await;
+                            },
+                            || {},
+                        )
+                        .await;
 
                     match result {
                         Ok(_) => {
@@ -170,38 +193,56 @@ impl Orchestrator {
 
                             let resolved = check.map(|o| o.status.success()).unwrap_or(false);
                             if resolved {
-                                let _ = event_tx.try_send(WorkerEvent::new(WorkerEventKind::MergeStepOutput {
-                                    worker_id,
-                                    lines: vec!["✓ Conflicts resolved successfully".to_string()],
-                                }));
+                                let _ = event_tx.try_send(WorkerEvent::new(
+                                    WorkerEventKind::MergeStepOutput {
+                                        worker_id,
+                                        lines: vec![
+                                            "✓ Conflicts resolved successfully".to_string(),
+                                        ],
+                                    },
+                                ));
                                 // Continue with commit + rev-parse below
                             } else {
-                                let _ = event_tx.try_send(WorkerEvent::new(WorkerEventKind::MergeStepOutput {
-                                    worker_id,
-                                    lines: vec!["✗ Conflict resolution failed — aborting merge".to_string()],
-                                }));
+                                let _ = event_tx.try_send(WorkerEvent::new(
+                                    WorkerEventKind::MergeStepOutput {
+                                        worker_id,
+                                        lines: vec![
+                                            "✗ Conflict resolution failed — aborting merge"
+                                                .to_string(),
+                                        ],
+                                    },
+                                ));
                                 merge::abort_merge(&root).await.ok();
-                                let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
-                                    worker_id,
-                                    task_id,
-                                    success: false,
-                                    commit_hash: None,
-                                })).await;
+                                let _ = event_tx
+                                    .send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                                        worker_id,
+                                        task_id,
+                                        success: false,
+                                        commit_hash: None,
+                                    }))
+                                    .await;
                                 return;
                             }
                         }
                         Err(_) => {
-                            let _ = event_tx.try_send(WorkerEvent::new(WorkerEventKind::MergeStepOutput {
-                                worker_id,
-                                lines: vec!["✗ AI conflict resolution failed — aborting merge".to_string()],
-                            }));
+                            let _ = event_tx.try_send(WorkerEvent::new(
+                                WorkerEventKind::MergeStepOutput {
+                                    worker_id,
+                                    lines: vec![
+                                        "✗ AI conflict resolution failed — aborting merge"
+                                            .to_string(),
+                                    ],
+                                },
+                            ));
                             merge::abort_merge(&root).await.ok();
-                            let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
-                                worker_id,
-                                task_id,
-                                success: false,
-                                commit_hash: None,
-                            })).await;
+                            let _ = event_tx
+                                .send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                                    worker_id,
+                                    task_id,
+                                    success: false,
+                                    commit_hash: None,
+                                }))
+                                .await;
                             return;
                         }
                     }
@@ -211,12 +252,14 @@ impl Orchestrator {
                         worker_id,
                         lines: vec![format!("Merge failed: {}", step1.stderr)],
                     }));
-                    let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
-                        worker_id,
-                        task_id,
-                        success: false,
-                        commit_hash: None,
-                    })).await;
+                    let _ = event_tx
+                        .send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                            worker_id,
+                            task_id,
+                            success: false,
+                            commit_hash: None,
+                        }))
+                        .await;
                     return;
                 }
             }
@@ -234,14 +277,19 @@ impl Orchestrator {
                 // No changes to commit — task completed without code modifications
                 let _ = event_tx.try_send(WorkerEvent::new(WorkerEventKind::MergeStepOutput {
                     worker_id,
-                    lines: vec!["No changes to merge — task completed without code modifications".to_string()],
+                    lines: vec![
+                        "No changes to merge — task completed without code modifications"
+                            .to_string(),
+                    ],
                 }));
-                let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
-                    worker_id,
-                    task_id,
-                    success: true,
-                    commit_hash: None,
-                })).await;
+                let _ = event_tx
+                    .send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                        worker_id,
+                        task_id,
+                        success: true,
+                        commit_hash: None,
+                    }))
+                    .await;
                 return;
             }
 
@@ -253,12 +301,14 @@ impl Orchestrator {
                         worker_id,
                         lines: vec![format!("Commit error: {e}")],
                     }));
-                    let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
-                        worker_id,
-                        task_id,
-                        success: false,
-                        commit_hash: None,
-                    })).await;
+                    let _ = event_tx
+                        .send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                            worker_id,
+                            task_id,
+                            success: false,
+                            commit_hash: None,
+                        }))
+                        .await;
                     return;
                 }
             };
@@ -272,12 +322,14 @@ impl Orchestrator {
             }
 
             if !step2.success {
-                let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
-                    worker_id,
-                    task_id,
-                    success: false,
-                    commit_hash: None,
-                })).await;
+                let _ = event_tx
+                    .send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                        worker_id,
+                        task_id,
+                        success: false,
+                        commit_hash: None,
+                    }))
+                    .await;
                 return;
             }
 
@@ -286,22 +338,25 @@ impl Orchestrator {
                 Ok((step3, hash)) => {
                     let step3_lines = merge::step_output_lines(&step3);
                     if !step3_lines.is_empty() {
-                        let _ = event_tx.try_send(WorkerEvent::new(WorkerEventKind::MergeStepOutput {
-                            worker_id,
-                            lines: step3_lines,
-                        }));
+                        let _ =
+                            event_tx.try_send(WorkerEvent::new(WorkerEventKind::MergeStepOutput {
+                                worker_id,
+                                lines: step3_lines,
+                            }));
                     }
                     hash
                 }
                 Err(_) => "???".to_string(),
             };
 
-            let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
-                worker_id,
-                task_id,
-                success: true,
-                commit_hash: Some(commit_hash),
-            })).await;
+            let _ = event_tx
+                .send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                    worker_id,
+                    task_id,
+                    success: true,
+                    commit_hash: Some(commit_hash),
+                }))
+                .await;
         });
 
         merge_ctx.merge_join_handle = Some(handle);
@@ -321,9 +376,9 @@ impl Orchestrator {
             tf.save(&self.tasks_path)
         })();
         if let Err(e) = result {
-            let msg = MultiplexedOutput::format_orchestrator_line(
-                &format!("Warning: tasks.yml update failed for {task_id}: {e}"),
-            );
+            let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+                "Warning: tasks.yml update failed for {task_id}: {e}"
+            ));
             tui.dashboard.push_log_line(&msg);
             return None;
         }

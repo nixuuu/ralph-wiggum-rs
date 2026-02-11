@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::mpsc;
@@ -311,11 +311,8 @@ impl Orchestrator {
         });
 
         // 12. Build task lookup for merge
-        let task_lookup: HashMap<&str, &ProgressTask> = progress
-            .tasks
-            .iter()
-            .map(|t| (t.id.as_str(), t))
-            .collect();
+        let task_lookup: HashMap<&str, &ProgressTask> =
+            progress.tasks.iter().map(|t| (t.id.as_str(), t)).collect();
 
         // 13. Build run loop context
         let flags = InputFlags {
@@ -373,9 +370,8 @@ impl Orchestrator {
 
         // SIGTERM handler — treat `kill <pid>` as force shutdown
         #[cfg(unix)]
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ).ok();
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
 
         // Print startup message
         let msg = MultiplexedOutput::format_orchestrator_line(&format!(
@@ -413,7 +409,9 @@ impl Orchestrator {
                 quit_pending,
                 completed,
             };
-            ctx.tui.dashboard.render(&orch_status, None, &ctx.tui.task_summaries)?;
+            ctx.tui
+                .dashboard
+                .render(&orch_status, None, &ctx.tui.task_summaries)?;
         }
 
         loop {
@@ -431,8 +429,7 @@ impl Orchestrator {
             if let Some(timeout) = self.config.timeout
                 && started_at.elapsed() >= timeout
             {
-                let msg =
-                    MultiplexedOutput::format_orchestrator_line("Timeout reached");
+                let msg = MultiplexedOutput::format_orchestrator_line("Timeout reached");
                 ctx.tui.dashboard.push_log_line(&msg);
                 break;
             }
@@ -660,19 +657,32 @@ impl Orchestrator {
 
         // Clean up any pending merges that never completed (orphaned worktrees)
         for pending in ctx.merge_ctx.pending_merges.iter() {
-            if let Some(WorkerSlot::Busy { worktree, .. }) = ctx.worker_slots.get(&pending.worker_id) {
-                ctx.worktree_manager.remove_worktree(&worktree.path).await.ok();
-                ctx.worktree_manager.remove_branch(&worktree.branch).await.ok();
+            if let Some(WorkerSlot::Busy { worktree, .. }) =
+                ctx.worker_slots.get(&pending.worker_id)
+            {
+                ctx.worktree_manager
+                    .remove_worktree(&worktree.path)
+                    .await
+                    .ok();
+                ctx.worktree_manager
+                    .remove_branch(&worktree.branch)
+                    .await
+                    .ok();
             }
         }
 
         // Save final state with error logging for verbose mode
-        if let Err(e) = ctx.state.save(ctx.state_path) && self.config.verbose {
+        if let Err(e) = ctx.state.save(ctx.state_path)
+            && self.config.verbose
+        {
             eprintln!("Warning: Failed to save orchestrator state: {e}");
         }
 
         // Release lockfile with error logging for verbose mode
-        if let Some(lf) = ctx.lockfile.take() && let Err(e) = lf.release() && self.config.verbose {
+        if let Some(lf) = ctx.lockfile.take()
+            && let Err(e) = lf.release()
+            && self.config.verbose
+        {
             eprintln!("Warning: Failed to release lockfile: {e}");
         }
 
@@ -757,8 +767,8 @@ mod tests {
 
     #[test]
     fn test_resolve_model_per_task() {
-        use crate::shared::tasks::{TaskNode, TasksFile};
         use crate::shared::progress::TaskStatus;
+        use crate::shared::tasks::{TaskNode, TasksFile};
 
         let tasks_file = TasksFile {
             default_model: Some("claude-sonnet-4-5-20250929".to_string()),
@@ -812,8 +822,8 @@ mod tests {
 
     #[test]
     fn test_resolve_model_cli_fallback() {
-        use crate::shared::tasks::{TaskNode, TasksFile};
         use crate::shared::progress::TaskStatus;
+        use crate::shared::tasks::{TaskNode, TasksFile};
 
         let tasks_file = TasksFile {
             default_model: None,

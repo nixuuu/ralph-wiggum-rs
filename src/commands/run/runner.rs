@@ -130,10 +130,12 @@ pub struct Usage {
     #[serde(default)]
     pub output_tokens: u64,
     #[serde(default)]
-    #[allow(dead_code)] // Serde field: deserialized from Claude API but not yet used in cost calculation
+    #[allow(dead_code)]
+    // Serde field: deserialized from Claude API but not yet used in cost calculation
     pub cache_read_input_tokens: u64,
     #[serde(default)]
-    #[allow(dead_code)] // Serde field: deserialized from Claude API but not yet used in cost calculation
+    #[allow(dead_code)]
+    // Serde field: deserialized from Claude API but not yet used in cost calculation
     pub cache_creation_input_tokens: u64,
 }
 
@@ -146,10 +148,12 @@ pub struct ModelUsageEntry {
     #[serde(default)]
     pub output_tokens: u64,
     #[serde(default)]
-    #[allow(dead_code)] // Serde field: deserialized from Claude API but not yet used in cost calculation
+    #[allow(dead_code)]
+    // Serde field: deserialized from Claude API but not yet used in cost calculation
     pub cache_read_input_tokens: u64,
     #[serde(default)]
-    #[allow(dead_code)] // Serde field: deserialized from Claude API but not yet used in cost calculation
+    #[allow(dead_code)]
+    // Serde field: deserialized from Claude API but not yet used in cost calculation
     pub cache_creation_input_tokens: u64,
     #[serde(default, rename = "costUSD")]
     pub cost_usd: f64,
@@ -165,15 +169,18 @@ pub enum ClaudeEvent {
     #[serde(rename = "result")]
     Result {
         #[serde(default)]
-        #[allow(dead_code)] // Serde field: deserialized from Claude API but not currently used
+        #[allow(dead_code)]
+        // Serde field: deserialized from Claude API but not currently used
         subtype: Option<String>,
         #[serde(default, alias = "total_cost_usd")]
         cost_usd: Option<f64>,
         #[serde(default)]
-        #[allow(dead_code)] // Serde field: deserialized for future metrics but not currently tracked
+        #[allow(dead_code)]
+        // Serde field: deserialized for future metrics but not currently tracked
         duration_ms: Option<u64>,
         #[serde(default)]
-        #[allow(dead_code)] // Serde field: deserialized for future metrics but not currently tracked
+        #[allow(dead_code)]
+        // Serde field: deserialized for future metrics but not currently tracked
         duration_api_ms: Option<u64>,
         #[serde(default)]
         usage: Option<Usage>,
@@ -185,16 +192,20 @@ pub enum ClaudeEvent {
     #[serde(rename = "system")]
     System {
         #[serde(default)]
-        #[allow(dead_code)] // Serde field: deserialized from Claude API but not currently used
+        #[allow(dead_code)]
+        // Serde field: deserialized from Claude API but not currently used
         subtype: Option<String>,
         #[serde(default)]
-        #[allow(dead_code)] // Serde field: deserialized from Claude API but not currently used
+        #[allow(dead_code)]
+        // Serde field: deserialized from Claude API but not currently used
         session_id: Option<String>,
         #[serde(default)]
-        #[allow(dead_code)] // Serde field: deserialized from Claude API but not currently used
+        #[allow(dead_code)]
+        // Serde field: deserialized from Claude API but not currently used
         model: Option<String>,
         #[serde(default)]
-        #[allow(dead_code)] // Serde field: deserialized from Claude API but not currently used
+        #[allow(dead_code)]
+        // Serde field: deserialized from Claude API but not currently used
         tools: Option<Vec<String>>,
     },
 
@@ -222,7 +233,8 @@ pub enum ContentBlock {
     ToolUse {
         name: String,
         #[serde(default)]
-        #[allow(dead_code)] // Serde field: deserialized from Claude API but not currently used in ralph-wiggum
+        #[allow(dead_code)]
+        // Serde field: deserialized from Claude API but not currently used in ralph-wiggum
         id: Option<String>,
         #[serde(default)]
         input: serde_json::Value,
@@ -231,10 +243,12 @@ pub enum ContentBlock {
     #[serde(rename = "tool_result")]
     ToolResult {
         #[serde(default)]
-        #[allow(dead_code)] // Serde field: deserialized from Claude API but not currently used in ralph-wiggum
+        #[allow(dead_code)]
+        // Serde field: deserialized from Claude API but not currently used in ralph-wiggum
         tool_use_id: Option<String>,
         #[serde(default)]
-        #[allow(dead_code)] // Serde field: deserialized from Claude API but not currently used in ralph-wiggum
+        #[allow(dead_code)]
+        // Serde field: deserialized from Claude API but not currently used in ralph-wiggum
         content: serde_json::Value,
     },
 
@@ -417,9 +431,9 @@ impl ClaudeRunner {
                 .take()
                 .ok_or_else(|| RalphError::ClaudeProcess("Failed to capture stdin".into()))?;
 
-            self.send_stdin_messages(&mut stdin).await.map_err(|e| {
-                RalphError::ClaudeProcess(format!("Failed to write stdin: {}", e))
-            })?;
+            self.send_stdin_messages(&mut stdin)
+                .await
+                .map_err(|e| RalphError::ClaudeProcess(format!("Failed to write stdin: {}", e)))?;
 
             // Drop stdin to signal end of input
         }
