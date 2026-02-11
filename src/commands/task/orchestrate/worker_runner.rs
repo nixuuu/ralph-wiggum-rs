@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -6,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
 use crate::commands::run::output::OutputFormatter;
-use crate::commands::run::runner::{ClaudeEvent, ClaudeRunner, ContentBlock};
+use crate::commands::run::runner::{ClaudeEvent, ClaudeRunner};
 use crate::commands::task::orchestrate::events::{WorkerEvent, WorkerEventKind, WorkerPhase};
 use crate::shared::error::Result;
 
@@ -207,8 +206,17 @@ impl WorkerRunner {
         Ok(passed)
     }
 
+    async fn send_event(&self, kind: WorkerEventKind) {
+        let event = WorkerEvent::new(kind);
+        let _ = self.event_tx.send(event).await;
+    }
+
     /// Extract text content from a ClaudeEvent's assistant message.
-    pub fn extract_text(event: &ClaudeEvent) -> Option<String> {
+    /// Helper function used only in tests.
+    #[cfg(test)]
+    fn extract_text(event: &ClaudeEvent) -> Option<String> {
+        use crate::commands::run::runner::ContentBlock;
+
         if let ClaudeEvent::Assistant { message } = event {
             let texts: Vec<&str> = message
                 .content
@@ -229,11 +237,6 @@ impl WorkerRunner {
         } else {
             None
         }
-    }
-
-    async fn send_event(&self, kind: WorkerEventKind) {
-        let event = WorkerEvent::new(kind);
-        let _ = self.event_tx.send(event).await;
     }
 }
 

@@ -3,6 +3,38 @@ use std::path::{Path, PathBuf};
 
 use crate::shared::error::{RalphError, Result};
 
+/// A setup command to run after creating a worktree.
+///
+/// Can be a simple string or an object with `run` and optional `name`.
+/// Supports template variables: `{ROOT_DIR}`, `{WORKTREE_DIR}`, `{TASK_ID}`, `{WORKER_ID}`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum SetupCommand {
+    Simple(String),
+    Detailed {
+        run: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
+}
+
+impl SetupCommand {
+    pub fn command(&self) -> &str {
+        match self {
+            SetupCommand::Simple(s) => s,
+            SetupCommand::Detailed { run, .. } => run,
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            SetupCommand::Simple(s) => s,
+            SetupCommand::Detailed { name: Some(n), .. } => n,
+            SetupCommand::Detailed { run, .. } => run,
+        }
+    }
+}
+
 /// Configuration loaded from .ralph.toml file
 #[derive(Debug, Default, Deserialize)]
 pub struct FileConfig {
@@ -51,23 +83,29 @@ pub struct PromptConfig {
 
 /// Task management configuration
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct TaskConfig {
     #[serde(default = "default_progress_file")]
     pub progress_file: PathBuf,
+    #[serde(default = "default_tasks_file")]
+    pub tasks_file: PathBuf,
     #[serde(default = "default_system_prompt_file")]
+    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future SYSTEM_PROMPT.md features
     pub system_prompt_file: PathBuf,
     #[serde(default = "default_current_task_file")]
+    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future CURRENT_TASK.md features
     pub current_task_file: PathBuf,
     #[serde(default)]
     pub output_dir: Option<PathBuf>,
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future auto-continue features
     pub auto_continue: bool,
     #[serde(default = "default_true")]
+    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future adaptive iteration features
     pub adaptive_iterations: bool,
     #[serde(default)]
+    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future auxiliary file tracking
     pub files: TaskFilesConfig,
     /// Orchestration settings (`[task.orchestrate]` in .ralph.toml)
     #[serde(default)]
@@ -78,6 +116,7 @@ impl Default for TaskConfig {
     fn default() -> Self {
         Self {
             progress_file: default_progress_file(),
+            tasks_file: default_tasks_file(),
             system_prompt_file: default_system_prompt_file(),
             current_task_file: default_current_task_file(),
             output_dir: None,
@@ -90,9 +129,21 @@ impl Default for TaskConfig {
     }
 }
 
+impl TaskConfig {
+    /// Get the effective tasks file path, considering output_dir.
+    /// NOTE: Currently unused but may be needed for future features.
+    #[allow(dead_code)] // Reserved for future output_dir-aware task file resolution
+    pub fn tasks_file_path(&self) -> PathBuf {
+        if let Some(ref output_dir) = self.output_dir {
+            output_dir.join(&self.tasks_file)
+        } else {
+            self.tasks_file.clone()
+        }
+    }
+}
+
 /// Configuration for task orchestration (`[task.orchestrate]` in .ralph.toml)
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct OrchestrateConfig {
     /// Number of parallel workers (default: 2)
     #[serde(default = "default_workers")]
@@ -109,6 +160,10 @@ pub struct OrchestrateConfig {
     /// Shell commands to run for verification phase (e.g. "cargo test && cargo clippy")
     #[serde(default)]
     pub verify_commands: Option<String>,
+    /// Shell commands to run after creating worktree, before Claude starts.
+    /// Supports template variables: {ROOT_DIR}, {WORKTREE_DIR}, {TASK_ID}, {WORKER_ID}
+    #[serde(default)]
+    pub setup_commands: Vec<SetupCommand>,
 }
 
 impl Default for OrchestrateConfig {
@@ -119,6 +174,7 @@ impl Default for OrchestrateConfig {
             worktree_prefix: None,
             default_model: None,
             verify_commands: None,
+            setup_commands: Vec::new(),
         }
     }
 }
@@ -135,6 +191,10 @@ fn default_progress_file() -> PathBuf {
     PathBuf::from("PROGRESS.md")
 }
 
+fn default_tasks_file() -> PathBuf {
+    PathBuf::from(".ralph/tasks.yml")
+}
+
 fn default_system_prompt_file() -> PathBuf {
     PathBuf::from("SYSTEM_PROMPT.md")
 }
@@ -147,10 +207,13 @@ fn default_current_task_file() -> PathBuf {
 #[derive(Debug, Deserialize)]
 pub struct TaskFilesConfig {
     #[serde(default = "default_changenotes")]
+    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future CHANGENOTES.md tracking
     pub changenotes: PathBuf,
     #[serde(default = "default_issues")]
+    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future IMPLEMENTATION_ISSUES.md tracking
     pub issues: PathBuf,
     #[serde(default = "default_questions")]
+    #[allow(dead_code)] // Serde field: deserialized from .ralph.toml but reserved for future OPEN_QUESTIONS.md tracking
     pub questions: PathBuf,
 }
 
@@ -551,5 +614,74 @@ workers = 6
         assert_eq!(config.task.orchestrate.workers, 6);
         assert_eq!(config.task.orchestrate.max_retries, 3); // default
         assert!(config.task.orchestrate.worktree_prefix.is_none());
+    }
+
+    // --- Setup commands tests ---
+
+    #[test]
+    fn test_setup_commands_default_empty() {
+        let config = FileConfig::default();
+        assert!(config.task.orchestrate.setup_commands.is_empty());
+    }
+
+    #[test]
+    fn test_setup_commands_simple_strings() {
+        let toml_content = r#"
+[task.orchestrate]
+setup_commands = ["npm install", "cp .env.example .env"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.setup_commands.len(), 2);
+        assert_eq!(config.task.orchestrate.setup_commands[0].command(), "npm install");
+        assert_eq!(config.task.orchestrate.setup_commands[0].label(), "npm install");
+        assert_eq!(config.task.orchestrate.setup_commands[1].command(), "cp .env.example .env");
+    }
+
+    #[test]
+    fn test_setup_commands_detailed_objects() {
+        let toml_content = r#"
+[[task.orchestrate.setup_commands]]
+run = "cp {ROOT_DIR}/.env {WORKTREE_DIR}/.env"
+name = "Copy env file"
+
+[[task.orchestrate.setup_commands]]
+run = "npm install"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.setup_commands.len(), 2);
+        assert_eq!(
+            config.task.orchestrate.setup_commands[0].command(),
+            "cp {ROOT_DIR}/.env {WORKTREE_DIR}/.env"
+        );
+        assert_eq!(config.task.orchestrate.setup_commands[0].label(), "Copy env file");
+        assert_eq!(config.task.orchestrate.setup_commands[1].command(), "npm install");
+        assert_eq!(config.task.orchestrate.setup_commands[1].label(), "npm install");
+    }
+
+    #[test]
+    fn test_setup_commands_backward_compat() {
+        let toml_content = r#"
+[task.orchestrate]
+workers = 4
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert!(config.task.orchestrate.setup_commands.is_empty());
+    }
+
+    #[test]
+    fn test_setup_command_label_fallback() {
+        let cmd = SetupCommand::Detailed {
+            run: "echo hello".to_string(),
+            name: None,
+        };
+        assert_eq!(cmd.label(), "echo hello");
+        assert_eq!(cmd.command(), "echo hello");
+
+        let cmd = SetupCommand::Detailed {
+            run: "echo hello".to_string(),
+            name: Some("Greeting".to_string()),
+        };
+        assert_eq!(cmd.label(), "Greeting");
+        assert_eq!(cmd.command(), "echo hello");
     }
 }

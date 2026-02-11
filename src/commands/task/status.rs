@@ -2,23 +2,25 @@ use crossterm::style::Stylize;
 
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
-use crate::shared::progress;
+use crate::shared::progress::TaskStatus;
+use crate::shared::tasks::TasksFile;
 
 pub fn execute(file_config: &FileConfig) -> Result<()> {
-    let progress_path = &file_config.task.progress_file;
-    if !progress_path.exists() {
+    let tasks_path = &file_config.task.tasks_file;
+    if !tasks_path.exists() {
         return Err(RalphError::MissingFile(format!(
             "{} not found. Run `ralph-wiggum task prd` first.",
-            progress_path.display()
+            tasks_path.display()
         )));
     }
 
-    let summary = progress::load_progress(progress_path)?;
+    let tasks_file = TasksFile::load(tasks_path)?;
+    let summary = tasks_file.to_summary();
     let total = summary.total();
 
     println!();
     println!("{}", "━".repeat(60).dark_grey());
-    println!("  📋 Task Progress");
+    println!("  Task Progress");
     println!("{}", "━".repeat(60).dark_grey());
 
     // Breakdown
@@ -35,10 +37,10 @@ pub fn execute(file_config: &FileConfig) -> Result<()> {
     );
 
     // Current task
-    if let Some(current) = progress::current_task(&summary) {
+    if let Some(current) = tasks_file.current_task() {
         let status_marker = match current.status {
-            progress::TaskStatus::InProgress => "~".cyan().bold().to_string(),
-            progress::TaskStatus::Todo => " ".to_string(),
+            TaskStatus::InProgress => "~".cyan().bold().to_string(),
+            TaskStatus::Todo => " ".to_string(),
             _ => "?".to_string(),
         };
         println!();

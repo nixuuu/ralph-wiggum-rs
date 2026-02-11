@@ -67,6 +67,7 @@ impl Worker {
         task_desc: &str,
         model: Option<&str>,
         worktree_path: &Path,
+        setup_commands: &[(String, String)],
         verification_commands: Option<&str>,
     ) -> Result<TaskResult> {
         self.send_event(WorkerEventKind::TaskStarted {
@@ -74,6 +75,12 @@ impl Worker {
             task_id: task_id.to_string(),
         })
         .await;
+
+        // Phase 0: Setup (raw shell commands, non-fatal)
+        if !setup_commands.is_empty() {
+            self.run_setup(task_id, setup_commands, worktree_path)
+                .await;
+        }
 
         let total_cost = 0.0_f64;
         let total_input_tokens = 0_u64;
@@ -196,6 +203,86 @@ impl Worker {
                 task_id: task_id.to_string(),
                 error: "verification failed, retrying".to_string(),
                 retries_left: self.max_retries - retries,
+            })
+            .await;
+        }
+    }
+
+    /// Run setup commands sequentially in the worktree.
+    /// On error: logs warning, continues to next command.
+    async fn run_setup(
+        &self,
+        task_id: &str,
+        commands: &[(String, String)],
+        worktree_path: &Path,
+    ) {
+        self.send_event(WorkerEventKind::PhaseStarted {
+            worker_id: self.id,
+            task_id: task_id.to_string(),
+            phase: WorkerPhase::Setup,
+        })
+        .await;
+
+        let mut all_ok = true;
+        for (cmd, label) in commands {
+            // Send label line to dashboard output
+            self.send_event(WorkerEventKind::OutputLines {
+                worker_id: self.id,
+                lines: vec![format!("$ {label}")],
+            })
+            .await;
+
+            let result = Command::new("sh")
+                .args(["-c", cmd])
+                .current_dir(worktree_path)
+                .output()
+                .await;
+
+            match result {
+                Ok(out) => {
+                    self.send_output_bytes(&out.stdout).await;
+                    self.send_output_bytes(&out.stderr).await;
+                    if !out.status.success() {
+                        all_ok = false;
+                        let code = out.status.code().unwrap_or(-1);
+                        self.send_event(WorkerEventKind::OutputLines {
+                            worker_id: self.id,
+                            lines: vec![format!("⚠ setup command failed (exit {code}): {label}")],
+                        })
+                        .await;
+                    }
+                }
+                Err(e) => {
+                    all_ok = false;
+                    self.send_event(WorkerEventKind::OutputLines {
+                        worker_id: self.id,
+                        lines: vec![format!("⚠ setup command error: {e}")],
+                    })
+                    .await;
+                }
+            }
+        }
+
+        self.send_event(WorkerEventKind::PhaseCompleted {
+            worker_id: self.id,
+            task_id: task_id.to_string(),
+            phase: WorkerPhase::Setup,
+            success: all_ok,
+        })
+        .await;
+    }
+
+    /// Send raw bytes as output lines to the dashboard.
+    async fn send_output_bytes(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(bytes);
+        let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+        if !lines.is_empty() {
+            self.send_event(WorkerEventKind::OutputLines {
+                worker_id: self.id,
+                lines,
             })
             .await;
         }

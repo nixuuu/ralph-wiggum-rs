@@ -224,7 +224,6 @@ impl OutputFormatter {
             iteration: self.iteration,
             min_iterations: self.min_iterations,
             max_iterations: self.max_iterations,
-            elapsed_secs: self.start_time.elapsed().as_secs_f64(),
             iteration_elapsed_secs: self.iteration_start_time.elapsed().as_secs_f64(),
             input_tokens: self.display_input_tokens(),
             output_tokens: self.display_output_tokens(),
@@ -237,15 +236,6 @@ impl OutputFormatter {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn total_input_tokens(&self) -> u64 {
-        self.display_input_tokens()
-    }
-
-    #[allow(dead_code)]
-    pub fn total_output_tokens(&self) -> u64 {
-        self.display_output_tokens()
-    }
 
     /// Format token summary lines for stats display
     fn format_token_lines(&self) -> Vec<String> {
@@ -386,6 +376,22 @@ impl OutputFormatter {
                                 ));
                             }
                         }
+                        ContentBlock::Thinking { thinking } => {
+                            if self.last_block_type == BlockType::Tool {
+                                lines.push(String::new());
+                            }
+                            self.last_block_type = BlockType::Text;
+
+                            // Render thinking as blockquotes (same as <thinking> tags)
+                            for line in thinking.lines() {
+                                let trimmed = line.trim();
+                                if trimmed.is_empty() {
+                                    lines.push("> ".to_string());
+                                } else {
+                                    lines.push(format!("> *{}*", trimmed));
+                                }
+                            }
+                        }
                         ContentBlock::ToolResult { .. } => {
                             // Don't print tool results - too verbose
                         }
@@ -404,7 +410,10 @@ impl OutputFormatter {
                     self.finalize_legacy(*cost_usd);
                 }
             }
-            _ => {}
+            ClaudeEvent::System { .. } => {
+                // System init messages are informational — no output needed
+            }
+            ClaudeEvent::Other => {}
         }
         lines
     }

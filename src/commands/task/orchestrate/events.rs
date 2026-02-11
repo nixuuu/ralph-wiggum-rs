@@ -9,6 +9,7 @@ use crate::shared::error::Result;
 /// Phase of worker execution lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerPhase {
+    Setup,
     Implement,
     ReviewFix,
     Verify,
@@ -17,6 +18,7 @@ pub enum WorkerPhase {
 impl std::fmt::Display for WorkerPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            WorkerPhase::Setup => write!(f, "setup"),
             WorkerPhase::Implement => write!(f, "implement"),
             WorkerPhase::ReviewFix => write!(f, "review+fix"),
             WorkerPhase::Verify => write!(f, "verify"),
@@ -93,10 +95,17 @@ pub enum WorkerEventKind {
         worker_id: u32,
         lines: Vec<String>,
     },
+    /// Output lines from a merge step (git commands, AI conflict resolution).
+    MergeStepOutput {
+        worker_id: u32,
+        lines: Vec<String>,
+    },
 }
 
 /// Command sent from orchestrator to a worker.
-#[allow(dead_code)]
+/// Currently defined for protocol completeness but not actively used.
+/// Kept for future worker communication needs.
+#[allow(dead_code)] // Protocol definition: reserved for future bidirectional orchestrator-worker communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command")]
 pub enum OrchestratorCommand {
@@ -286,6 +295,7 @@ mod tests {
 
     #[test]
     fn test_worker_phase_display() {
+        assert_eq!(WorkerPhase::Setup.to_string(), "setup");
         assert_eq!(WorkerPhase::Implement.to_string(), "implement");
         assert_eq!(WorkerPhase::ReviewFix.to_string(), "review+fix");
         assert_eq!(WorkerPhase::Verify.to_string(), "verify");
@@ -339,6 +349,10 @@ mod tests {
             WorkerEventKind::OutputLines {
                 worker_id: 1,
                 lines: vec!["Hello world".to_string()],
+            },
+            WorkerEventKind::MergeStepOutput {
+                worker_id: 1,
+                lines: vec!["$ git merge --squash".to_string()],
             },
         ];
 

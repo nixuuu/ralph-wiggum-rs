@@ -122,8 +122,21 @@ impl TaskScheduler {
     }
 
     /// Add new tasks to the DAG (for hot reload support).
-    pub fn add_tasks(&mut self, new_dag: TaskDag) {
-        // Replace the DAG with updated version
+    ///
+    /// Preserves tasks known to the scheduler (done/in_progress/blocked)
+    /// that may not appear in the freshly-loaded DAG.
+    pub fn add_tasks(&mut self, mut new_dag: TaskDag) {
+        // Re-register tasks the scheduler already knows about so they
+        // survive a DAG rebuild from tasks.yml (hot reload).
+        let known: Vec<String> = self
+            .done
+            .iter()
+            .chain(self.in_progress.iter())
+            .chain(self.blocked.iter())
+            .cloned()
+            .collect();
+        new_dag.register_tasks(known);
+
         self.dag = new_dag;
         self.refresh_ready_queue();
     }
@@ -148,17 +161,18 @@ impl TaskScheduler {
         self.failed_retries.get(task_id).copied().unwrap_or(0)
     }
 
-    #[allow(dead_code)]
+    /// Public accessors for internal state — currently unused but part of public API.
+    #[allow(dead_code)] // Public API: accessor for done task set
     pub fn done_tasks(&self) -> &HashSet<String> {
         &self.done
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Public API: accessor for blocked task set
     pub fn blocked_tasks(&self) -> &HashSet<String> {
         &self.blocked
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Public API: accessor for in-progress task set
     pub fn in_progress_tasks(&self) -> &HashSet<String> {
         &self.in_progress
     }

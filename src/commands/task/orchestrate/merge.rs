@@ -15,66 +15,132 @@ pub enum MergeResult {
     Failed { error: String },
 }
 
-/// Perform a squash merge of a worker's branch into the current branch.
+/// Output of a single merge step — carries command string and raw output for display.
+#[derive(Debug, Clone)]
+pub struct StepOutput {
+    pub command: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+}
+
+/// Step 1: `git merge --squash {branch}`
 ///
-/// Runs `git merge --squash {branch}` in the project root, then commits
-/// with the format `task({task_id}): {task_name}`.
-pub async fn squash_merge(
+/// Returns (StepOutput, conflicting_files). If conflicting_files is non-empty,
+/// the merge has conflicts and the caller must decide how to proceed.
+pub async fn step_merge_squash(
     project_root: &Path,
-    worktree: &WorktreeInfo,
-    task: &ProgressTask,
-) -> Result<MergeResult> {
-    let merge_output = Command::new("git")
-        .args(["merge", "--squash", &worktree.branch])
+    branch: &str,
+) -> Result<(StepOutput, Vec<String>)> {
+    let command = format!("git merge --squash {branch}");
+    let output = Command::new("git")
+        .args(["merge", "--squash", branch])
         .current_dir(project_root)
         .output()
         .await
         .map_err(|e| RalphError::MergeConflict(format!("Failed to spawn git merge: {e}")))?;
 
-    if !merge_output.status.success() {
-        let stderr = String::from_utf8_lossy(&merge_output.stderr);
-        let stdout = String::from_utf8_lossy(&merge_output.stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let success = output.status.success();
 
-        // Check for conflict indicators
-        let conflict_files = extract_conflict_files(&stdout, &stderr);
-        if !conflict_files.is_empty() {
-            return Ok(MergeResult::Conflict {
-                files: conflict_files,
-            });
-        }
+    let conflict_files = if !success {
+        extract_conflict_files(&stdout, &stderr)
+    } else {
+        Vec::new()
+    };
 
-        return Ok(MergeResult::Failed {
-            error: stderr.to_string(),
-        });
-    }
+    Ok((
+        StepOutput {
+            command,
+            stdout,
+            stderr,
+            success,
+        },
+        conflict_files,
+    ))
+}
 
-    // Commit the squash merge
-    let commit_msg = format_commit_message(&task.id, &task.name);
-    let commit_output = Command::new("git")
+/// Step 2: `git commit -m "task({task_id}): {task_name}"`
+pub async fn step_commit(
+    project_root: &Path,
+    task_id: &str,
+    task_name: &str,
+) -> Result<StepOutput> {
+    let commit_msg = format_commit_message(task_id, task_name);
+    let command = format!("git commit -m \"{commit_msg}\"");
+    let output = Command::new("git")
         .args(["commit", "-m", &commit_msg])
         .current_dir(project_root)
         .output()
         .await
         .map_err(|e| RalphError::MergeConflict(format!("Failed to commit merge: {e}")))?;
 
-    if !commit_output.status.success() {
-        let stderr = String::from_utf8_lossy(&commit_output.stderr);
-        return Ok(MergeResult::Failed {
-            error: format!("Commit failed: {stderr}"),
-        });
-    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    // Get the commit hash
-    let hash_output = Command::new("git")
+    Ok(StepOutput {
+        command,
+        stdout,
+        stderr,
+        success: output.status.success(),
+    })
+}
+
+/// Step 3: `git rev-parse --short HEAD`
+pub async fn step_rev_parse(project_root: &Path) -> Result<(StepOutput, String)> {
+    let command = "git rev-parse --short HEAD".to_string();
+    let output = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(project_root)
         .output()
         .await
         .map_err(|e| RalphError::MergeConflict(format!("Failed to get commit hash: {e}")))?;
 
-    let commit_hash = String::from_utf8_lossy(&hash_output.stdout)
-        .trim()
-        .to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let hash = stdout.trim().to_string();
+
+    Ok((
+        StepOutput {
+            command,
+            stdout,
+            stderr,
+            success: output.status.success(),
+        },
+        hash,
+    ))
+}
+
+/// Perform a squash merge of a worker's branch into the current branch.
+///
+/// Thin wrapper over step functions for backward compatibility and tests.
+pub async fn squash_merge(
+    project_root: &Path,
+    worktree: &WorktreeInfo,
+    task: &ProgressTask,
+) -> Result<MergeResult> {
+    let (step1, conflict_files) = step_merge_squash(project_root, &worktree.branch).await?;
+
+    if !step1.success {
+        if !conflict_files.is_empty() {
+            return Ok(MergeResult::Conflict {
+                files: conflict_files,
+            });
+        }
+        return Ok(MergeResult::Failed {
+            error: step1.stderr,
+        });
+    }
+
+    let step2 = step_commit(project_root, &task.id, &task.name).await?;
+    if !step2.success {
+        return Ok(MergeResult::Failed {
+            error: format!("Commit failed: {}", step2.stderr),
+        });
+    }
+
+    let (_step3, commit_hash) = step_rev_parse(project_root).await?;
 
     Ok(MergeResult::Success { commit_hash })
 }
@@ -93,6 +159,22 @@ pub async fn abort_merge(project_root: &Path) -> Result<()> {
 /// Format the commit message for a squash merge.
 pub fn format_commit_message(task_id: &str, task_name: &str) -> String {
     format!("task({task_id}): {task_name}")
+}
+
+/// Format a StepOutput as display lines for the dashboard.
+pub fn step_output_lines(step: &StepOutput) -> Vec<String> {
+    let mut lines = vec![format!("$ {}", step.command)];
+    for line in step.stdout.lines() {
+        if !line.is_empty() {
+            lines.push(line.to_string());
+        }
+    }
+    for line in step.stderr.lines() {
+        if !line.is_empty() {
+            lines.push(line.to_string());
+        }
+    }
+    lines
 }
 
 /// Extract conflicting file paths from git merge output.
@@ -170,5 +252,31 @@ Auto-merging README.md";
             error: "some error".to_string(),
         };
         assert!(matches!(failed, MergeResult::Failed { .. }));
+    }
+
+    #[test]
+    fn test_step_output_lines_format() {
+        let step = StepOutput {
+            command: "git merge --squash ralph/w1/T03".to_string(),
+            stdout: "Auto-merging src/main.rs\n".to_string(),
+            stderr: "".to_string(),
+            success: true,
+        };
+        let lines = step_output_lines(&step);
+        assert_eq!(lines[0], "$ git merge --squash ralph/w1/T03");
+        assert_eq!(lines[1], "Auto-merging src/main.rs");
+    }
+
+    #[test]
+    fn test_step_output_lines_with_stderr() {
+        let step = StepOutput {
+            command: "git commit -m \"task(T01): Fix bug\"".to_string(),
+            stdout: "".to_string(),
+            stderr: "warning: something\n".to_string(),
+            success: true,
+        };
+        let lines = step_output_lines(&step);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], "warning: something");
     }
 }

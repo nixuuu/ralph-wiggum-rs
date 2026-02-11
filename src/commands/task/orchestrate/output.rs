@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// ANSI color codes for worker output differentiation.
 const WORKER_COLORS: [&str; 8] = [
@@ -25,8 +25,7 @@ pub struct MultiplexedOutput {
     worker_costs: HashMap<u32, (f64, u64, u64)>,
     /// Per-worker current task assignment
     worker_tasks: HashMap<u32, String>,
-    /// Combined JSONL log file (optional)
-    #[allow(dead_code)]
+    /// Combined JSONL log file (optional) — written via log_line() method
     combined_log: Option<std::fs::File>,
 }
 
@@ -107,7 +106,8 @@ impl MultiplexedOutput {
     }
 
     /// Get total tokens across all workers.
-    #[allow(dead_code)]
+    /// Used in tests for cost tracking validation.
+    #[allow(dead_code)] // Test utility for validating token aggregation across workers
     pub fn total_tokens(&self) -> (u64, u64) {
         let input: u64 = self.worker_costs.values().map(|(_, i, _)| i).sum();
         let output: u64 = self.worker_costs.values().map(|(_, _, o)| o).sum();
@@ -115,18 +115,12 @@ impl MultiplexedOutput {
     }
 
     /// Write a line to the combined log (if configured).
-    #[allow(dead_code)]
+    /// Currently unused but provided as part of the public logging API.
+    #[allow(dead_code)] // Public API: reserved for future combined log file writing
     pub fn log_line(&mut self, line: &str) {
         if let Some(log) = &mut self.combined_log {
             writeln!(log, "{line}").ok();
         }
-    }
-
-    /// Get the log file path (for reference).
-    #[allow(dead_code)]
-    pub fn log_path(&self) -> Option<PathBuf> {
-        // We don't store the path, but callers can track it
-        None
     }
 }
 

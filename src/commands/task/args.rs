@@ -19,6 +19,8 @@ pub enum TaskCommands {
     Clean,
     /// Generate task dependencies using AI and update PROGRESS.md frontmatter
     GenerateDeps(GenerateDepsArgs),
+    /// Migrate PROGRESS.md to .ralph/tasks.yml
+    Migrate,
 }
 
 #[derive(Args, Debug)]

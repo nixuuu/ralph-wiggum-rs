@@ -5,7 +5,7 @@ use super::input::resolve_input;
 use crate::commands::run::{RunOnceOptions, run_once};
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
-use crate::shared::progress;
+use crate::shared::tasks::TasksFile;
 use crate::templates;
 
 pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
@@ -19,22 +19,14 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
         .or_else(|| file_config.task.output_dir.clone())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    // Create boilerplate files if missing
-    create_boilerplate_if_missing(&output_dir, file_config)?;
+    // Ensure .ralph/ exists
+    let ralph_dir = output_dir.join(".ralph");
+    std::fs::create_dir_all(&ralph_dir)?;
 
-    // Check if CLAUDE.md exists
-    let claude_md_path = output_dir.join("CLAUDE.md");
-    let existing_claude_md = if claude_md_path.exists() {
-        "\nNote: CLAUDE.md already exists in the project. Do NOT create or modify it.".to_string()
-    } else {
-        String::new()
-    };
-
-    // Build prompt
-    let prompt = templates::PRD_PROMPT
+    // Build prompt (YAML template)
+    let prompt = templates::PRD_PROMPT_YAML
         .replace("{prd_content}", &input)
-        .replace("{output_dir}", &output_dir.display().to_string())
-        .replace("{existing_claude_md}", &existing_claude_md);
+        .replace("{output_dir}", &output_dir.display().to_string());
 
     // Determine model
     let model = args
@@ -51,25 +43,18 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
     .await?;
 
     // Verify required outputs exist
-    let progress_path = output_dir.join(&file_config.task.progress_file);
-    let system_prompt_path = output_dir.join(&file_config.task.system_prompt_file);
+    let tasks_path = output_dir.join(&file_config.task.tasks_file);
 
-    if !progress_path.exists() {
+    if !tasks_path.exists() {
         return Err(RalphError::TaskSetup(format!(
             "{} was not created by Claude. Please check the PRD and try again.",
-            file_config.task.progress_file.display()
+            file_config.task.tasks_file.display()
         )));
     }
 
-    if !system_prompt_path.exists() {
-        return Err(RalphError::TaskSetup(format!(
-            "{} was not created by Claude. Please check the PRD and try again.",
-            file_config.task.system_prompt_file.display()
-        )));
-    }
-
-    // Print summary
-    let summary = progress::load_progress(&progress_path)?;
+    // Print summary via TasksFile adapter
+    let tasks_file = TasksFile::load(&tasks_path)?;
+    let summary = tasks_file.to_summary();
     println!("{}", "━".repeat(60).dark_grey());
     println!(
         "{} Project files generated successfully!",
@@ -84,7 +69,7 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
         summary.in_progress
     );
 
-    if let Some(current) = progress::current_task(&summary) {
+    if let Some(current) = tasks_file.current_task() {
         println!(
             "  {} {} [{}] {}",
             "Next:".dark_grey(),
@@ -101,34 +86,6 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
         "ralph-wiggum task continue".cyan()
     );
     println!("{}", "━".repeat(60).dark_grey());
-
-    Ok(())
-}
-
-fn create_boilerplate_if_missing(
-    output_dir: &std::path::Path,
-    file_config: &FileConfig,
-) -> Result<()> {
-    let files = [
-        (
-            &file_config.task.files.changenotes,
-            templates::CHANGENOTES_TEMPLATE,
-        ),
-        (&file_config.task.files.issues, templates::ISSUES_TEMPLATE),
-        (
-            &file_config.task.files.questions,
-            templates::QUESTIONS_TEMPLATE,
-        ),
-    ];
-
-    for (filename, content) in &files {
-        let path = output_dir.join(filename);
-        if !path.exists() {
-            std::fs::write(&path, content).map_err(|e| {
-                RalphError::TaskSetup(format!("Failed to create {}: {}", path.display(), e))
-            })?;
-        }
-    }
 
     Ok(())
 }

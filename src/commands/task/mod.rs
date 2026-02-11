@@ -5,6 +5,7 @@ mod continue_cmd;
 mod edit;
 mod generate_deps_cmd;
 mod input;
+mod migrate;
 pub mod orchestrate;
 mod prd;
 mod status;
@@ -32,5 +33,6 @@ pub async fn execute(command: TaskCommands, file_config: &FileConfig) -> Result<
         }
         TaskCommands::Clean => clean::execute(file_config).await,
         TaskCommands::GenerateDeps(args) => generate_deps_cmd::execute(args, file_config).await,
+        TaskCommands::Migrate => migrate::execute(file_config).await,
     }
 }

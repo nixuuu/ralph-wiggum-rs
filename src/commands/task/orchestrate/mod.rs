@@ -1,13 +1,17 @@
 pub mod ai;
+mod assignment;
 pub mod dashboard;
 pub mod dry_run;
 pub mod events;
 pub mod merge;
 pub mod orchestrator;
+mod orchestrator_events;
+mod orchestrator_merge;
+mod orchestrator_tui;
 pub mod output;
 pub mod scheduler;
+pub mod shared_types;
 pub mod state;
-pub mod status;
 pub mod summary;
 pub mod worker;
 pub mod worker_runner;

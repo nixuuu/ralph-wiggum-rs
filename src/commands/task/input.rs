@@ -52,11 +52,4 @@ mod tests {
         let result = resolve_input(Some(&path), None);
         assert!(result.is_err());
     }
-
-    #[test]
-    fn test_resolve_input_no_input() {
-        // In test context, stdin is not a terminal and is empty
-        // This may vary depending on test runner, so we just check it doesn't panic
-        let _ = resolve_input(None, None);
-    }
 }

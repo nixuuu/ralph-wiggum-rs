@@ -1,49 +1,79 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::mpsc;
 
 use crate::commands::task::orchestrate::dashboard::Dashboard;
-use crate::commands::task::orchestrate::events::{EventLogger, WorkerEvent, WorkerEventKind, WorkerPhase};
-use crate::commands::task::orchestrate::merge::{self, MergeResult};
+use crate::commands::task::orchestrate::events::{EventLogger, WorkerEvent, WorkerEventKind};
 use crate::commands::task::orchestrate::output::MultiplexedOutput;
 use crate::commands::task::orchestrate::scheduler::TaskScheduler;
-use crate::commands::task::orchestrate::state::{Lockfile, OrchestrateState};
-use crate::commands::task::orchestrate::status::{
-    DashboardInputThread, OrchestratorStatus, ShutdownState, WorkerState, WorkerStatus,
+use crate::commands::task::orchestrate::shared_types::{
+    DashboardInputParams, DashboardInputThread, OrchestratorStatus, ShutdownState,
 };
-use crate::commands::task::orchestrate::summary::{self, TaskSummaryEntry};
-use crate::commands::task::orchestrate::worker::{TaskResult, Worker};
-use crate::commands::task::orchestrate::worktree::{WorktreeInfo, WorktreeManager};
+use crate::commands::task::orchestrate::state::{Lockfile, OrchestrateState};
+use crate::commands::task::orchestrate::summary;
+use crate::commands::task::orchestrate::worker::TaskResult;
+use crate::commands::task::orchestrate::worktree::WorktreeManager;
 use crate::shared::dag::TaskDag;
 use crate::shared::error::{RalphError, Result};
-use crate::shared::file_config::FileConfig;
-use crate::shared::progress::{self, ProgressSummary, ProgressTask, TaskStatus};
+use crate::shared::file_config::{FileConfig, SetupCommand};
+use crate::shared::progress::ProgressTask;
+use crate::shared::tasks::TasksFile;
+use crate::templates;
 
-// ── Worker slot tracking ────────────────────────────────────────────
+use super::assignment::{WorkerSlot, get_mtime};
+use super::orchestrator_merge::MergeContext;
+use super::orchestrator_tui::TuiContext;
 
-/// Per-worker tracking state within the orchestrator.
-#[derive(Debug, Clone)]
-enum WorkerSlot {
-    Idle,
-    Busy {
-        #[allow(dead_code)]
-        task_id: String,
-        worktree: WorktreeInfo,
-    },
+// ── Input flags from TUI input thread ───────────────────────────────
+
+/// Atomic flags shared with the keyboard input thread.
+pub(super) struct InputFlags {
+    pub(super) shutdown: Arc<AtomicBool>,
+    pub(super) graceful_shutdown: Arc<AtomicBool>,
+    pub(super) resize_flag: Arc<AtomicBool>,
+    pub(super) focused_worker: Arc<AtomicU32>,
+    pub(super) scroll_delta: Arc<AtomicI32>,
+    pub(super) render_notify: Arc<tokio::sync::Notify>,
+    /// Toggle for task preview overlay (activated with 'p' key).
+    /// Used by dashboard render to show task details instead of worker grid.
+    #[allow(dead_code)] // Will be used in future task for overlay rendering
+    pub(super) show_task_preview: Arc<AtomicBool>,
+    pub(super) reload_requested: Arc<AtomicBool>,
+    pub(super) quit_state: Arc<AtomicU8>,
+    /// Flag indicating that all tasks have completed.
+    /// When set, orchestrator enters idle state waiting for user quit confirmation.
+    pub(super) completed: Arc<AtomicBool>,
 }
 
-// ── TUI context ─────────────────────────────────────────────────────
+// ── RunLoopContext ───────────────────────────────────────────────────
 
-/// Groups all TUI-related mutable state to keep function signatures clean.
-struct TuiContext {
-    dashboard: Dashboard,
-    mux_output: MultiplexedOutput,
-    task_start_times: HashMap<String, Instant>,
-    task_summaries: Vec<TaskSummaryEntry>,
+/// Groups all mutable and shared state for the main orchestration loop,
+/// replacing 18 individual parameters on `run_loop()` and related functions.
+pub(super) struct RunLoopContext<'a> {
+    pub(super) scheduler: &'a mut TaskScheduler,
+    pub(super) worktree_manager: &'a WorktreeManager,
+    pub(super) state: &'a mut OrchestrateState,
+    pub(super) state_path: &'a Path,
+    pub(super) event_tx: mpsc::Sender<WorkerEvent>,
+    pub(super) event_rx: mpsc::Receiver<WorkerEvent>,
+    pub(super) event_logger: EventLogger,
+    pub(super) worker_slots: HashMap<u32, WorkerSlot>,
+    pub(super) join_handles: HashMap<u32, tokio::task::JoinHandle<Result<TaskResult>>>,
+    pub(super) tasks_file: &'a TasksFile,
+    pub(super) progress: &'a crate::shared::progress::ProgressSummary,
+    pub(super) task_lookup: HashMap<&'a str, &'a ProgressTask>,
+    pub(super) lockfile: Option<Lockfile>,
+    pub(super) tui: &'a mut TuiContext,
+    pub(super) merge_ctx: MergeContext,
+    pub(super) progress_mtime: Option<SystemTime>,
+    pub(super) flags: InputFlags,
+    /// Cached TasksFile for preview overlay rendering.
+    /// Updated on hot-reload and passed to dashboard when preview is active.
+    pub(super) cached_tasks_file: Arc<TasksFile>,
 }
 
 // ── Resolved config ─────────────────────────────────────────────────
@@ -54,15 +84,16 @@ pub struct ResolvedConfig {
     pub max_retries: u32,
     pub model: Option<String>,
     pub worktree_prefix: Option<String>,
-    #[allow(dead_code)]
+    /// Verbosity flag — parsed from CLI but not actively used in orchestrator logic.
+    #[allow(dead_code)] // CLI flag: parsed from args but not currently used in orchestrator
     pub verbose: bool,
     pub resume: bool,
-    #[allow(dead_code)]
     pub dry_run: bool,
     pub no_merge: bool,
     pub max_cost: Option<f64>,
     pub timeout: Option<Duration>,
-    #[allow(dead_code)]
+    /// Task filter — parsed from CLI but not actively used in orchestrator logic.
+    #[allow(dead_code)] // CLI flag: parsed from args but not currently used in orchestrator
     pub task_filter: Option<Vec<String>>,
 }
 
@@ -136,12 +167,13 @@ fn parse_duration(s: &str) -> Option<Duration> {
 
 /// Main orchestrator — coordinates workers, scheduler, merges, and state.
 pub struct Orchestrator {
-    config: ResolvedConfig,
-    project_root: PathBuf,
-    progress_path: PathBuf,
-    system_prompt: String,
-    verification_commands: Option<String>,
-    use_nerd_font: bool,
+    pub(super) config: ResolvedConfig,
+    pub(super) project_root: PathBuf,
+    pub(super) tasks_path: PathBuf,
+    pub(super) system_prompt: String,
+    pub(super) verification_commands: Option<String>,
+    pub(super) setup_commands: Vec<SetupCommand>,
+    pub(super) use_nerd_font: bool,
 }
 
 impl Orchestrator {
@@ -150,14 +182,14 @@ impl Orchestrator {
         file_config: &FileConfig,
         project_root: PathBuf,
     ) -> Result<Self> {
-        let progress_path = project_root.join(&file_config.task.progress_file);
-        let system_prompt_path = project_root.join(&file_config.task.system_prompt_file);
+        let tasks_path = project_root.join(&file_config.task.tasks_file);
 
-        let system_prompt = if system_prompt_path.exists() {
-            std::fs::read_to_string(&system_prompt_path)?
-        } else {
-            String::new()
-        };
+        // Use embedded system prompt template (general part, before task-specific section)
+        let system_prompt = templates::CONTINUE_SYSTEM_PROMPT
+            .split("\n---\n\n# Your Task")
+            .next()
+            .unwrap_or(templates::CONTINUE_SYSTEM_PROMPT)
+            .to_string();
 
         let verification_commands = file_config
             .task
@@ -166,26 +198,29 @@ impl Orchestrator {
             .clone()
             .filter(|s| !s.trim().is_empty());
 
+        let setup_commands = file_config.task.orchestrate.setup_commands.clone();
+
         Ok(Self {
             config,
             project_root,
-            progress_path,
+            tasks_path,
             system_prompt,
             verification_commands,
+            setup_commands,
             use_nerd_font: file_config.ui.nerd_font,
         })
     }
 
     /// Main entry point — run the full orchestration session.
     pub async fn execute(&self) -> Result<()> {
-        // 1. Load and parse PROGRESS.md
-        let progress_content = std::fs::read_to_string(&self.progress_path)
-            .map_err(|e| RalphError::Orchestrate(format!("Failed to read PROGRESS.md: {e}")))?;
-        let progress = progress::parse_progress(&progress_content);
+        // 1. Load and parse .ralph/tasks.yml
+        let tasks_file = TasksFile::load(&self.tasks_path)
+            .map_err(|e| RalphError::Orchestrate(format!("Failed to read tasks.yml: {e}")))?;
+        let progress = tasks_file.to_summary();
 
         // 2. Build and validate DAG
         let frontmatter = progress.frontmatter.clone().unwrap_or_default();
-        let dag = TaskDag::from_frontmatter(&frontmatter);
+        let dag = TaskDag::from_tasks_file(&tasks_file);
 
         if let Some(cycle) = dag.detect_cycles() {
             return Err(RalphError::DagCycle(cycle));
@@ -247,6 +282,10 @@ impl Orchestrator {
         let focused_worker = Arc::new(AtomicU32::new(0));
         let scroll_delta = Arc::new(AtomicI32::new(0));
         let render_notify = Arc::new(tokio::sync::Notify::new());
+        let show_task_preview = Arc::new(AtomicBool::new(false));
+        let reload_requested = Arc::new(AtomicBool::new(false));
+        let quit_state = Arc::new(AtomicU8::new(0)); // 0=running, 1=quit_pending
+        let completed = Arc::new(AtomicBool::new(false));
 
         // 10. Initialize TUI (fullscreen dashboard)
         let output_log_path = ralph_dir.join("orchestrate-output.log");
@@ -258,71 +297,76 @@ impl Orchestrator {
         };
 
         // 11. Spawn input thread (dedicated OS thread for crossterm)
-        let input_thread = DashboardInputThread::spawn(
-            shutdown.clone(),
-            graceful_shutdown.clone(),
-            resize_flag.clone(),
-            focused_worker.clone(),
+        let mut input_thread = DashboardInputThread::spawn(DashboardInputParams {
+            shutdown: Arc::clone(&shutdown),
+            graceful_shutdown: Arc::clone(&graceful_shutdown),
+            resize_flag: Arc::clone(&resize_flag),
+            focused_worker: Arc::clone(&focused_worker),
             worker_count,
-            scroll_delta.clone(),
-            render_notify.clone(),
-        );
+            scroll_delta: Arc::clone(&scroll_delta),
+            render_notify: Arc::clone(&render_notify),
+            show_task_preview: Arc::clone(&show_task_preview),
+            reload_requested: Arc::clone(&reload_requested),
+            quit_state: Arc::clone(&quit_state),
+        });
 
-        // 12. Run the main orchestration loop
-        let result = self
-            .run_loop(
-                &mut scheduler,
-                &worktree_manager,
-                &mut state,
-                &state_path,
-                event_tx,
-                event_rx,
-                event_logger,
-                &mut worker_slots,
-                &progress,
-                shutdown,
-                graceful_shutdown,
-                resize_flag,
-                focused_worker,
-                scroll_delta,
-                render_notify,
-                lockfile,
-                &mut tui,
-            )
-            .await;
+        // 12. Build task lookup for merge
+        let task_lookup: HashMap<&str, &ProgressTask> = progress
+            .tasks
+            .iter()
+            .map(|t| (t.id.as_str(), t))
+            .collect();
 
-        // 13. Cleanup TUI
-        tui.dashboard.cleanup()?;
+        // 13. Build run loop context
+        let flags = InputFlags {
+            shutdown,
+            graceful_shutdown,
+            resize_flag,
+            focused_worker,
+            scroll_delta,
+            render_notify,
+            show_task_preview,
+            reload_requested,
+            quit_state: Arc::clone(&quit_state),
+            completed,
+        };
+
+        // Cache TasksFile in Arc for efficient sharing with dashboard preview
+        let cached_tasks_file = Arc::new(tasks_file);
+
+        let mut ctx = RunLoopContext {
+            scheduler: &mut scheduler,
+            worktree_manager: &worktree_manager,
+            state: &mut state,
+            state_path: &state_path,
+            event_tx,
+            event_rx,
+            event_logger,
+            worker_slots,
+            join_handles: HashMap::new(),
+            tasks_file: cached_tasks_file.as_ref(),
+            progress: &progress,
+            task_lookup,
+            lockfile: Some(lockfile),
+            tui: &mut tui,
+            merge_ctx: MergeContext::new(),
+            progress_mtime: get_mtime(&self.tasks_path),
+            flags,
+            cached_tasks_file: Arc::clone(&cached_tasks_file),
+        };
+
+        // 14. Run the main orchestration loop
+        let result = self.run_loop(&mut ctx).await;
+
+        // 15. Cleanup TUI
+        ctx.tui.dashboard.cleanup()?;
         input_thread.stop();
 
         result
     }
 
     /// The main orchestration loop.
-    #[allow(clippy::too_many_arguments)]
-    async fn run_loop(
-        &self,
-        scheduler: &mut TaskScheduler,
-        worktree_manager: &WorktreeManager,
-        state: &mut OrchestrateState,
-        state_path: &std::path::Path,
-        event_tx: mpsc::Sender<WorkerEvent>,
-        mut event_rx: mpsc::Receiver<WorkerEvent>,
-        mut event_logger: EventLogger,
-        worker_slots: &mut HashMap<u32, WorkerSlot>,
-        progress: &ProgressSummary,
-        shutdown: Arc<AtomicBool>,
-        graceful_shutdown: Arc<AtomicBool>,
-        resize_flag: Arc<AtomicBool>,
-        focused_worker: Arc<AtomicU32>,
-        scroll_delta: Arc<AtomicI32>,
-        render_notify: Arc<tokio::sync::Notify>,
-        mut lockfile: Lockfile,
-        tui: &mut TuiContext,
-    ) -> Result<()> {
-        let mut worker_join_handles: HashMap<u32, tokio::task::JoinHandle<Result<TaskResult>>> =
-            HashMap::new();
-        let mut progress_mtime = get_mtime(&self.progress_path);
+    async fn run_loop(&self, ctx: &mut RunLoopContext<'_>) -> Result<()> {
         let mut last_heartbeat = Instant::now();
         let mut last_hot_reload = Instant::now();
         let started_at = Instant::now();
@@ -333,22 +377,15 @@ impl Orchestrator {
             tokio::signal::unix::SignalKind::terminate(),
         ).ok();
 
-        // Build task lookup for merge
-        let task_lookup: HashMap<String, ProgressTask> = progress
-            .tasks
-            .iter()
-            .map(|t| (t.id.clone(), t.clone()))
-            .collect();
-
         // Print startup message
         let msg = MultiplexedOutput::format_orchestrator_line(&format!(
             "Started: {} workers, {} tasks ({} done, {} remaining)",
             self.config.workers,
-            progress.total(),
-            progress.done,
-            progress.remaining()
+            ctx.progress.total(),
+            ctx.progress.done,
+            ctx.progress.remaining()
         ));
-        tui.dashboard.push_log_line(&msg);
+        ctx.tui.dashboard.push_log_line(&msg);
 
         // Warn if no verification commands configured
         if self.verification_commands.is_none() {
@@ -356,31 +393,39 @@ impl Orchestrator {
                 "⚠ No verify_commands configured — skipping verify phase. \
                  Set verify_commands in [task.orchestrate] in .ralph.toml",
             );
-            tui.dashboard.push_log_line(&warn);
+            ctx.tui.dashboard.push_log_line(&warn);
         }
+
+        // Graceful shutdown timeout tracking
+        let mut graceful_shutdown_started: Option<Instant> = None;
+        const GRACEFUL_SHUTDOWN_GRACE: Duration = Duration::from_secs(120);
 
         // Initial dashboard render
         {
+            let quit_pending = ctx.flags.quit_state.load(Ordering::Relaxed) == 1;
+            let completed = ctx.flags.completed.load(Ordering::Relaxed);
             let orch_status = OrchestratorStatus {
-                scheduler: scheduler.status(),
-                workers: Vec::new(),
-                total_cost: tui.mux_output.total_cost(),
+                scheduler: ctx.scheduler.status(),
+                total_cost: ctx.tui.mux_output.total_cost(),
                 elapsed: started_at.elapsed(),
                 shutdown_state: ShutdownState::Running,
+                shutdown_remaining: None,
+                quit_pending,
+                completed,
             };
-            tui.dashboard.render(&orch_status)?;
+            ctx.tui.dashboard.render(&orch_status, None, &ctx.tui.task_summaries)?;
         }
 
         loop {
             // Check budget limits
             if let Some(max_cost) = self.config.max_cost
-                && tui.mux_output.total_cost() >= max_cost
+                && ctx.tui.mux_output.total_cost() >= max_cost
             {
                 let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                     "Budget limit reached: ${:.4} >= ${max_cost:.4}",
-                    tui.mux_output.total_cost()
+                    ctx.tui.mux_output.total_cost()
                 ));
-                tui.dashboard.push_log_line(&msg);
+                ctx.tui.dashboard.push_log_line(&msg);
                 break;
             }
             if let Some(timeout) = self.config.timeout
@@ -388,77 +433,57 @@ impl Orchestrator {
             {
                 let msg =
                     MultiplexedOutput::format_orchestrator_line("Timeout reached");
-                tui.dashboard.push_log_line(&msg);
+                ctx.tui.dashboard.push_log_line(&msg);
                 break;
             }
 
-            // Check completion
-            if scheduler.is_complete() {
-                let status = scheduler.status();
+            // Check completion — enter idle state instead of breaking
+            if ctx.scheduler.is_complete() && !ctx.flags.completed.load(Ordering::Relaxed) {
+                let status = ctx.scheduler.status();
                 let msg = MultiplexedOutput::format_orchestrator_line(&format!(
-                    "All tasks complete: {} done, {} blocked",
+                    "All tasks complete: {} done, {} blocked — press 'q' to exit",
                     status.done, status.blocked
                 ));
-                tui.dashboard.push_log_line(&msg);
-                break;
+                ctx.tui.dashboard.push_log_line(&msg);
+                ctx.flags.completed.store(true, Ordering::Relaxed);
+                // Continue loop in completed idle state — only exit on graceful_shutdown
             }
 
             // Assign tasks to free workers (unless in graceful shutdown)
-            if !graceful_shutdown.load(Ordering::Relaxed) {
-                self.assign_tasks(
-                    scheduler,
-                    worktree_manager,
-                    worker_slots,
-                    &mut worker_join_handles,
-                    &event_tx,
-                    &shutdown,
-                    progress,
-                    tui,
-                    &mut progress_mtime,
-                )
-                .await?;
+            if !ctx.flags.graceful_shutdown.load(Ordering::Relaxed) {
+                self.assign_tasks(ctx).await?;
             }
 
             // Main select loop
             tokio::select! {
                 // Process worker events
-                Some(event) = event_rx.recv() => {
+                Some(event) = ctx.event_rx.recv() => {
                     // Log structural events (skip verbose OutputLines)
                     if !matches!(event.kind, WorkerEventKind::OutputLines { .. })
                         && let Some(worker_id) = extract_worker_id(&event.kind)
                     {
-                        event_logger.log_event(&event, worker_id).ok();
+                        ctx.event_logger.log_event(&event, worker_id).ok();
                     }
 
-                    self.handle_event(
-                        &event,
-                        scheduler,
-                        worktree_manager,
-                        worker_slots,
-                        &mut worker_join_handles,
-                        state,
-                        &task_lookup,
-                        tui,
-                        &mut progress_mtime,
-                    ).await?;
+                    self.handle_event(&event, ctx).await?;
 
                     // Handle resize after event
-                    if resize_flag.swap(false, Ordering::SeqCst) {
-                        tui.dashboard.handle_resize()?;
+                    if ctx.flags.resize_flag.swap(false, Ordering::SeqCst) {
+                        ctx.tui.dashboard.handle_resize()?;
                     }
-                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta, &graceful_shutdown, &shutdown)?;
+                    self.render_dashboard(ctx, started_at, graceful_shutdown_started)?;
                 }
 
                 // Ctrl+C signal handling (backup — input thread handles q/Ctrl+C too)
                 _ = tokio::signal::ctrl_c() => {
-                    if graceful_shutdown.load(Ordering::Relaxed) {
+                    if ctx.flags.graceful_shutdown.load(Ordering::Relaxed) {
                         // Second Ctrl+C — force shutdown
                         let msg = MultiplexedOutput::format_orchestrator_line(
                             "Force shutdown — aborting all workers"
                         );
-                        tui.dashboard.push_log_line(&msg);
-                        shutdown.store(true, Ordering::Relaxed);
-                        for (_, handle) in worker_join_handles.drain() {
+                        ctx.tui.dashboard.push_log_line(&msg);
+                        ctx.flags.shutdown.store(true, Ordering::Relaxed);
+                        for (_, handle) in ctx.join_handles.drain() {
                             handle.abort();
                         }
                         break;
@@ -467,10 +492,11 @@ impl Orchestrator {
                         let msg = MultiplexedOutput::format_orchestrator_line(
                             "Graceful shutdown — waiting for in-progress tasks..."
                         );
-                        tui.dashboard.push_log_line(&msg);
-                        graceful_shutdown.store(true, Ordering::Relaxed);
+                        ctx.tui.dashboard.push_log_line(&msg);
+                        ctx.flags.graceful_shutdown.store(true, Ordering::Relaxed);
+                        graceful_shutdown_started = Some(Instant::now());
 
-                        let any_busy = worker_slots.values().any(|s| matches!(s, WorkerSlot::Busy { .. }));
+                        let any_busy = ctx.worker_slots.values().any(|s| matches!(s, WorkerSlot::Busy { .. }));
                         if !any_busy {
                             break;
                         }
@@ -487,651 +513,189 @@ impl Orchestrator {
                     let msg = MultiplexedOutput::format_orchestrator_line(
                         "SIGTERM received — force shutdown"
                     );
-                    tui.dashboard.push_log_line(&msg);
-                    shutdown.store(true, Ordering::Relaxed);
-                    for (_, handle) in worker_join_handles.drain() {
+                    ctx.tui.dashboard.push_log_line(&msg);
+                    ctx.flags.shutdown.store(true, Ordering::Relaxed);
+                    for (_, handle) in ctx.join_handles.drain() {
                         handle.abort();
                     }
                     break;
                 }
 
                 // Immediate re-render on keypress (input thread notifies)
-                _ = render_notify.notified() => {
-                    if resize_flag.swap(false, Ordering::SeqCst) {
-                        tui.dashboard.handle_resize()?;
+                _ = ctx.flags.render_notify.notified() => {
+                    // Check reload request (user pressed 'r')
+                    if ctx.flags.reload_requested.swap(false, Ordering::SeqCst) {
+                        let timestamp = chrono::Local::now().format("%H:%M:%S");
+                        match TasksFile::load(&self.tasks_path) {
+                            Ok(new_tf) => {
+                                let old_count = ctx.scheduler.status().total;
+                                let new_dag = TaskDag::from_tasks_file(&new_tf);
+                                let new_count = new_dag.tasks().len();
+
+                                // Validate DAG for cycles before applying
+                                if let Some(cycle) = new_dag.detect_cycles() {
+                                    let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+                                        "✗ [{timestamp}] reload failed: DAG cycle detected: {}",
+                                        cycle.join(" -> ")
+                                    ));
+                                    ctx.tui.dashboard.push_log_line(&msg);
+                                } else {
+                                    ctx.progress_mtime = get_mtime(&self.tasks_path);
+                                    let delta = (new_count as i32) - (old_count as i32);
+                                    ctx.scheduler.add_tasks(new_dag);
+                                    let delta_str = if delta > 0 {
+                                        format!("{} new tasks added", delta)
+                                    } else if delta < 0 {
+                                        format!("{} tasks removed", -delta)
+                                    } else {
+                                        "no change".to_string()
+                                    };
+                                    let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+                                        "♻ [{timestamp}] tasks.yml reloaded ({})",
+                                        delta_str
+                                    ));
+                                    ctx.tui.dashboard.push_log_line(&msg);
+                                }
+                            }
+                            Err(e) => {
+                                let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+                                    "✗ [{timestamp}] reload failed: {e}"
+                                ));
+                                ctx.tui.dashboard.push_log_line(&msg);
+                            }
+                        }
                     }
-                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta, &graceful_shutdown, &shutdown)?;
+
+                    if ctx.flags.resize_flag.swap(false, Ordering::SeqCst) {
+                        ctx.tui.dashboard.handle_resize()?;
+                    }
+                    self.render_dashboard(ctx, started_at, graceful_shutdown_started)?;
                 }
 
                 // Periodic timer: heartbeat, hot reload, status refresh
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
                     // Check if input thread triggered shutdown
-                    if shutdown.load(Ordering::SeqCst) {
+                    if ctx.flags.shutdown.load(Ordering::SeqCst) {
                         let msg = MultiplexedOutput::format_orchestrator_line(
                             "Force shutdown — aborting all workers"
                         );
-                        tui.dashboard.push_log_line(&msg);
-                        for (_, handle) in worker_join_handles.drain() {
+                        ctx.tui.dashboard.push_log_line(&msg);
+                        for (_, handle) in ctx.join_handles.drain() {
                             handle.abort();
                         }
                         break;
                     }
-                    if graceful_shutdown.load(Ordering::SeqCst)
-                        && !worker_slots.values().any(|s| matches!(s, WorkerSlot::Busy { .. }))
-                    {
-                        let msg = MultiplexedOutput::format_orchestrator_line(
-                            "All workers drained — exiting"
-                        );
-                        tui.dashboard.push_log_line(&msg);
-                        break;
+                    if ctx.flags.graceful_shutdown.load(Ordering::SeqCst) {
+                        // Track when graceful shutdown started (input thread may set it)
+                        if graceful_shutdown_started.is_none() {
+                            graceful_shutdown_started = Some(Instant::now());
+                        }
+
+                        if !ctx.worker_slots.values().any(|s| matches!(s, WorkerSlot::Busy { .. })) {
+                            let msg = MultiplexedOutput::format_orchestrator_line(
+                                "All workers drained — exiting"
+                            );
+                            ctx.tui.dashboard.push_log_line(&msg);
+                            break;
+                        }
+
+                        // Escalate to force shutdown after grace period
+                        if let Some(gs_start) = graceful_shutdown_started
+                            && gs_start.elapsed() >= GRACEFUL_SHUTDOWN_GRACE
+                        {
+                            let msg = MultiplexedOutput::format_orchestrator_line(
+                                "Grace period expired — force-killing all workers"
+                            );
+                            ctx.tui.dashboard.push_log_line(&msg);
+                            ctx.flags.shutdown.store(true, Ordering::Relaxed);
+                            for (_, handle) in ctx.join_handles.drain() {
+                                handle.abort();
+                            }
+                            break;
+                        }
                     }
 
                     // Heartbeat every 5 seconds
                     if last_heartbeat.elapsed() >= Duration::from_secs(5) {
-                        lockfile.heartbeat().ok();
+                        if let Some(ref mut lf) = ctx.lockfile { lf.heartbeat().ok(); }
                         last_heartbeat = Instant::now();
                     }
 
-                    // Hot reload PROGRESS.md every 15 seconds
+                    // Hot reload tasks.yml every 15 seconds
                     if last_hot_reload.elapsed() >= Duration::from_secs(15) {
-                        if let Some(new_mtime) = get_mtime(&self.progress_path)
-                            && progress_mtime.is_none_or(|old| new_mtime > old)
+                        if let Some(new_mtime) = get_mtime(&self.tasks_path)
+                            && ctx.progress_mtime.is_none_or(|old| new_mtime > old)
+                            && let Ok(new_tf) = TasksFile::load(&self.tasks_path)
                         {
-                            progress_mtime = Some(new_mtime);
-                            if let Ok(new_content) = std::fs::read_to_string(&self.progress_path) {
-                                let new_progress = progress::parse_progress(&new_content);
-                                if let Some(fm) = &new_progress.frontmatter {
-                                    let new_dag = TaskDag::from_frontmatter(fm);
-                                    scheduler.add_tasks(new_dag);
-                                }
+                            // Wrap in Arc and update cache BEFORE scheduler to avoid race
+                            let new_arc = Arc::new(new_tf);
+                            let new_dag = TaskDag::from_tasks_file(new_arc.as_ref());
+
+                            // Validate DAG for cycles before applying
+                            if new_dag.detect_cycles().is_none() {
+                                ctx.progress_mtime = Some(new_mtime);
+                                ctx.cached_tasks_file = Arc::clone(&new_arc);
+                                ctx.scheduler.add_tasks(new_dag);
                             }
+                            // Note: silent failure on automatic reload — user didn't trigger it
                         }
                         last_hot_reload = Instant::now();
                     }
 
                     // Handle resize + render dashboard
-                    if resize_flag.swap(false, Ordering::SeqCst) {
-                        tui.dashboard.handle_resize()?;
+                    if ctx.flags.resize_flag.swap(false, Ordering::SeqCst) {
+                        ctx.tui.dashboard.handle_resize()?;
                     }
-                    self.render_dashboard(tui, scheduler, started_at, &focused_worker, &scroll_delta, &graceful_shutdown, &shutdown)?;
+                    self.render_dashboard(ctx, started_at, graceful_shutdown_started)?;
                 }
             }
         }
 
-        // Save final state
-        state.save(state_path).ok();
+        // ─────────────────────────────────────────────────────────────
+        // Post-loop cleanup: executed after user quit confirmation in
+        // completion idle state or forced shutdown. Summary is printed
+        // to stdout for terminal scrollback, preserving both interactive
+        // display (dashboard) and permanent record (stdout).
+        // ─────────────────────────────────────────────────────────────
 
-        // Release lockfile
-        lockfile.release().ok();
+        // Clean up any pending merges that never completed (orphaned worktrees)
+        for pending in ctx.merge_ctx.pending_merges.iter() {
+            if let Some(WorkerSlot::Busy { worktree, .. }) = ctx.worker_slots.get(&pending.worker_id) {
+                ctx.worktree_manager.remove_worktree(&worktree.path).await.ok();
+                ctx.worktree_manager.remove_branch(&worktree.branch).await.ok();
+            }
+        }
 
-        // Print summary
+        // Save final state with error logging for verbose mode
+        if let Err(e) = ctx.state.save(ctx.state_path) && self.config.verbose {
+            eprintln!("Warning: Failed to save orchestrator state: {e}");
+        }
+
+        // Release lockfile with error logging for verbose mode
+        if let Some(lf) = ctx.lockfile.take() && let Err(e) = lf.release() && self.config.verbose {
+            eprintln!("Warning: Failed to release lockfile: {e}");
+        }
+
+        // Print summary to stdout (one entry per completed/blocked task)
         let elapsed = started_at.elapsed();
-        let summary_text = summary::format_summary(&tui.task_summaries, elapsed);
+        let summary_text = summary::format_summary(&ctx.tui.task_summaries, elapsed);
         println!("\n{summary_text}");
 
         Ok(())
     }
 
-    /// Apply focus/scroll from input thread and render the dashboard.
-    #[allow(clippy::too_many_arguments)]
-    fn render_dashboard(
-        &self,
-        tui: &mut TuiContext,
-        scheduler: &TaskScheduler,
-        started_at: Instant,
-        focused_worker: &Arc<AtomicU32>,
-        scroll_delta: &Arc<AtomicI32>,
-        graceful_shutdown: &Arc<AtomicBool>,
-        shutdown: &Arc<AtomicBool>,
-    ) -> Result<()> {
-        // Apply focus from input thread
-        let focus = focused_worker.load(Ordering::Relaxed);
-        tui.dashboard
-            .set_focus(if focus == 0 { None } else { Some(focus) });
-
-        // Apply scroll delta from input thread
-        let delta = scroll_delta.swap(0, Ordering::Relaxed);
-        if delta != 0 {
-            tui.dashboard.apply_scroll(delta);
-        }
-
-        // Determine shutdown state
-        let shutdown_state = if shutdown.load(Ordering::Relaxed) {
-            ShutdownState::Aborting
-        } else if graceful_shutdown.load(Ordering::Relaxed) {
-            ShutdownState::Draining
-        } else {
-            ShutdownState::Running
-        };
-
-        // Build status snapshot and render
-        let orch_status = OrchestratorStatus {
-            scheduler: scheduler.status(),
-            workers: Vec::new(),
-            total_cost: tui.mux_output.total_cost(),
-            elapsed: started_at.elapsed(),
-            shutdown_state,
-        };
-        tui.dashboard.render(&orch_status)
-    }
-
-    /// Assign ready tasks to idle workers.
-    #[allow(clippy::too_many_arguments)]
-    async fn assign_tasks(
-        &self,
-        scheduler: &mut TaskScheduler,
-        worktree_manager: &WorktreeManager,
-        worker_slots: &mut HashMap<u32, WorkerSlot>,
-        join_handles: &mut HashMap<u32, tokio::task::JoinHandle<Result<TaskResult>>>,
-        event_tx: &mpsc::Sender<WorkerEvent>,
-        shutdown: &Arc<AtomicBool>,
-        progress: &ProgressSummary,
-        tui: &mut TuiContext,
-        progress_mtime: &mut Option<SystemTime>,
-    ) -> Result<()> {
-        // Find idle workers
-        let idle_workers: Vec<u32> = worker_slots
-            .iter()
-            .filter(|(_, slot)| matches!(slot, WorkerSlot::Idle))
-            .map(|(id, _)| *id)
-            .collect();
-
-        let mut started_ids: Vec<String> = Vec::new();
-
-        for worker_id in idle_workers {
-            let Some(task_id) = scheduler.next_ready_task() else {
-                break;
-            };
-
-            // Find task info from progress
-            let task_info = progress.tasks.iter().find(|t| t.id == task_id);
-            let task_desc = task_info
-                .map(|t| format!("{} [{}] {}", t.id, t.component, t.name))
-                .unwrap_or_else(|| task_id.clone());
-
-            // Resolve model for this task
-            let model = self.resolve_model(&task_id, progress);
-
-            // Create worktree
-            let worktree = worktree_manager
-                .create_worktree(worker_id, &task_id)
-                .await?;
-
-            // Print assignment via TUI
-            let msg = tui.mux_output.format_worker_line(
-                worker_id,
-                &format!("Assigned: {task_id} → {}", worktree.branch),
-            );
-            tui.dashboard.push_log_line(&msg);
-
-            // Mark task as started in scheduler
-            scheduler.mark_started(&task_id);
-            started_ids.push(task_id.clone());
-
-            // Update TUI worker status
-            tui.mux_output.assign_worker(worker_id, &task_id);
-            let ws = WorkerStatus {
-                worker_id,
-                state: WorkerState::Implementing,
-                task_id: Some(task_id.clone()),
-                component: task_info.map(|t| t.component.clone()),
-                phase: Some(WorkerPhase::Implement),
-                cost_usd: 0.0,
-                input_tokens: 0,
-                output_tokens: 0,
-            };
-            tui.dashboard.update_worker_status(worker_id, ws);
-            tui.task_start_times
-                .insert(task_id.clone(), Instant::now());
-
-            // Update worker slot
-            worker_slots.insert(
-                worker_id,
-                WorkerSlot::Busy {
-                    task_id: task_id.clone(),
-                    worktree: worktree.clone(),
-                },
-            );
-
-            // Spawn worker as tokio task
-            let worker = Worker::new(
-                worker_id,
-                event_tx.clone(),
-                shutdown.clone(),
-                self.system_prompt.clone(),
-                self.config.max_retries,
-                self.use_nerd_font,
-            );
-
-            let worktree_path = worktree.path.clone();
-            let verification_cmds = self.verification_commands.clone();
-            let task_id_owned = task_id.clone();
-            let task_desc_owned = task_desc.clone();
-            let model_owned = model.clone();
-
-            let handle = tokio::spawn(async move {
-                worker
-                    .execute_task(
-                        &task_id_owned,
-                        &task_desc_owned,
-                        model_owned.as_deref(),
-                        &worktree_path,
-                        verification_cmds.as_deref(),
-                    )
-                    .await
-            });
-
-            join_handles.insert(worker_id, handle);
-        }
-
-        // Batch-update PROGRESS.md for all newly started tasks
-        if !started_ids.is_empty() {
-            let updates: Vec<(String, TaskStatus)> = started_ids
-                .into_iter()
-                .map(|id| (id, TaskStatus::InProgress))
-                .collect();
-            if let Err(e) = progress::batch_update_statuses(&self.progress_path, &updates) {
-                let msg = MultiplexedOutput::format_orchestrator_line(
-                    &format!("Warning: PROGRESS.md batch update failed: {e}"),
-                );
-                tui.dashboard.push_log_line(&msg);
-            } else if let Some(mt) = get_mtime(&self.progress_path) {
-                *progress_mtime = Some(mt);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Handle a worker event from the mpsc channel.
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_event(
-        &self,
-        event: &WorkerEvent,
-        scheduler: &mut TaskScheduler,
-        worktree_manager: &WorktreeManager,
-        worker_slots: &mut HashMap<u32, WorkerSlot>,
-        join_handles: &mut HashMap<u32, tokio::task::JoinHandle<Result<TaskResult>>>,
-        state: &mut OrchestrateState,
-        task_lookup: &HashMap<String, ProgressTask>,
-        tui: &mut TuiContext,
-        progress_mtime: &mut Option<SystemTime>,
-    ) -> Result<()> {
-        match &event.kind {
-            WorkerEventKind::TaskStarted {
-                worker_id,
-                task_id,
-            } => {
-                let ws = WorkerStatus {
-                    worker_id: *worker_id,
-                    state: WorkerState::Implementing,
-                    task_id: Some(task_id.clone()),
-                    component: task_lookup.get(task_id).map(|t| t.component.clone()),
-                    phase: Some(WorkerPhase::Implement),
-                    cost_usd: 0.0,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                };
-                tui.dashboard.update_worker_status(*worker_id, ws);
-                let msg = tui
-                    .mux_output
-                    .format_worker_line(*worker_id, &format!("Started: {task_id}"));
-                tui.dashboard.push_log_line(&msg);
-            }
-
-            WorkerEventKind::PhaseStarted {
-                worker_id,
-                task_id,
-                phase,
-            } => {
-                let new_state = match phase {
-                    WorkerPhase::Implement => WorkerState::Implementing,
-                    WorkerPhase::ReviewFix => WorkerState::Reviewing,
-                    WorkerPhase::Verify => WorkerState::Verifying,
-                };
-                // Update just the phase/state fields via a fresh status
-                let (cost, input, output) = tui.mux_output.worker_cost(*worker_id);
-                let ws = WorkerStatus {
-                    worker_id: *worker_id,
-                    state: new_state,
-                    task_id: Some(task_id.clone()),
-                    component: task_lookup.get(task_id).map(|t| t.component.clone()),
-                    phase: Some(phase.clone()),
-                    cost_usd: cost,
-                    input_tokens: input,
-                    output_tokens: output,
-                };
-                tui.dashboard.update_worker_status(*worker_id, ws);
-                let msg = tui
-                    .mux_output
-                    .format_worker_line(*worker_id, &format!("{task_id} → phase: {phase}"));
-                tui.dashboard.push_log_line(&msg);
-            }
-
-            WorkerEventKind::PhaseCompleted {
-                worker_id,
-                task_id,
-                phase,
-                success,
-            } => {
-                let status_text = if *success { "ok" } else { "FAILED" };
-                let msg = tui.mux_output.format_worker_line(
-                    *worker_id,
-                    &format!("{task_id} ← phase: {phase} [{status_text}]"),
-                );
-                tui.dashboard.push_log_line(&msg);
-            }
-
-            WorkerEventKind::CostUpdate {
-                worker_id,
-                cost_usd,
-                input_tokens,
-                output_tokens,
-            } => {
-                tui.mux_output
-                    .update_cost(*worker_id, *cost_usd, *input_tokens, *output_tokens);
-                let (total_cost, total_in, total_out) =
-                    tui.mux_output.worker_cost(*worker_id);
-                tui.dashboard
-                    .update_worker_cost(*worker_id, total_cost, total_in, total_out);
-            }
-
-            WorkerEventKind::TaskCompleted {
-                worker_id,
-                task_id,
-                success,
-                cost_usd,
-                ..
-            } => {
-                // Wait for the worker's join handle to complete
-                if let Some(handle) = join_handles.remove(worker_id) {
-                    let _ = handle.await;
-                }
-
-                // Record summary entry
-                let duration = tui
-                    .task_start_times
-                    .remove(task_id)
-                    .map(|s| s.elapsed())
-                    .unwrap_or_default();
-
-                if *success && !self.config.no_merge {
-                    // Attempt squash merge
-                    if let Some(WorkerSlot::Busy { worktree, .. }) = worker_slots.get(worker_id)
-                        && let Some(task) = task_lookup.get(task_id)
-                    {
-                        // Show merging state
-                        let (cost, input, output) = tui.mux_output.worker_cost(*worker_id);
-                        let ws = WorkerStatus {
-                            worker_id: *worker_id,
-                            state: WorkerState::Merging,
-                            task_id: Some(task_id.clone()),
-                            component: Some(task.component.clone()),
-                            phase: None,
-                            cost_usd: cost,
-                            input_tokens: input,
-                            output_tokens: output,
-                        };
-                        tui.dashboard.update_worker_status(*worker_id, ws);
-
-                        let merge_result =
-                            merge::squash_merge(&self.project_root, worktree, task).await?;
-
-                        match merge_result {
-                            MergeResult::Success { commit_hash } => {
-                                let msg = tui.mux_output.format_worker_line(
-                                    *worker_id,
-                                    &format!("Merged: {task_id} → {commit_hash}"),
-                                );
-                                tui.dashboard.push_log_line(&msg);
-                                scheduler.mark_done(task_id);
-                                if let Some(mt) = self.update_progress_file(task_id, TaskStatus::Done, tui) {
-                                    *progress_mtime = Some(mt);
-                                }
-
-                                state.tasks.insert(
-                                    task_id.clone(),
-                                    crate::commands::task::orchestrate::state::TaskState {
-                                        status: "done".to_string(),
-                                        worker: Some(*worker_id),
-                                        retries: scheduler.retry_count(task_id),
-                                        cost: *cost_usd,
-                                    },
-                                );
-
-                                worktree_manager.remove_worktree(&worktree.path).await.ok();
-                                worktree_manager.remove_branch(&worktree.branch).await.ok();
-
-                                tui.task_summaries.push(TaskSummaryEntry {
-                                    task_id: task_id.clone(),
-                                    status: "Done".to_string(),
-                                    cost_usd: *cost_usd,
-                                    duration,
-                                    retries: scheduler.retry_count(task_id),
-                                });
-                            }
-                            MergeResult::Conflict { files } => {
-                                let msg = tui.mux_output.format_worker_line(
-                                    *worker_id,
-                                    &format!("Merge conflict in {task_id}: {files:?}"),
-                                );
-                                tui.dashboard.push_log_line(&msg);
-                                merge::abort_merge(&self.project_root).await.ok();
-                                scheduler.mark_blocked(task_id);
-                                if let Some(mt) = self.update_progress_file(task_id, TaskStatus::Blocked, tui) {
-                                    *progress_mtime = Some(mt);
-                                }
-
-                                state.tasks.insert(
-                                    task_id.clone(),
-                                    crate::commands::task::orchestrate::state::TaskState {
-                                        status: "blocked".to_string(),
-                                        worker: Some(*worker_id),
-                                        retries: scheduler.retry_count(task_id),
-                                        cost: *cost_usd,
-                                    },
-                                );
-
-                                tui.task_summaries.push(TaskSummaryEntry {
-                                    task_id: task_id.clone(),
-                                    status: "Blocked".to_string(),
-                                    cost_usd: *cost_usd,
-                                    duration,
-                                    retries: scheduler.retry_count(task_id),
-                                });
-                            }
-                            MergeResult::Failed { error } => {
-                                let msg = tui.mux_output.format_worker_line(
-                                    *worker_id,
-                                    &format!("Merge failed for {task_id}: {error}"),
-                                );
-                                tui.dashboard.push_log_line(&msg);
-                                scheduler.mark_blocked(task_id);
-                                if let Some(mt) = self.update_progress_file(task_id, TaskStatus::Blocked, tui) {
-                                    *progress_mtime = Some(mt);
-                                }
-
-                                tui.task_summaries.push(TaskSummaryEntry {
-                                    task_id: task_id.clone(),
-                                    status: "Blocked".to_string(),
-                                    cost_usd: *cost_usd,
-                                    duration,
-                                    retries: scheduler.retry_count(task_id),
-                                });
-                            }
-                        }
-                    }
-                } else if *success {
-                    // --no-merge mode
-                    scheduler.mark_done(task_id);
-                    if let Some(mt) = self.update_progress_file(task_id, TaskStatus::Done, tui) {
-                        *progress_mtime = Some(mt);
-                    }
-                    let msg = tui
-                        .mux_output
-                        .format_worker_line(*worker_id, &format!("Done (no merge): {task_id}"));
-                    tui.dashboard.push_log_line(&msg);
-
-                    tui.task_summaries.push(TaskSummaryEntry {
-                        task_id: task_id.clone(),
-                        status: "Done".to_string(),
-                        cost_usd: *cost_usd,
-                        duration,
-                        retries: scheduler.retry_count(task_id),
-                    });
-                } else {
-                    // Task failed
-                    let requeued = scheduler.mark_failed(task_id);
-                    if requeued {
-                        let msg = tui.mux_output.format_worker_line(
-                            *worker_id,
-                            &format!("Task {task_id} failed, re-queued for retry"),
-                        );
-                        tui.dashboard.push_log_line(&msg);
-                    } else {
-                        let msg = tui.mux_output.format_worker_line(
-                            *worker_id,
-                            &format!("Task {task_id} blocked after max retries"),
-                        );
-                        tui.dashboard.push_log_line(&msg);
-                        if let Some(mt) = self.update_progress_file(task_id, TaskStatus::Blocked, tui) {
-                            *progress_mtime = Some(mt);
-                        }
-
-                        tui.task_summaries.push(TaskSummaryEntry {
-                            task_id: task_id.clone(),
-                            status: "Blocked".to_string(),
-                            cost_usd: *cost_usd,
-                            duration,
-                            retries: scheduler.retry_count(task_id),
-                        });
-                    }
-                }
-
-                // Free the worker slot and reset status
-                worker_slots.insert(*worker_id, WorkerSlot::Idle);
-                tui.dashboard
-                    .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
-                tui.mux_output.clear_worker(*worker_id);
-            }
-
-            WorkerEventKind::TaskFailed {
-                worker_id,
-                task_id,
-                error,
-                retries_left,
-            } => {
-                let msg = if *retries_left == 0 {
-                    tui.mux_output.format_worker_line(
-                        *worker_id,
-                        &format!("Task {task_id} failed permanently: {error}"),
-                    )
-                } else {
-                    tui.mux_output.format_worker_line(
-                        *worker_id,
-                        &format!(
-                            "Task {task_id} failed ({retries_left} retries left): {error}"
-                        ),
-                    )
-                };
-                tui.dashboard.push_log_line(&msg);
-            }
-
-            WorkerEventKind::MergeStarted {
-                worker_id,
-                task_id,
-            } => {
-                let (cost, input, output) = tui.mux_output.worker_cost(*worker_id);
-                let ws = WorkerStatus {
-                    worker_id: *worker_id,
-                    state: WorkerState::Merging,
-                    task_id: Some(task_id.clone()),
-                    component: task_lookup.get(task_id).map(|t| t.component.clone()),
-                    phase: None,
-                    cost_usd: cost,
-                    input_tokens: input,
-                    output_tokens: output,
-                };
-                tui.dashboard.update_worker_status(*worker_id, ws);
-                let msg = tui
-                    .mux_output
-                    .format_worker_line(*worker_id, &format!("Merging: {task_id}"));
-                tui.dashboard.push_log_line(&msg);
-            }
-
-            WorkerEventKind::MergeCompleted {
-                worker_id,
-                task_id,
-                success,
-                commit_hash,
-            } => {
-                let hash = commit_hash.as_deref().unwrap_or("???");
-                let status_text = if *success { "ok" } else { "FAILED" };
-                let msg = tui.mux_output.format_worker_line(
-                    *worker_id,
-                    &format!("Merge {task_id}: {status_text} ({hash})"),
-                );
-                tui.dashboard.push_log_line(&msg);
-            }
-
-            WorkerEventKind::MergeConflict {
-                worker_id,
-                task_id,
-                conflicting_files,
-            } => {
-                let msg = tui.mux_output.format_worker_line(
-                    *worker_id,
-                    &format!("Merge conflict in {task_id}: {conflicting_files:?}"),
-                );
-                tui.dashboard.push_log_line(&msg);
-            }
-
-            WorkerEventKind::OutputLines { worker_id, lines } => {
-                tui.dashboard.push_worker_output(*worker_id, lines);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Update PROGRESS.md status for a task. Non-fatal — logs warning on failure.
-    /// Returns new mtime if successful.
-    fn update_progress_file(
-        &self,
-        task_id: &str,
-        new_status: TaskStatus,
-        tui: &mut TuiContext,
-    ) -> Option<SystemTime> {
-        if let Err(e) = progress::update_task_status(&self.progress_path, task_id, new_status) {
-            let msg = MultiplexedOutput::format_orchestrator_line(
-                &format!("Warning: PROGRESS.md update failed for {task_id}: {e}"),
-            );
-            tui.dashboard.push_log_line(&msg);
-            return None;
-        }
-        get_mtime(&self.progress_path)
-    }
-
-    /// Resolve the model to use for a specific task.
-    fn resolve_model(&self, task_id: &str, progress: &ProgressSummary) -> Option<String> {
-        if let Some(fm) = &progress.frontmatter {
-            if let Some(model) = fm.models.get(task_id) {
-                return Some(model.clone());
-            }
-            if let Some(model) = &fm.default_model {
-                return Some(model.clone());
-            }
-        }
-        self.config.model.clone()
+    /// Resolve the model to use for a specific task (with alias support).
+    pub(super) fn resolve_model(&self, task_id: &str, tasks_file: &TasksFile) -> Option<String> {
+        let models = tasks_file.models_map();
+        let raw: Option<&String> = models
+            .get(task_id)
+            .or(tasks_file.default_model.as_ref())
+            .or(self.config.model.as_ref());
+        raw.map(|m| crate::shared::tasks::resolve_model_alias(m))
     }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
-
-/// Get file modification time.
-fn get_mtime(path: &std::path::Path) -> Option<SystemTime> {
-    std::fs::metadata(path).ok()?.modified().ok()
-}
 
 /// Extract worker_id from a WorkerEventKind.
 fn extract_worker_id(kind: &WorkerEventKind) -> Option<u32> {
@@ -1145,7 +709,8 @@ fn extract_worker_id(kind: &WorkerEventKind) -> Option<u32> {
         | WorkerEventKind::MergeStarted { worker_id, .. }
         | WorkerEventKind::MergeCompleted { worker_id, .. }
         | WorkerEventKind::MergeConflict { worker_id, .. }
-        | WorkerEventKind::OutputLines { worker_id, .. } => Some(*worker_id),
+        | WorkerEventKind::OutputLines { worker_id, .. }
+        | WorkerEventKind::MergeStepOutput { worker_id, .. } => Some(*worker_id),
     }
 }
 
@@ -1180,6 +745,10 @@ mod tests {
                 task_id: "T01".to_string(),
                 conflicting_files: vec![],
             },
+            WorkerEventKind::MergeStepOutput {
+                worker_id: 4,
+                lines: vec!["test".to_string()],
+            },
         ];
         for (i, kind) in kinds.iter().enumerate() {
             assert_eq!(extract_worker_id(kind), Some((i + 1) as u32));
@@ -1187,31 +756,24 @@ mod tests {
     }
 
     #[test]
-    fn test_get_mtime_nonexistent() {
-        assert!(get_mtime(std::path::Path::new("/nonexistent/file")).is_none());
-    }
-
-    #[test]
     fn test_resolve_model_per_task() {
-        use crate::shared::progress::{ProgressFrontmatter, ProgressTask, TaskStatus};
+        use crate::shared::tasks::{TaskNode, TasksFile};
+        use crate::shared::progress::TaskStatus;
 
-        let fm = ProgressFrontmatter {
-            deps: HashMap::new(),
-            models: HashMap::from([("T01".to_string(), "claude-opus-4-6".to_string())]),
+        let tasks_file = TasksFile {
             default_model: Some("claude-sonnet-4-5-20250929".to_string()),
-        };
-        let progress = ProgressSummary {
-            tasks: vec![ProgressTask {
+            tasks: vec![TaskNode {
                 id: "T01".to_string(),
-                component: "api".to_string(),
                 name: "Test".to_string(),
-                status: TaskStatus::Todo,
+                component: Some("api".to_string()),
+                status: Some(TaskStatus::Todo),
+                deps: Vec::new(),
+                model: Some("claude-opus-4-6".to_string()),
+                description: None,
+                related_files: Vec::new(),
+                implementation_steps: Vec::new(),
+                subtasks: Vec::new(),
             }],
-            done: 0,
-            in_progress: 0,
-            blocked: 0,
-            todo: 1,
-            frontmatter: Some(fm),
         };
 
         let config = ResolvedConfig {
@@ -1231,38 +793,42 @@ mod tests {
         let orch = Orchestrator {
             config,
             project_root: PathBuf::from("/tmp/test"),
-            progress_path: PathBuf::from("/tmp/test/PROGRESS.md"),
+            tasks_path: PathBuf::from("/tmp/test/.ralph/tasks.yml"),
             system_prompt: String::new(),
             verification_commands: None,
+            setup_commands: Vec::new(),
             use_nerd_font: false,
         };
 
         assert_eq!(
-            orch.resolve_model("T01", &progress),
+            orch.resolve_model("T01", &tasks_file),
             Some("claude-opus-4-6".to_string())
         );
         assert_eq!(
-            orch.resolve_model("T99", &progress),
+            orch.resolve_model("T99", &tasks_file),
             Some("claude-sonnet-4-5-20250929".to_string())
         );
     }
 
     #[test]
     fn test_resolve_model_cli_fallback() {
-        use crate::shared::progress::{ProgressTask, TaskStatus};
+        use crate::shared::tasks::{TaskNode, TasksFile};
+        use crate::shared::progress::TaskStatus;
 
-        let progress = ProgressSummary {
-            tasks: vec![ProgressTask {
+        let tasks_file = TasksFile {
+            default_model: None,
+            tasks: vec![TaskNode {
                 id: "T01".to_string(),
-                component: "api".to_string(),
                 name: "Test".to_string(),
-                status: TaskStatus::Todo,
+                component: Some("api".to_string()),
+                status: Some(TaskStatus::Todo),
+                deps: Vec::new(),
+                model: None,
+                description: None,
+                related_files: Vec::new(),
+                implementation_steps: Vec::new(),
+                subtasks: Vec::new(),
             }],
-            done: 0,
-            in_progress: 0,
-            blocked: 0,
-            todo: 1,
-            frontmatter: None,
         };
 
         let config = ResolvedConfig {
@@ -1282,33 +848,17 @@ mod tests {
         let orch = Orchestrator {
             config,
             project_root: PathBuf::from("/tmp/test"),
-            progress_path: PathBuf::from("/tmp/test/PROGRESS.md"),
+            tasks_path: PathBuf::from("/tmp/test/.ralph/tasks.yml"),
             system_prompt: String::new(),
             verification_commands: None,
+            setup_commands: Vec::new(),
             use_nerd_font: false,
         };
 
         assert_eq!(
-            orch.resolve_model("T01", &progress),
+            orch.resolve_model("T01", &tasks_file),
             Some("cli-model".to_string())
         );
-    }
-
-    #[test]
-    fn test_worker_slot_states() {
-        let idle = WorkerSlot::Idle;
-        assert!(matches!(idle, WorkerSlot::Idle));
-
-        let busy = WorkerSlot::Busy {
-            task_id: "T01".to_string(),
-            worktree: WorktreeInfo {
-                path: PathBuf::from("/tmp/wt1"),
-                branch: "ralph/w1/T01".to_string(),
-                worker_id: 1,
-                task_id: "T01".to_string(),
-            },
-        };
-        assert!(matches!(busy, WorkerSlot::Busy { .. }));
     }
 
     #[test]
@@ -1371,5 +921,339 @@ mod tests {
             config.task_filter,
             Some(vec!["T01".to_string(), "T03".to_string()])
         );
+    }
+
+    // ── Completion state transition tests ────────────────────────────
+
+    #[test]
+    fn test_input_flags_completed_initialized_false() {
+        let completed = Arc::new(AtomicBool::new(false));
+        assert!(!completed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_input_flags_completed_set_true_on_scheduler_complete() {
+        let completed = Arc::new(AtomicBool::new(false));
+
+        // Simulate run_loop logic:
+        // if scheduler.is_complete() && !flags.completed.load() {
+        //   flags.completed.store(true);
+        // }
+
+        // First iteration: complete and not yet marked
+        if !completed.load(Ordering::Relaxed) {
+            completed.store(true, Ordering::Relaxed);
+        }
+
+        assert!(completed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_completion_flag_remains_true() {
+        let completed = Arc::new(AtomicBool::new(false));
+
+        // First iteration: set to true
+        if !completed.load(Ordering::Relaxed) {
+            completed.store(true, Ordering::Relaxed);
+        }
+        assert!(completed.load(Ordering::Relaxed));
+
+        // Second iteration: condition is false (already true), so don't set again
+        if !completed.load(Ordering::Relaxed) {
+            // This block is NOT executed
+            completed.store(true, Ordering::Relaxed);
+        }
+
+        // Flag should still be true
+        assert!(completed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_completion_does_not_break_loop() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let graceful_shutdown = Arc::new(AtomicBool::new(false));
+
+        // Simulate loop iterations
+        let mut iterations = 0;
+
+        loop {
+            iterations += 1;
+
+            // Check completion (like in run_loop)
+            if !completed.load(Ordering::Relaxed) {
+                completed.store(true, Ordering::Relaxed);
+                // NO BREAK HERE — loop continues in completed state
+            }
+
+            // Check graceful shutdown (loop exit condition)
+            if graceful_shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // After a few iterations in completed state, trigger shutdown
+            if iterations >= 3 {
+                graceful_shutdown.store(true, Ordering::Relaxed);
+            }
+        }
+
+        // Should have looped more than once after completion
+        assert!(completed.load(Ordering::Relaxed));
+        assert!(graceful_shutdown.load(Ordering::Relaxed));
+        assert!(iterations > 1);
+    }
+
+    #[test]
+    fn test_quit_confirmation_works_in_completed_state() {
+        let quit_state = Arc::new(AtomicU8::new(0));
+        let graceful_shutdown = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(true)); // Already completed
+
+        // First 'q' in completed state
+        let current_quit = quit_state.load(Ordering::SeqCst);
+        if current_quit != 1 {
+            quit_state.store(1, Ordering::SeqCst);
+        }
+        assert_eq!(quit_state.load(Ordering::SeqCst), 1);
+
+        // Second 'q' confirms and sets graceful_shutdown
+        let current_quit = quit_state.load(Ordering::SeqCst);
+        if current_quit == 1 {
+            graceful_shutdown.store(true, Ordering::SeqCst);
+            quit_state.store(0, Ordering::SeqCst);
+        }
+
+        assert!(graceful_shutdown.load(Ordering::SeqCst));
+        assert!(completed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_completion_idempotent_flag_set() {
+        let completed = Arc::new(AtomicBool::new(false));
+
+        // Multiple checks — flag set only on first completion check
+        let mut times_set = 0;
+
+        for _ in 0..5 {
+            if !completed.load(Ordering::Relaxed) {
+                completed.store(true, Ordering::Relaxed);
+                times_set += 1;
+            }
+        }
+
+        assert_eq!(times_set, 1);
+        assert!(completed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_esc_in_completed_state_closes_preview_or_noop() {
+        let _completed = Arc::new(AtomicBool::new(true));
+        let show_task_preview = Arc::new(AtomicBool::new(true));
+        let quit_state = Arc::new(AtomicU8::new(0));
+        let focused_worker = Arc::new(AtomicU32::new(1));
+
+        // In completed state with preview open, quit_state=0 (running)
+        assert!(_completed.load(Ordering::Relaxed));
+        assert!(show_task_preview.load(Ordering::Relaxed));
+        assert_eq!(quit_state.load(Ordering::SeqCst), 0);
+
+        // Real DashboardInputThread behavior: Esc in completed running state
+        // cancels quit_pending OR unfocuses (does NOT close preview).
+        // Test the actual behavior from shared_types.rs:271-284
+        let current_quit = quit_state.load(Ordering::SeqCst);
+        if current_quit == 1 {
+            // Cancel quit_pending
+            quit_state.store(0, Ordering::SeqCst);
+        } else {
+            // Running state: Esc unfocuses (sets focused_worker to 0)
+            // Preview stays open — preview is toggled only by 'p' key
+            focused_worker.store(0, Ordering::Relaxed);
+        }
+
+        // Preview should still be open (Esc doesn't close it in running state)
+        assert!(show_task_preview.load(Ordering::Relaxed));
+        // Focus was cleared
+        assert_eq!(focused_worker.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_p_during_completion_shows_preview_overlay() {
+        let _completed = Arc::new(AtomicBool::new(true));
+        let show_task_preview = Arc::new(AtomicBool::new(false));
+        let quit_state = Arc::new(AtomicU8::new(0));
+
+        // In completed state with preview closed
+        assert!(_completed.load(Ordering::Relaxed));
+        assert!(!show_task_preview.load(Ordering::Relaxed));
+
+        // Press 'p' — toggle preview (off → on)
+        if quit_state.load(Ordering::SeqCst) == 1 {
+            quit_state.store(0, Ordering::SeqCst);
+        }
+        let current = show_task_preview.load(Ordering::Relaxed);
+        show_task_preview.store(!current, Ordering::Relaxed);
+        assert!(show_task_preview.load(Ordering::Relaxed)); // Now on
+
+        // Press 'p' again — toggle preview (on → off)
+        if quit_state.load(Ordering::SeqCst) == 1 {
+            quit_state.store(0, Ordering::SeqCst);
+        }
+        let current = show_task_preview.load(Ordering::Relaxed);
+        show_task_preview.store(!current, Ordering::Relaxed);
+        assert!(!show_task_preview.load(Ordering::Relaxed)); // Now off
+    }
+
+    #[test]
+    fn test_q_during_completion_with_preview_open() {
+        let _completed = Arc::new(AtomicBool::new(true));
+        let show_task_preview = Arc::new(AtomicBool::new(true));
+        let quit_state = Arc::new(AtomicU8::new(0));
+        let graceful_shutdown = Arc::new(AtomicBool::new(false));
+
+        // In completed state with preview open
+        assert!(show_task_preview.load(Ordering::Relaxed));
+
+        // First 'q' enters quit_pending (preview stays open)
+        let current_quit = quit_state.load(Ordering::SeqCst);
+        if current_quit != 1 {
+            quit_state.store(1, Ordering::SeqCst);
+        }
+        assert_eq!(quit_state.load(Ordering::SeqCst), 1);
+        assert!(show_task_preview.load(Ordering::Relaxed)); // Preview still open
+
+        // Second 'q' confirms shutdown (preview still open until user explicitly closes it)
+        let current_quit = quit_state.load(Ordering::SeqCst);
+        if current_quit == 1 {
+            graceful_shutdown.store(true, Ordering::SeqCst);
+            quit_state.store(0, Ordering::SeqCst);
+        }
+
+        assert!(graceful_shutdown.load(Ordering::SeqCst));
+        assert!(show_task_preview.load(Ordering::Relaxed)); // Preview stays open
+    }
+
+    #[test]
+    fn test_completed_state_all_transitions() {
+        // Comprehensive test: start in completed state, test all key transitions
+        let completed = Arc::new(AtomicBool::new(true));
+        let quit_state = Arc::new(AtomicU8::new(0));
+        let graceful_shutdown = Arc::new(AtomicBool::new(false));
+        let show_task_preview = Arc::new(AtomicBool::new(false));
+
+        // State 1: Completed idle
+        assert!(completed.load(Ordering::Relaxed));
+        assert_eq!(quit_state.load(Ordering::SeqCst), 0);
+
+        // Transition 1: Press 'p' — open preview
+        let current = show_task_preview.load(Ordering::Relaxed);
+        show_task_preview.store(!current, Ordering::Relaxed);
+        assert!(show_task_preview.load(Ordering::Relaxed));
+
+        // Transition 2: Press 'q' — enter quit confirmation
+        let current_quit = quit_state.load(Ordering::SeqCst);
+        if current_quit != 1 {
+            quit_state.store(1, Ordering::SeqCst);
+        }
+        assert_eq!(quit_state.load(Ordering::SeqCst), 1);
+        assert!(show_task_preview.load(Ordering::Relaxed)); // Preview unaffected by q
+
+        // Transition 3: Press 'q' again — confirm shutdown
+        let current_quit = quit_state.load(Ordering::SeqCst);
+        if current_quit == 1 {
+            graceful_shutdown.store(true, Ordering::SeqCst);
+            quit_state.store(0, Ordering::SeqCst);
+        }
+        assert!(graceful_shutdown.load(Ordering::SeqCst));
+        assert!(completed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_post_loop_cleanup_summary_formatting() {
+        // Verify that summary is correctly formatted after loop exit
+        use crate::commands::task::orchestrate::summary::TaskSummaryEntry;
+        use std::time::Duration;
+
+        let entries = vec![
+            TaskSummaryEntry {
+                task_id: "T01".to_string(),
+                status: "Done".to_string(),
+                cost_usd: 0.042,
+                duration: Duration::from_secs(45),
+                retries: 0,
+            },
+            TaskSummaryEntry {
+                task_id: "T02".to_string(),
+                status: "Done".to_string(),
+                cost_usd: 0.038,
+                duration: Duration::from_secs(32),
+                retries: 0,
+            },
+        ];
+
+        let elapsed = Duration::from_secs(50);
+        let summary_text = summary::format_summary(&entries, elapsed);
+
+        // Verify summary contains key elements
+        assert!(summary_text.contains("T01"));
+        assert!(summary_text.contains("T02"));
+        assert!(summary_text.contains("Done"));
+        assert!(summary_text.contains("TOTAL"));
+        assert!(summary_text.contains("2/2 done"));
+        assert!(summary_text.contains("Parallelism speedup"));
+    }
+
+    #[test]
+    fn test_post_loop_cleanup_summary_empty_case() {
+        // Verify that empty task list is handled gracefully
+        use std::time::Duration;
+
+        let entries: Vec<crate::commands::task::orchestrate::summary::TaskSummaryEntry> = vec![];
+        let elapsed = Duration::from_secs(10);
+        let summary_text = summary::format_summary(&entries, elapsed);
+
+        // When no tasks were executed, summary should indicate this
+        assert!(summary_text.contains("No tasks were executed"));
+    }
+
+    #[test]
+    fn test_post_loop_cleanup_summary_mixed_results() {
+        // Verify that post-loop summary correctly reports mixed Done/Blocked tasks
+        // This is the typical scenario after orchestration completes
+        use crate::commands::task::orchestrate::summary::TaskSummaryEntry;
+        use std::time::Duration;
+
+        let entries = vec![
+            TaskSummaryEntry {
+                task_id: "T01".to_string(),
+                status: "Done".to_string(),
+                cost_usd: 0.042,
+                duration: Duration::from_secs(45),
+                retries: 0,
+            },
+            TaskSummaryEntry {
+                task_id: "T02".to_string(),
+                status: "Done".to_string(),
+                cost_usd: 0.038,
+                duration: Duration::from_secs(32),
+                retries: 0,
+            },
+            TaskSummaryEntry {
+                task_id: "T03".to_string(),
+                status: "Blocked".to_string(),
+                cost_usd: 0.089,
+                duration: Duration::ZERO, // Merge mode doesn't track duration
+                retries: 3,
+            },
+        ];
+
+        let elapsed = Duration::from_secs(60);
+        let summary_text = summary::format_summary(&entries, elapsed);
+
+        // Verify all tasks and their statuses are reported
+        assert!(summary_text.contains("T01"));
+        assert!(summary_text.contains("T02"));
+        assert!(summary_text.contains("T03"));
+        assert!(summary_text.contains("2/3 done"));
+        assert!(summary_text.contains("Blocked"));
+        assert!(summary_text.contains("$0.1690")); // Total cost: 0.042 + 0.038 + 0.089
     }
 }

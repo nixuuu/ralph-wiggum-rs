@@ -20,7 +20,8 @@ pub struct ProgressFrontmatter {
     pub default_model: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Todo,
     Done,
@@ -44,7 +45,6 @@ pub struct ProgressSummary {
     pub blocked: usize,
     pub todo: usize,
     /// Parsed YAML frontmatter (None if no frontmatter present)
-    #[allow(dead_code)]
     pub frontmatter: Option<ProgressFrontmatter>,
 }
 
@@ -174,10 +174,14 @@ pub fn parse_frontmatter(content: &str) -> (Option<ProgressFrontmatter>, &str) {
 ///   - T01
 /// ---
 /// ```
-#[allow(dead_code)]
-pub fn write_frontmatter(fm: &ProgressFrontmatter) -> String {
-    let yaml = serde_yaml::to_string(fm).unwrap_or_default();
-    format!("---\n{}---\n", yaml)
+///
+/// Public API for PROGRESS.md frontmatter serialization.
+/// Currently used only in tests, but preserved as part of the legacy PROGRESS.md API.
+#[allow(dead_code)] // Legacy PROGRESS.md API: test utility for frontmatter serialization
+pub fn write_frontmatter(fm: &ProgressFrontmatter) -> Result<String> {
+    let yaml = serde_yaml::to_string(fm)
+        .map_err(|e| RalphError::Config(format!("Failed to serialize frontmatter: {e}")))?;
+    Ok(format!("---\n{}---\n", yaml))
 }
 
 /// Tolerant parser for PROGRESS.md content.
@@ -231,6 +235,9 @@ pub fn load_progress(path: &Path) -> Result<ProgressSummary> {
 }
 
 /// Convert a TaskStatus to its markdown checkbox marker.
+/// Internal helper for `batch_update_statuses()`.
+/// Used only in tests, but preserved for legacy PROGRESS.md status updates.
+#[allow(dead_code)] // Legacy PROGRESS.md API: helper for converting status to markdown marker
 fn status_marker(status: &TaskStatus) -> &'static str {
     match status {
         TaskStatus::Todo => "[ ]",
@@ -244,6 +251,10 @@ fn status_marker(status: &TaskStatus) -> &'static str {
 ///
 /// Reads the file, finds the line matching `- [S] {task_id} ...`,
 /// replaces the status marker, and writes the file back.
+///
+/// Public API for updating single task status in PROGRESS.md.
+/// Currently used only in tests, but preserved as part of the legacy PROGRESS.md API.
+#[allow(dead_code)] // Legacy PROGRESS.md API: update single task status
 pub fn update_task_status(path: &Path, task_id: &str, new_status: TaskStatus) -> Result<()> {
     batch_update_statuses(path, &[(task_id.to_string(), new_status)])
 }
@@ -252,6 +263,11 @@ pub fn update_task_status(path: &Path, task_id: &str, new_status: TaskStatus) ->
 ///
 /// Reads the file once, applies all status changes, writes back once.
 /// Tasks not found in the file are silently skipped.
+///
+/// Public API for batch updating task statuses in PROGRESS.md.
+/// Currently used only in tests, but preserved as part of the legacy PROGRESS.md API.
+/// (Note: TasksFile has its own batch_update_statuses method for tasks.yml)
+#[allow(dead_code)] // Legacy PROGRESS.md API: batch update task statuses
 pub fn batch_update_statuses(path: &Path, updates: &[(String, TaskStatus)]) -> Result<()> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| RalphError::MissingFile(format!("{}: {}", path.display(), e)))?;
@@ -276,7 +292,12 @@ pub fn batch_update_statuses(path: &Path, updates: &[(String, TaskStatus)]) -> R
 
             if let Some(new_status) = lookup.get(found_id) {
                 // Replace the status marker in the original line (preserving indentation)
-                let bracket_pos = line.find("- [").unwrap();
+                let Some(bracket_pos) = line.find("- [") else {
+                    // Should never happen since trimmed starts with "- [", but be defensive
+                    result.push_str(line);
+                    result.push('\n');
+                    continue;
+                };
                 result.push_str(&line[..bracket_pos + 2]);
                 result.push_str(status_marker(new_status));
                 result.push_str(&line[bracket_pos + 5..]);
@@ -301,13 +322,15 @@ pub fn batch_update_statuses(path: &Path, updates: &[(String, TaskStatus)]) -> R
 ///
 /// If no frontmatter exists, inserts new frontmatter at the top.
 /// If frontmatter exists, replaces it with the new version.
-#[allow(dead_code)]
+///
+/// Currently used only in tests, but preserved as part of the legacy PROGRESS.md API.
+#[allow(dead_code)] // Legacy PROGRESS.md API: update frontmatter while preserving body
 pub fn update_progress_frontmatter(path: &Path, fm: &ProgressFrontmatter) -> Result<()> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| RalphError::MissingFile(format!("{}: {}", path.display(), e)))?;
 
     let (_, body) = parse_frontmatter(&content);
-    let new_fm = write_frontmatter(fm);
+    let new_fm = write_frontmatter(fm)?;
 
     let mut result = new_fm;
     result.push_str(body);
@@ -627,7 +650,7 @@ deps:
         fm.deps.insert("T02".to_string(), vec!["T01".to_string()]);
         fm.default_model = Some("claude-sonnet-4-5-20250929".to_string());
 
-        let written = write_frontmatter(&fm);
+        let written = write_frontmatter(&fm).unwrap();
         assert!(written.starts_with("---\n"));
         assert!(written.ends_with("---\n"));
 

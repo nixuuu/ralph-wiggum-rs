@@ -5,26 +5,27 @@ use super::input::resolve_input;
 use crate::commands::run::{RunOnceOptions, run_once};
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
-use crate::shared::progress;
+use crate::shared::tasks::TasksFile;
 use crate::templates;
 
 pub async fn execute(args: EditArgs, file_config: &FileConfig) -> Result<()> {
-    let progress_path = &file_config.task.progress_file;
-    if !progress_path.exists() {
+    let tasks_path = &file_config.task.tasks_file;
+    if !tasks_path.exists() {
         return Err(RalphError::MissingFile(format!(
             "{} not found. Run `ralph-wiggum task prd` first.",
-            progress_path.display()
+            tasks_path.display()
         )));
     }
 
     // Get before state
-    let before = progress::load_progress(progress_path)?;
+    let before = TasksFile::load(tasks_path)?;
+    let before_summary = before.to_summary();
 
     // Resolve input
     let input = resolve_input(args.file.as_ref(), args.prompt.as_deref())?;
 
-    // Build prompt
-    let prompt = templates::EDIT_PROMPT.replace("{instructions}", &input);
+    // Build prompt (YAML template)
+    let prompt = templates::EDIT_PROMPT_YAML.replace("{instructions}", &input);
 
     // Determine model
     let model = args
@@ -41,13 +42,14 @@ pub async fn execute(args: EditArgs, file_config: &FileConfig) -> Result<()> {
     .await?;
 
     // Re-parse and show diff
-    let after = progress::load_progress(progress_path)?;
+    let after = TasksFile::load(tasks_path)?;
+    let after_summary = after.to_summary();
 
     println!("{}", "━".repeat(60).dark_grey());
     println!("{} tasks edited successfully", "✓".green().bold());
 
-    let total_diff = after.total() as i32 - before.total() as i32;
-    let done_diff = after.done as i32 - before.done as i32;
+    let total_diff = after_summary.total() as i32 - before_summary.total() as i32;
+    let done_diff = after_summary.done as i32 - before_summary.done as i32;
 
     if total_diff != 0 {
         let sign = if total_diff > 0 { "+" } else { "" };
@@ -56,8 +58,8 @@ pub async fn execute(args: EditArgs, file_config: &FileConfig) -> Result<()> {
             "Count:".dark_grey(),
             sign,
             total_diff,
-            before.total(),
-            after.total()
+            before_summary.total(),
+            after_summary.total()
         );
     }
 
@@ -68,24 +70,24 @@ pub async fn execute(args: EditArgs, file_config: &FileConfig) -> Result<()> {
             "Done:".dark_grey(),
             sign,
             done_diff,
-            before.done,
-            after.done
+            before_summary.done,
+            after_summary.done
         );
     }
 
     println!(
         "  {} {} total ({} todo, {} done, {} blocked)",
         "Tasks:".dark_grey(),
-        after.total(),
-        after.todo,
-        after.done,
-        after.blocked
+        after_summary.total(),
+        after_summary.todo,
+        after_summary.done,
+        after_summary.blocked
     );
 
     // Update state file if it exists
-    update_state_file(file_config, &after)?;
+    update_state_file(file_config, &after_summary)?;
 
-    if let Some(current) = progress::current_task(&after) {
+    if let Some(current) = after.current_task() {
         println!(
             "  {} {} [{}] {}",
             "Current:".dark_grey(),
@@ -100,7 +102,7 @@ pub async fn execute(args: EditArgs, file_config: &FileConfig) -> Result<()> {
 }
 
 /// Update the state file (if it exists) with new min_iterations from updated task count.
-fn update_state_file(file_config: &FileConfig, summary: &progress::ProgressSummary) -> Result<()> {
+fn update_state_file(file_config: &FileConfig, summary: &crate::shared::progress::ProgressSummary) -> Result<()> {
     use crate::commands::run::state::StateManager;
     use std::path::PathBuf;
 

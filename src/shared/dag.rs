@@ -1,33 +1,55 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::shared::progress::ProgressFrontmatter;
+use crate::shared::tasks::TasksFile;
 
 /// Directed Acyclic Graph of task dependencies.
 ///
 /// Maintains both forward (deps) and reverse (dependents) adjacency lists
 /// for efficient traversal in both directions.
-#[allow(dead_code)]
 pub struct TaskDag {
     /// task_id → list of tasks it depends on (predecessors)
     deps: HashMap<String, Vec<String>>,
     /// task_id → list of tasks that depend on it (successors)
+    /// Used by `dependents()` for reverse dependency traversal in topological_sort().
     reverse: HashMap<String, Vec<String>>,
     /// All known task IDs in the DAG
     all_tasks: HashSet<String>,
 }
 
-#[allow(dead_code)]
 impl TaskDag {
     /// Create a TaskDag from parsed YAML frontmatter.
     ///
     /// Tasks mentioned in deps (either as keys or values) are automatically
     /// registered. Tasks with no deps entry are treated as independent.
     pub fn from_frontmatter(fm: &ProgressFrontmatter) -> Self {
+        Self::from_deps_map(&fm.deps)
+    }
+
+    /// Create a TaskDag from a TasksFile (`.ralph/tasks.yml`).
+    pub fn from_tasks_file(tf: &TasksFile) -> Self {
+        Self::from_deps_map(&tf.deps_map())
+    }
+
+    /// Create a TaskDag from a raw deps map.
+    ///
+    /// Tasks mentioned in deps (either as keys or values) are automatically
+    /// registered. Tasks with no deps entry are treated as independent.
+    ///
+    /// Clone overhead: 5 clones per entry to build owned HashMap/HashSet structures.
+    /// Alternative would be TaskDag<'a> with borrowed &str keys, but that would:
+    /// 1. Add lifetime parameter to struct and all methods
+    /// 2. Complicate the API for all consumers (scheduler, orchestrator, etc.)
+    /// 3. Require input data to outlive the DAG
+    ///
+    /// This method is called once per orchestration session, so the trade-off
+    /// favors API simplicity over micro-optimization.
+    pub fn from_deps_map(deps_input: &HashMap<String, Vec<String>>) -> Self {
         let mut deps: HashMap<String, Vec<String>> = HashMap::new();
         let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
         let mut all_tasks = HashSet::new();
 
-        for (task_id, task_deps) in &fm.deps {
+        for (task_id, task_deps) in deps_input {
             all_tasks.insert(task_id.clone());
             deps.insert(task_id.clone(), task_deps.clone());
 
@@ -47,7 +69,9 @@ impl TaskDag {
         }
     }
 
-    /// Create an empty DAG.
+    /// Create an empty DAG with no tasks.
+    /// Currently used only in tests, but preserved for test utilities.
+    #[allow(dead_code)] // Test utility for creating empty DAG instances
     pub fn empty() -> Self {
         Self {
             deps: HashMap::new(),
@@ -75,6 +99,7 @@ impl TaskDag {
     }
 
     /// Return tasks that depend on the given task (successors).
+    /// Used by topological_sort() for dependency resolution.
     pub fn dependents(&self, task_id: &str) -> &[String] {
         self.reverse.get(task_id).map_or(&[], |v| v.as_slice())
     }
@@ -118,8 +143,14 @@ impl TaskDag {
             }
             if gray.contains(dep.as_str()) {
                 // Found cycle: extract the cycle from path
-                let cycle_start = path.iter().position(|s| s == dep).unwrap();
+                // dep must be in path since it's gray (added when visiting the node)
+                let Some(cycle_start) = path.iter().position(|s| s == dep) else {
+                    // Should never happen: gray nodes are always in path
+                    // Fall back to returning minimal cycle info
+                    return Some(vec![node.to_string(), dep.clone()]);
+                };
                 let mut cycle: Vec<String> = path[cycle_start..].to_vec();
+                // Clone required: closing cycle path with final dependency
                 cycle.push(dep.clone()); // close the cycle
                 return Some(cycle);
             }
@@ -140,6 +171,9 @@ impl TaskDag {
     ///
     /// Returns tasks in dependency order (tasks with no deps first).
     /// Returns `Err` with cycle path if the graph contains cycles.
+    ///
+    /// Currently used only in tests, but preserved for future advanced scheduling features.
+    #[allow(dead_code)] // Test utility and reserved for future priority-based task scheduling
     pub fn topological_sort(&self) -> Result<Vec<String>, Vec<String>> {
         // Compute in-degree for each task (number of deps)
         let mut in_degree: HashMap<&str, usize> = HashMap::new();
@@ -161,6 +195,9 @@ impl TaskDag {
         let mut result = Vec::new();
 
         while let Some(task) = queue.pop_front() {
+            // Clone required: moving task into result vector while keeping
+            // it available for lookup in dependents(). Could use indices
+            // instead but would complicate the algorithm significantly.
             result.push(task.clone());
 
             // For each task that depends on this one, decrement in-degree
@@ -168,6 +205,7 @@ impl TaskDag {
                 if let Some(deg) = in_degree.get_mut(dependent.as_str()) {
                     *deg -= 1;
                     if *deg == 0 {
+                        // Clone required: queue needs owned String for dequeue/push_back
                         queue.push_back(dependent.clone());
                     }
                 }

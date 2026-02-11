@@ -70,8 +70,8 @@ pub fn render_markdown(text: &str) -> String {
 }
 
 /// Render a single line of markdown (inline formatting only)
-#[allow(dead_code)]
-pub fn render_inline(text: &str) -> String {
+#[cfg(test)]
+fn render_inline(text: &str) -> String {
     let formatted = SKIN.inline(text);
     formatted.to_string()
 }
