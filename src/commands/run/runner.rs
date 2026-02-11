@@ -275,6 +275,7 @@ pub struct ClaudeRunner {
     model: Option<String>,
     output_dir: Option<PathBuf>,
     allowed_tools: Option<String>,
+    mcp_config: Option<serde_json::Value>,
 }
 
 impl ClaudeRunner {
@@ -287,6 +288,7 @@ impl ClaudeRunner {
             model: None,
             output_dir: None,
             allowed_tools: None,
+            mcp_config: None,
         }
     }
 
@@ -299,6 +301,7 @@ impl ClaudeRunner {
             model: None,
             output_dir: None,
             allowed_tools: None,
+            mcp_config: None,
         }
     }
 
@@ -311,12 +314,19 @@ impl ClaudeRunner {
             model,
             output_dir,
             allowed_tools: None,
+            mcp_config: None,
         }
     }
 
     /// Builder: restrict available tools (passed as --allowedTools to Claude CLI).
     pub fn with_allowed_tools(mut self, tools: String) -> Self {
         self.allowed_tools = Some(tools);
+        self
+    }
+
+    /// Builder: set MCP server config (passed as --mcp-config JSON to Claude CLI).
+    pub fn with_mcp_config(mut self, config: serde_json::Value) -> Self {
+        self.mcp_config = Some(config);
         self
     }
 
@@ -413,6 +423,12 @@ impl ClaudeRunner {
 
         if let Some(ref tools) = self.allowed_tools {
             cmd.arg("--allowedTools").arg(tools);
+        }
+
+        if let Some(ref mcp_config) = self.mcp_config {
+            let config_json = serde_json::to_string(mcp_config)
+                .unwrap_or_else(|_| "{}".to_string());
+            cmd.arg("--mcp-config").arg(config_json);
         }
 
         // System prompt and user prompt are sent via stdin (no CLI args)

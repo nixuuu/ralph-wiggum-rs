@@ -21,6 +21,8 @@ pub(crate) struct RunOnceOptions {
     pub use_nerd_font: bool,
     /// When set, passed as --allowedTools to restrict Claude's available tools.
     pub allowed_tools: Option<String>,
+    /// When set, passed as --mcp-config to provide MCP servers to Claude.
+    pub mcp_config: Option<serde_json::Value>,
 }
 
 /// Run Claude CLI once with full streaming output (same UX as `run` command).
@@ -63,6 +65,9 @@ pub(crate) async fn run_once(options: RunOnceOptions) -> Result<()> {
     let mut runner = ClaudeRunner::oneshot(options.prompt, options.model, options.output_dir);
     if let Some(tools) = options.allowed_tools {
         runner = runner.with_allowed_tools(tools);
+    }
+    if let Some(mcp_config) = options.mcp_config {
+        runner = runner.with_mcp_config(mcp_config);
     }
 
     let formatter_event = formatter.clone();

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 use crate::commands::run::RunArgs;
@@ -30,6 +32,13 @@ pub enum Commands {
     Task {
         #[command(subcommand)]
         command: TaskCommands,
+    },
+
+    /// Run MCP server for tasks.yml (stdio JSON-RPC)
+    McpServer {
+        /// Path to tasks.yml file
+        #[arg(long)]
+        tasks_file: PathBuf,
     },
 }
 

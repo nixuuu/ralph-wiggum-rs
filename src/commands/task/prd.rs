@@ -40,6 +40,7 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
         output_dir: Some(output_dir.clone()),
         use_nerd_font: file_config.ui.nerd_font,
         allowed_tools: None,
+        mcp_config: None,
     })
     .await?;
 

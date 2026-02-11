@@ -5,6 +5,7 @@ use super::input::resolve_input;
 use crate::commands::run::{READONLY_TOOLS, RunOnceOptions, run_once};
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
+use crate::shared::mcp::build_mcp_config;
 use crate::shared::tasks::TasksFile;
 use crate::templates;
 
@@ -32,13 +33,15 @@ pub async fn execute(args: EditArgs, file_config: &FileConfig) -> Result<()> {
         .model
         .or_else(|| file_config.task.default_model.clone());
 
-    // Run Claude with readonly tools for codebase exploration
+    // Run Claude with readonly built-in tools + MCP server for task mutations
+    let mcp_config = build_mcp_config(tasks_path);
     run_once(RunOnceOptions {
         prompt,
         model,
         output_dir: None,
         use_nerd_font: file_config.ui.nerd_font,
         allowed_tools: Some(READONLY_TOOLS.to_string()),
+        mcp_config: Some(mcp_config),
     })
     .await?;
 

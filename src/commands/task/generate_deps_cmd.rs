@@ -36,6 +36,7 @@ pub async fn execute(args: GenerateDepsArgs, file_config: &FileConfig) -> Result
         output_dir: None,
         use_nerd_font: file_config.ui.nerd_font,
         allowed_tools: None,
+        mcp_config: None,
     })
     .await?;
 

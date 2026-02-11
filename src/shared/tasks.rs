@@ -341,6 +341,112 @@ impl TasksFile {
         self.flatten_leaves().into_iter().find(|l| l.id == task_id)
     }
 
+    /// Find a node (leaf or parent) by ID (immutable).
+    pub fn find_node(&self, id: &str) -> Option<&TaskNode> {
+        fn search<'a>(nodes: &'a [TaskNode], id: &str) -> Option<&'a TaskNode> {
+            for node in nodes {
+                if node.id == id {
+                    return Some(node);
+                }
+                if let Some(found) = search(&node.subtasks, id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        search(&self.tasks, id)
+    }
+
+    /// Find a node (leaf or parent) by ID (mutable).
+    pub fn find_node_mut(&mut self, id: &str) -> Option<&mut TaskNode> {
+        fn search<'a>(nodes: &'a mut [TaskNode], id: &str) -> Option<&'a mut TaskNode> {
+            for node in nodes {
+                if node.id == id {
+                    return Some(node);
+                }
+                if let Some(found) = search(&mut node.subtasks, id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        search(&mut self.tasks, id)
+    }
+
+    /// Add a task node under a parent (or at root if parent_id is None).
+    /// Optionally insert at a specific position index.
+    pub fn add_task(
+        &mut self,
+        parent_id: Option<&str>,
+        node: TaskNode,
+        position: Option<usize>,
+    ) -> Result<()> {
+        let target = match parent_id {
+            Some(pid) => {
+                let parent = self.find_node_mut(pid).ok_or_else(|| {
+                    RalphError::Config(format!("Parent task not found: {}", pid))
+                })?;
+                &mut parent.subtasks
+            }
+            None => &mut self.tasks,
+        };
+        let pos = position.unwrap_or(target.len()).min(target.len());
+        target.insert(pos, node);
+        Ok(())
+    }
+
+    /// Remove a task (and its subtasks) by ID. Returns the removed node.
+    /// Also cleans up dep references pointing to the removed task.
+    pub fn remove_task(&mut self, id: &str) -> Option<TaskNode> {
+        fn remove_from(nodes: &mut Vec<TaskNode>, id: &str) -> Option<TaskNode> {
+            if let Some(pos) = nodes.iter().position(|n| n.id == id) {
+                return Some(nodes.remove(pos));
+            }
+            for node in nodes.iter_mut() {
+                if let Some(found) = remove_from(&mut node.subtasks, id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        let removed = remove_from(&mut self.tasks, id)?;
+
+        // Collect all IDs being removed (the node + its subtasks)
+        let mut removed_ids = HashSet::new();
+        fn collect_ids(node: &TaskNode, ids: &mut HashSet<String>) {
+            ids.insert(node.id.clone());
+            for child in &node.subtasks {
+                collect_ids(child, ids);
+            }
+        }
+        collect_ids(&removed, &mut removed_ids);
+
+        // Clean up deps referencing removed IDs
+        fn clean_deps(nodes: &mut [TaskNode], removed_ids: &HashSet<String>) {
+            for node in nodes.iter_mut() {
+                node.deps.retain(|d| !removed_ids.contains(d));
+                clean_deps(&mut node.subtasks, removed_ids);
+            }
+        }
+        clean_deps(&mut self.tasks, &removed_ids);
+
+        Some(removed)
+    }
+
+    /// Collect all task IDs in the tree.
+    pub fn all_ids(&self) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        fn collect(nodes: &[TaskNode], ids: &mut HashSet<String>) {
+            for node in nodes {
+                ids.insert(node.id.clone());
+                collect(&node.subtasks, ids);
+            }
+        }
+        collect(&self.tasks, &mut ids);
+        ids
+    }
+
     /// Get the current task: first in_progress, fallback to first todo.
     pub fn current_task(&self) -> Option<LeafTask> {
         let leaves = self.flatten_leaves();

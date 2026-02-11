@@ -44,3 +44,6 @@ reqwest = { version = "0.13", features = ["json", "blocking", "rustls"], default
 
 # Unix process utilities (PID checking for lockfile)
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.25.0"
