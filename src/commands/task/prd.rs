@@ -33,12 +33,13 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
         .model
         .or_else(|| file_config.task.default_model.clone());
 
-    // Run Claude with streaming output
+    // Run Claude with streaming output (all tools — needs Write for file generation)
     run_once(RunOnceOptions {
         prompt,
         model,
         output_dir: Some(output_dir.clone()),
         use_nerd_font: file_config.ui.nerd_font,
+        allowed_tools: None,
     })
     .await?;
 

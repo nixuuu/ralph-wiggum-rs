@@ -11,11 +11,16 @@ use super::output::OutputFormatter;
 use super::runner::ClaudeRunner;
 use super::ui::StatusTerminal;
 
+/// Readonly built-in tools for codebase exploration (no Write, Edit, Bash).
+pub(crate) const READONLY_TOOLS: &str = "Read,Glob,Grep,LS,WebFetch,WebSearch";
+
 pub(crate) struct RunOnceOptions {
     pub prompt: String,
     pub model: Option<String>,
     pub output_dir: Option<PathBuf>,
     pub use_nerd_font: bool,
+    /// When set, passed as --allowedTools to restrict Claude's available tools.
+    pub allowed_tools: Option<String>,
 }
 
 /// Run Claude CLI once with full streaming output (same UX as `run` command).
@@ -55,7 +60,10 @@ pub(crate) async fn run_once(options: RunOnceOptions) -> Result<()> {
     );
 
     // Create and run ClaudeRunner
-    let runner = ClaudeRunner::oneshot(options.prompt, options.model, options.output_dir);
+    let mut runner = ClaudeRunner::oneshot(options.prompt, options.model, options.output_dir);
+    if let Some(tools) = options.allowed_tools {
+        runner = runner.with_allowed_tools(tools);
+    }
 
     let formatter_event = formatter.clone();
     let status_terminal_event = status_terminal.clone();

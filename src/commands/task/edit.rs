@@ -2,7 +2,7 @@ use crossterm::style::Stylize;
 
 use super::args::EditArgs;
 use super::input::resolve_input;
-use crate::commands::run::{RunOnceOptions, run_once};
+use crate::commands::run::{READONLY_TOOLS, RunOnceOptions, run_once};
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
 use crate::shared::tasks::TasksFile;
@@ -32,12 +32,13 @@ pub async fn execute(args: EditArgs, file_config: &FileConfig) -> Result<()> {
         .model
         .or_else(|| file_config.task.default_model.clone());
 
-    // Run Claude with streaming output
+    // Run Claude with readonly tools for codebase exploration
     run_once(RunOnceOptions {
         prompt,
         model,
         output_dir: None,
         use_nerd_font: file_config.ui.nerd_font,
+        allowed_tools: Some(READONLY_TOOLS.to_string()),
     })
     .await?;
 

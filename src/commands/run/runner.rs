@@ -274,6 +274,7 @@ pub struct ClaudeRunner {
     continue_conversation: bool,
     model: Option<String>,
     output_dir: Option<PathBuf>,
+    allowed_tools: Option<String>,
 }
 
 impl ClaudeRunner {
@@ -285,6 +286,7 @@ impl ClaudeRunner {
             continue_conversation: false,
             model: None,
             output_dir: None,
+            allowed_tools: None,
         }
     }
 
@@ -296,6 +298,7 @@ impl ClaudeRunner {
             continue_conversation: true,
             model: None,
             output_dir: None,
+            allowed_tools: None,
         }
     }
 
@@ -307,7 +310,14 @@ impl ClaudeRunner {
             continue_conversation: false,
             model,
             output_dir,
+            allowed_tools: None,
         }
+    }
+
+    /// Builder: restrict available tools (passed as --allowedTools to Claude CLI).
+    pub fn with_allowed_tools(mut self, tools: String) -> Self {
+        self.allowed_tools = Some(tools);
+        self
     }
 
     /// Write the initialize control request and user message to stdin,
@@ -399,6 +409,10 @@ impl ClaudeRunner {
 
         if self.continue_conversation {
             cmd.arg("--continue");
+        }
+
+        if let Some(ref tools) = self.allowed_tools {
+            cmd.arg("--allowedTools").arg(tools);
         }
 
         // System prompt and user prompt are sent via stdin (no CLI args)

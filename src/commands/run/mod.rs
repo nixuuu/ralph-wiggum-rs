@@ -9,7 +9,7 @@ pub(crate) mod state;
 pub(crate) mod ui;
 
 pub use args::RunArgs;
-pub(crate) use once::{RunOnceOptions, run_once};
+pub(crate) use once::{READONLY_TOOLS, RunOnceOptions, run_once};
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
