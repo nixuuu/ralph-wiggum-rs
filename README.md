@@ -88,7 +88,9 @@ ralph-wiggum --resume
 
 ## Configuration File
 
-Create a `.ralph.toml` file in your project root to customize prompt handling:
+Create a `.ralph.toml` file in your project root. All sections and fields are optional — sensible defaults are used when omitted.
+
+### `[prompt]` — Prompt customization
 
 ```toml
 [prompt]
@@ -97,6 +99,118 @@ prefix = "Follow the project coding standards."
 
 # Text appended to every prompt
 suffix = "Update CHANGELOG.md with your changes."
+
+# Custom system prompt with placeholders
+system = "Iteration {iteration}/{max_iterations}. Promise: {promise}."
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `prefix` | — | Text prepended before every user prompt |
+| `suffix` | — | Text appended after every user prompt |
+| `system` | — | Custom system prompt. Placeholders: `{iteration}`, `{promise}`, `{min_iterations}`, `{max_iterations}` |
+
+### `[ui]` — Interface settings
+
+```toml
+[ui]
+nerd_font = false  # Set to false for ASCII-only icons
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `nerd_font` | `true` | Use Nerd Font icons in status bar. Set `false` for plain ASCII fallback |
+
+### `[task]` — Task management
+
+```toml
+[task]
+tasks_file = ".ralph/tasks.yml"
+progress_file = "PROGRESS.md"
+system_prompt_file = "SYSTEM_PROMPT.md"
+output_dir = "."
+default_model = "claude-sonnet-4-5-20250929"
+adaptive_iterations = true
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `tasks_file` | `.ralph/tasks.yml` | Path to hierarchical YAML task file |
+| `progress_file` | `PROGRESS.md` | Path to legacy Markdown task file |
+| `system_prompt_file` | `SYSTEM_PROMPT.md` | Path to system prompt used in `task continue` |
+| `output_dir` | current directory | Output directory for generated files (`task prd`) |
+| `default_model` | — | Default Claude model for task commands |
+| `adaptive_iterations` | `true` | Auto-adjust iteration limits based on remaining tasks |
+
+### `[task.orchestrate]` — Parallel orchestration
+
+```toml
+[task.orchestrate]
+workers = 4
+max_retries = 2
+default_model = "claude-sonnet-4-5-20250929"
+worktree_prefix = "my-project"
+verify_commands = "cargo test && cargo clippy --all-targets -- -D warnings"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `workers` | `2` | Number of parallel Claude workers |
+| `max_retries` | `3` | Max retries per task before marking as blocked |
+| `default_model` | — | Override Claude model for workers (takes precedence over `[task].default_model`) |
+| `worktree_prefix` | — | Prefix for Git worktree directory names |
+| `verify_commands` | — | Shell commands run in verify phase after implementation |
+
+#### Setup commands
+
+Commands to run after creating each worktree, before Claude starts working. Useful for installing dependencies, copying config files, or preparing the environment.
+
+```toml
+# Simple form — list of shell commands
+[task.orchestrate]
+setup_commands = ["npm install", "cp .env.example .env"]
+
+# Detailed form — with display labels
+[[task.orchestrate.setup_commands]]
+run = "cp {ROOT_DIR}/.env {WORKTREE_DIR}/.env"
+name = "Copy env file"
+
+[[task.orchestrate.setup_commands]]
+run = "npm install --prefix {WORKTREE_DIR}"
+name = "Install dependencies"
+```
+
+Available template variables in setup commands:
+
+| Variable | Description |
+|----------|-------------|
+| `{ROOT_DIR}` | Path to the main repository root |
+| `{WORKTREE_DIR}` | Path to the worker's worktree directory |
+| `{TASK_ID}` | ID of the task assigned to the worker |
+| `{WORKER_ID}` | Numeric worker ID (0-based) |
+
+### Full example
+
+```toml
+[prompt]
+prefix = "Follow coding standards from CLAUDE.md."
+suffix = "Run tests after changes."
+
+[ui]
+nerd_font = true
+
+[task]
+tasks_file = ".ralph/tasks.yml"
+default_model = "claude-sonnet-4-5-20250929"
+
+[task.orchestrate]
+workers = 3
+max_retries = 2
+verify_commands = "cargo test && cargo clippy -- -D warnings"
+
+[[task.orchestrate.setup_commands]]
+run = "cp {ROOT_DIR}/.env {WORKTREE_DIR}/.env"
+name = "Copy env"
 ```
 
 ## Task-Based Development
@@ -298,26 +412,6 @@ Removes leftover worktrees, branches, state files, and logs from previous orches
 ```bash
 ralph-wiggum task clean
 ```
-
-### Task Configuration
-
-Customize task behavior in `.ralph.toml`:
-
-```toml
-[task]
-progress_file = ".ralph/tasks.yml"      # Path to task file
-system_prompt_file = "SYSTEM_PROMPT.md" # Path to system prompt
-output_dir = "."                        # Output directory for generated files
-default_model = "claude-sonnet-4-5-20250929"  # Default Claude model
-adaptive_iterations = true              # Auto-adjust iteration limits
-
-[orchestrate]
-workers = 3                             # Default number of parallel workers
-max_retries = 2                         # Max retries per task
-worktree_prefix = "orch"               # Git worktree directory prefix
-```
-
-All fields are optional — defaults are shown above.
 
 ### Quick Start
 
