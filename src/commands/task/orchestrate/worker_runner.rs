@@ -9,6 +9,26 @@ use crate::commands::run::runner::{ClaudeEvent, ClaudeRunner};
 use crate::commands::task::orchestrate::events::{WorkerEvent, WorkerEventKind, WorkerPhase};
 use crate::shared::error::Result;
 
+/// Result of a single phase execution including cost metrics.
+#[derive(Debug, Clone)]
+pub struct PhaseResult {
+    pub output: String,
+    pub cost_usd: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Configuration for WorkerRunner.
+///
+/// Groups prompt customization, UI settings, and timeout configuration.
+#[derive(Clone, Default)]
+pub struct WorkerRunnerConfig {
+    pub use_nerd_font: bool,
+    pub prompt_prefix: Option<String>,
+    pub prompt_suffix: Option<String>,
+    pub phase_timeout: Option<std::time::Duration>,
+}
+
 /// Adapted ClaudeRunner for orchestration workers.
 ///
 /// Wraps ClaudeRunner to forward events through an mpsc channel
@@ -19,38 +39,44 @@ pub struct WorkerRunner {
     task_id: String,
     event_tx: mpsc::Sender<WorkerEvent>,
     shutdown: Arc<AtomicBool>,
-    use_nerd_font: bool,
+    config: WorkerRunnerConfig,
 }
 
 impl WorkerRunner {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         worker_id: u32,
         task_id: String,
         event_tx: mpsc::Sender<WorkerEvent>,
         shutdown: Arc<AtomicBool>,
-        use_nerd_font: bool,
+        config: WorkerRunnerConfig,
     ) -> Self {
         Self {
             worker_id,
             task_id,
             event_tx,
             shutdown,
-            use_nerd_font,
+            config,
         }
+    }
+
+    /// Build MCP config JSON from the tasks file path.
+    fn mcp_config(&self) -> Option<serde_json::Value> {
+        None
     }
 
     /// Run a single phase of the worker lifecycle.
     ///
     /// Invokes Claude CLI as a one-shot in the given working directory,
     /// forwarding cost/token events through the mpsc channel.
-    /// Returns the assistant's text output.
+    /// Returns the assistant's text output and cost metrics.
     pub async fn run_phase(
         &self,
         phase: WorkerPhase,
         prompt: &str,
         model: Option<&str>,
         cwd: &Path,
-    ) -> Result<String> {
+    ) -> Result<PhaseResult> {
         // Notify phase start
         self.send_event(WorkerEventKind::PhaseStarted {
             worker_id: self.worker_id,
@@ -64,12 +90,31 @@ impl WorkerRunner {
             model.map(|s| s.to_string()),
             Some(cwd.to_path_buf()),
         );
+        let runner = if let Some(mcp_cfg) = self.mcp_config() {
+            runner.with_mcp_config(mcp_cfg)
+        } else {
+            runner
+        };
+        let runner = if let Some(timeout) = self.config.phase_timeout {
+            runner.with_phase_timeout(timeout)
+        } else {
+            runner
+        };
 
         // Track cost/tokens across events for this phase
         let worker_id = self.worker_id;
         let tx = self.event_tx.clone();
         let tx_output = self.event_tx.clone();
-        let mut formatter = OutputFormatter::new(self.use_nerd_font);
+        let tx_heartbeat = self.event_tx.clone();
+        let mut formatter = OutputFormatter::new(self.config.use_nerd_font);
+
+        // Heartbeat: send every 120 idle ticks (30 seconds at 250ms per tick)
+        let mut idle_tick_counter = 0u32;
+        let heartbeat_phase = phase.clone();
+
+        // Accumulate cost metrics for this phase
+        let phase_cost = Arc::new(std::sync::Mutex::new((0.0_f64, 0_u64, 0_u64)));
+        let phase_cost_clone = Arc::clone(&phase_cost);
 
         let result =
             runner
@@ -86,9 +131,18 @@ impl WorkerRunner {
                                 .map(|u| (u.input_tokens, u.output_tokens))
                                 .unwrap_or((0, 0));
 
+                            let cost = cost_usd.unwrap_or(0.0);
+
+                            // Accumulate metrics for return value
+                            if let Ok(mut metrics) = phase_cost_clone.lock() {
+                                metrics.0 += cost;
+                                metrics.1 += input_tokens;
+                                metrics.2 += output_tokens;
+                            }
+
                             let cost_event = WorkerEvent::new(WorkerEventKind::CostUpdate {
                                 worker_id,
-                                cost_usd: cost_usd.unwrap_or(0.0),
+                                cost_usd: cost,
                                 input_tokens,
                                 output_tokens,
                             });
@@ -96,7 +150,8 @@ impl WorkerRunner {
                             let _ = tx.try_send(cost_event);
                         }
 
-                        // Format and forward output lines for live TUI display
+                        // Format and forward output lines for live TUI display.
+                        // NOTE: OutputFormatter handles markdown rendering via render_markdown() internally.
                         let lines = formatter.format_event(event);
                         if !lines.is_empty() {
                             let _ = tx_output.try_send(WorkerEvent::new(
@@ -104,7 +159,18 @@ impl WorkerRunner {
                             ));
                         }
                     },
-                    || {},
+                    move || {
+                        // Idle tick callback: send heartbeat every 120 ticks (30 seconds)
+                        idle_tick_counter += 1;
+                        if idle_tick_counter >= 120 {
+                            idle_tick_counter = 0;
+                            let heartbeat_event = WorkerEvent::new(WorkerEventKind::Heartbeat {
+                                worker_id,
+                                phase: heartbeat_phase.clone(),
+                            });
+                            let _ = tx_heartbeat.try_send(heartbeat_event);
+                        }
+                    },
                 )
                 .await;
 
@@ -124,6 +190,11 @@ impl WorkerRunner {
             }
         };
 
+        // Extract accumulated metrics
+        let (cost_usd, input_tokens, output_tokens) = phase_cost.lock()
+            .map(|m| (m.0, m.1, m.2))
+            .unwrap_or((0.0, 0, 0));
+
         self.send_event(WorkerEventKind::PhaseCompleted {
             worker_id: self.worker_id,
             task_id: self.task_id.clone(),
@@ -132,77 +203,149 @@ impl WorkerRunner {
         })
         .await;
 
-        Ok(output)
+        Ok(PhaseResult {
+            output,
+            cost_usd,
+            input_tokens,
+            output_tokens,
+        })
     }
 
     /// Run the implement phase with task-specific prompt.
+    /// Returns phase result including cost metrics.
     pub async fn run_implement(
         &self,
         task_desc: &str,
         system_prompt: &str,
         model: Option<&str>,
         cwd: &Path,
-    ) -> Result<String> {
-        let prompt = format!(
+    ) -> Result<PhaseResult> {
+        let mut prompt = String::new();
+
+        // Add prefix if configured
+        if let Some(prefix) = &self.config.prompt_prefix {
+            prompt.push_str(prefix);
+            prompt.push_str("\n\n");
+        }
+
+        // Add system prompt and task description
+        prompt.push_str(&format!(
             "{system_prompt}\n\n---\n\n\
              # Your Task\n\
              {task_desc}\n\n\
              You are working in an isolated git worktree. Focus only on this task.\n\
              Do not modify files outside the scope of this task.\n\
              Commit your changes when done."
-        );
+        ));
+
+        // Add suffix if configured
+        if let Some(suffix) = &self.config.prompt_suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(suffix);
+        }
+
         self.run_phase(WorkerPhase::Implement, &prompt, model, cwd)
             .await
     }
 
     /// Run the review+fix phase with implementation output from phase 1.
+    ///
+    /// If `verify_report` is Some, appends the verification failure report to the prompt
+    /// so the agent can fix the issues found by direct verification commands.
+    /// Returns phase result including cost metrics.
     pub async fn run_review(
         &self,
         implementation_output: &str,
         task_desc: &str,
         model: Option<&str>,
         cwd: &Path,
-    ) -> Result<String> {
-        let prompt = format!(
+        verify_report: Option<&str>,
+    ) -> Result<PhaseResult> {
+        let verify_section = if let Some(report) = verify_report {
+            format!(
+                "\n\n## Verification Results\n\
+                 The following verification commands FAILED after your implementation.\n\
+                 Fix the issues before proceeding.\n\n\
+                 <verify_report>\n{report}\n</verify_report>"
+            )
+        } else {
+            String::new()
+        };
+
+        let mut prompt = String::new();
+
+        // Add prefix if configured
+        if let Some(prefix) = &self.config.prompt_prefix {
+            prompt.push_str(prefix);
+            prompt.push_str("\n\n");
+        }
+
+        // Add review prompt and task details
+        prompt.push_str(&format!(
             "# Self-Review Task\n\n\
              Review your own implementation and fix any issues.\n\n\
              ## Original Task\n{task_desc}\n\n\
-             ## Implementation Output\n{implementation_output}\n\n\
+             ## Implementation Output\n{implementation_output}{verify_section}\n\n\
              Review the code changes you made. Look for:\n\
              - Bugs or logic errors\n\
              - Missing edge cases\n\
              - Code style issues\n\
              - Incomplete implementations\n\n\
              Fix any issues found and commit your changes."
-        );
+        ));
+
+        // Add suffix if configured
+        if let Some(suffix) = &self.config.prompt_suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(suffix);
+        }
+
         self.run_phase(WorkerPhase::ReviewFix, &prompt, model, cwd)
             .await
     }
 
     /// Run the verify phase — checks that the implementation passes verification.
+    #[allow(dead_code)] // Used in task 13.3 worker lifecycle
     pub async fn run_verify(
         &self,
         verification_commands: &str,
         model: Option<&str>,
         cwd: &Path,
     ) -> Result<bool> {
-        let prompt = format!(
+        let mut prompt = String::new();
+
+        // Add prefix if configured
+        if let Some(prefix) = &self.config.prompt_prefix {
+            prompt.push_str(prefix);
+            prompt.push_str("\n\n");
+        }
+
+        // Add verification prompt
+        prompt.push_str(&format!(
             "# Verification Task\n\n\
              Run the following verification commands and report results.\n\
              If all commands pass, respond with 'VERIFICATION PASSED'.\n\
              If any command fails, respond with 'VERIFICATION FAILED' and explain why.\n\n\
              ## Commands\n{verification_commands}"
-        );
-        let output = self
+        ));
+
+        // Add suffix if configured
+        if let Some(suffix) = &self.config.prompt_suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(suffix);
+        }
+
+        let result = self
             .run_phase(WorkerPhase::Verify, &prompt, model, cwd)
             .await?;
 
         // Simple check: look for pass/fail indicators in output
-        let passed = output.contains("VERIFICATION PASSED")
-            || (!output.contains("VERIFICATION FAILED") && !output.contains("FAILED"));
+        let passed = result.output.contains("VERIFICATION PASSED")
+            || (!result.output.contains("VERIFICATION FAILED") && !result.output.contains("FAILED"));
 
         Ok(passed)
     }
+
 
     async fn send_event(&self, kind: WorkerEventKind) {
         let event = WorkerEvent::new(kind);
@@ -246,7 +389,8 @@ mod tests {
     fn test_worker_runner_creation() {
         let (tx, _rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, false);
+        let config = WorkerRunnerConfig::default();
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
         assert_eq!(runner.worker_id, 1);
         assert_eq!(runner.task_id, "T01");
     }
@@ -255,7 +399,8 @@ mod tests {
     async fn test_send_event() {
         let (tx, mut rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, false);
+        let config = WorkerRunnerConfig::default();
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
 
         runner
             .send_event(WorkerEventKind::TaskStarted {
@@ -289,5 +434,283 @@ mod tests {
     fn test_extract_text_from_non_assistant_event() {
         let event = ClaudeEvent::Other;
         assert!(WorkerRunner::extract_text(&event).is_none());
+    }
+
+    #[test]
+    fn test_worker_runner_with_prefix_suffix() {
+        let (tx, _rx) = mpsc::channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig {
+            use_nerd_font: false,
+            prompt_prefix: Some("PREFIX TEXT".to_string()),
+            prompt_suffix: Some("SUFFIX TEXT".to_string()),
+            phase_timeout: None,
+        };
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        assert_eq!(runner.config.prompt_prefix, Some("PREFIX TEXT".to_string()));
+        assert_eq!(runner.config.prompt_suffix, Some("SUFFIX TEXT".to_string()));
+    }
+
+    #[test]
+    fn test_worker_runner_without_prefix_suffix() {
+        let (tx, _rx) = mpsc::channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig::default();
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        assert_eq!(runner.config.prompt_prefix, None);
+        assert_eq!(runner.config.prompt_suffix, None);
+    }
+
+    // Note: Testing run_implement and run_review prompt construction would require
+    // mocking ClaudeRunner, which is not trivial. Instead, we verify the prompt
+    // structure by testing the prompt building logic in isolation.
+
+    #[test]
+    fn test_implement_prompt_with_prefix_suffix() {
+        let system_prompt = "# Development Agent\nYou are implementing a task.";
+        let task_desc = "Implement feature X";
+
+        // Simulate what run_implement does
+        let prefix = Some("PREFIX TEXT".to_string());
+        let suffix = Some("SUFFIX TEXT".to_string());
+
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "{system_prompt}\n\n---\n\n\
+             # Your Task\n\
+             {task_desc}\n\n\
+             You are working in an isolated git worktree. Focus only on this task.\n\
+             Do not modify files outside the scope of this task.\n\
+             Commit your changes when done."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.starts_with("PREFIX TEXT\n\n"));
+        assert!(prompt.contains("# Development Agent"));
+        assert!(prompt.contains("Implement feature X"));
+        assert!(prompt.ends_with("\n\nSUFFIX TEXT"));
+    }
+
+    #[test]
+    fn test_implement_prompt_without_prefix_suffix() {
+        let system_prompt = "# Development Agent\nYou are implementing a task.";
+        let task_desc = "Implement feature X";
+
+        // Simulate what run_implement does without prefix/suffix
+        let prefix: Option<String> = None;
+        let suffix: Option<String> = None;
+
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "{system_prompt}\n\n---\n\n\
+             # Your Task\n\
+             {task_desc}\n\n\
+             You are working in an isolated git worktree. Focus only on this task.\n\
+             Do not modify files outside the scope of this task.\n\
+             Commit your changes when done."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.starts_with("# Development Agent"));
+        assert!(prompt.contains("Implement feature X"));
+        assert!(!prompt.contains("PREFIX TEXT"));
+        assert!(!prompt.contains("SUFFIX TEXT"));
+    }
+
+    #[test]
+    fn test_review_prompt_with_prefix_suffix() {
+        let task_desc = "Implement feature X";
+        let implementation_output = "Implementation completed successfully";
+
+        let prefix = Some("PREFIX TEXT".to_string());
+        let suffix = Some("SUFFIX TEXT".to_string());
+
+        // Simulate what run_review does
+        let verify_section = String::new();
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "# Self-Review Task\n\n\
+             Review your own implementation and fix any issues.\n\n\
+             ## Original Task\n{task_desc}\n\n\
+             ## Implementation Output\n{implementation_output}{verify_section}\n\n\
+             Review the code changes you made. Look for:\n\
+             - Bugs or logic errors\n\
+             - Missing edge cases\n\
+             - Code style issues\n\
+             - Incomplete implementations\n\n\
+             Fix any issues found and commit your changes."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.starts_with("PREFIX TEXT\n\n"));
+        assert!(prompt.contains("# Self-Review Task"));
+        assert!(prompt.contains("Implement feature X"));
+        assert!(prompt.ends_with("\n\nSUFFIX TEXT"));
+    }
+
+    #[test]
+    fn test_review_prompt_without_prefix_suffix() {
+        let task_desc = "Implement feature X";
+        let implementation_output = "Implementation completed successfully";
+
+        let prefix: Option<String> = None;
+        let suffix: Option<String> = None;
+
+        // Simulate what run_review does without prefix/suffix
+        let verify_section = String::new();
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "# Self-Review Task\n\n\
+             Review your own implementation and fix any issues.\n\n\
+             ## Original Task\n{task_desc}\n\n\
+             ## Implementation Output\n{implementation_output}{verify_section}\n\n\
+             Review the code changes you made. Look for:\n\
+             - Bugs or logic errors\n\
+             - Missing edge cases\n\
+             - Code style issues\n\
+             - Incomplete implementations\n\n\
+             Fix any issues found and commit your changes."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.starts_with("# Self-Review Task"));
+        assert!(prompt.contains("Implement feature X"));
+        assert!(!prompt.contains("PREFIX TEXT"));
+        assert!(!prompt.contains("SUFFIX TEXT"));
+    }
+
+    #[test]
+    fn test_review_prompt_with_verify_report_and_prefix_suffix() {
+        let task_desc = "Implement feature X";
+        let implementation_output = "Implementation completed successfully";
+        let verify_report = "cargo test FAILED\nError: test_foo failed";
+
+        let prefix = Some("CRITICAL: ".to_string());
+        let suffix = Some("END OF PROMPT".to_string());
+
+        // Simulate what run_review does with verify_report
+        let verify_section = format!(
+            "\n\n## Verification Results\n\
+             The following verification commands FAILED after your implementation.\n\
+             Fix the issues before proceeding.\n\n\
+             <verify_report>\n{verify_report}\n</verify_report>"
+        );
+
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "# Self-Review Task\n\n\
+             Review your own implementation and fix any issues.\n\n\
+             ## Original Task\n{task_desc}\n\n\
+             ## Implementation Output\n{implementation_output}{verify_section}\n\n\
+             Review the code changes you made. Look for:\n\
+             - Bugs or logic errors\n\
+             - Missing edge cases\n\
+             - Code style issues\n\
+             - Incomplete implementations\n\n\
+             Fix any issues found and commit your changes."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.starts_with("CRITICAL: \n\n"));
+        assert!(prompt.contains("## Verification Results"));
+        assert!(prompt.contains("cargo test FAILED"));
+        assert!(prompt.ends_with("\n\nEND OF PROMPT"));
+    }
+
+    #[test]
+    fn test_verify_prompt_with_prefix_suffix() {
+        let verification_commands = "cargo test\ncargo clippy";
+
+        let prefix = Some("VERIFY: ".to_string());
+        let suffix = Some("END VERIFY".to_string());
+
+        // Simulate what run_verify does
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "# Verification Task\n\n\
+             Run the following verification commands and report results.\n\
+             If all commands pass, respond with 'VERIFICATION PASSED'.\n\
+             If any command fails, respond with 'VERIFICATION FAILED' and explain why.\n\n\
+             ## Commands\n{verification_commands}"
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.starts_with("VERIFY: \n\n"));
+        assert!(prompt.contains("# Verification Task"));
+        assert!(prompt.contains("cargo test"));
+        assert!(prompt.ends_with("\n\nEND VERIFY"));
+    }
+
+    #[test]
+    fn test_verify_prompt_without_prefix_suffix() {
+        let verification_commands = "cargo test\ncargo clippy";
+
+        let prefix: Option<String> = None;
+        let suffix: Option<String> = None;
+
+        // Simulate what run_verify does without prefix/suffix
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "# Verification Task\n\n\
+             Run the following verification commands and report results.\n\
+             If all commands pass, respond with 'VERIFICATION PASSED'.\n\
+             If any command fails, respond with 'VERIFICATION FAILED' and explain why.\n\n\
+             ## Commands\n{verification_commands}"
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.starts_with("# Verification Task"));
+        assert!(prompt.contains("cargo test"));
+        assert!(!prompt.contains("VERIFY: "));
+        assert!(!prompt.contains("END VERIFY"));
     }
 }

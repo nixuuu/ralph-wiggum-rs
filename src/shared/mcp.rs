@@ -1,14 +1,13 @@
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Build the MCP config JSON for `--mcp-config` CLI flag.
 ///
 /// Generates a config that points Claude CLI to this binary's MCP server
 /// subcommand with the given tasks file path.
 pub fn build_mcp_config(tasks_path: &Path) -> Value {
-    let exe = std::env::current_exe()
-        .unwrap_or_else(|_| "ralph-wiggum".into());
+    let exe = std::env::current_exe().unwrap_or_else(|_| "ralph-wiggum".into());
 
     json!({
         "mcpServers": {

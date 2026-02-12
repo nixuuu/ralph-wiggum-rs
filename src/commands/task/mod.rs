@@ -26,7 +26,7 @@ pub async fn execute(command: TaskCommands, file_config: &FileConfig) -> Result<
         TaskCommands::Status => status::execute(file_config),
         TaskCommands::Orchestrate(args) => {
             let project_root = std::env::current_dir()?;
-            let config = orchestrate::orchestrator::ResolvedConfig::from_args(&args, file_config);
+            let config = orchestrate::ResolvedConfig::from_args(&args, file_config);
             let orch =
                 orchestrate::orchestrator::Orchestrator::new(config, file_config, project_root)?;
             orch.execute().await

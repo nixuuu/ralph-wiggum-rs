@@ -79,3 +79,4 @@ You have MCP tools available for reading and modifying tasks. **You MUST use the
 - Include test tasks alongside implementation
 - Maintain consistent component naming with existing tasks
 - Maintain valid YAML in `tasks_create` payloads
+- Quote strings containing YAML special characters (&, :, *, !, |, >, etc.) — use double quotes for implementation_steps with code syntax

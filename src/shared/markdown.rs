@@ -137,4 +137,27 @@ mod tests {
         let result = render_markdown(table);
         assert!(!result.is_empty());
     }
+
+    #[test]
+    fn test_render_empty_string() {
+        let result = render_markdown("");
+        // Empty input should produce empty or whitespace-only output
+        assert!(result.trim().is_empty());
+    }
+
+    #[test]
+    fn test_render_whitespace_only() {
+        let result = render_markdown("   \n\n   ");
+        // termimad may add minimal formatting/spacing even for whitespace-only input
+        // Just verify it doesn't crash and produces some output
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_render_preserves_empty_lines_in_content() {
+        let text = "Line 1\n\nLine 2";
+        let result = render_markdown(text);
+        // Should contain multiple lines (including the empty separator)
+        assert!(result.lines().count() >= 2);
+    }
 }

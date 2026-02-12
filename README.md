@@ -151,6 +151,7 @@ max_retries = 2
 default_model = "claude-sonnet-4-5-20250929"
 worktree_prefix = "my-project"
 verify_commands = "cargo test && cargo clippy --all-targets -- -D warnings"
+conflict_resolution_model = "opus"
 ```
 
 | Field | Default | Description |
@@ -160,6 +161,7 @@ verify_commands = "cargo test && cargo clippy --all-targets -- -D warnings"
 | `default_model` | — | Override Claude model for workers (takes precedence over `[task].default_model`) |
 | `worktree_prefix` | — | Prefix for Git worktree directory names |
 | `verify_commands` | — | Shell commands run in verify phase after implementation |
+| `conflict_resolution_model` | `"opus"` | Claude model used for AI-assisted merge conflict resolution |
 
 #### Setup commands
 
@@ -334,6 +336,7 @@ ralph-wiggum task orchestrate --max-cost 5.0 --timeout 2h
 | `--tasks IDS` | Filter specific tasks by comma-separated IDs |
 | `--verbose` | Enable verbose JSONL event logging |
 | `--worktree-prefix PREFIX` | Custom prefix for worktree directories |
+| `--conflict-model NAME` | Claude model for merge conflict resolution (default: `opus`) |
 
 **Dashboard keyboard shortcuts:**
 

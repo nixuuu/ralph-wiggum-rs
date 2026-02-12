@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::Path;
 
 /// ANSI color codes for worker output differentiation.
 const WORKER_COLORS: [&str; 8] = [
@@ -25,25 +23,16 @@ pub struct MultiplexedOutput {
     worker_costs: HashMap<u32, (f64, u64, u64)>,
     /// Per-worker current task assignment
     worker_tasks: HashMap<u32, String>,
-    /// Combined JSONL log file (optional) — written via log_line() method
-    combined_log: Option<std::fs::File>,
 }
 
 impl MultiplexedOutput {
-    /// Create a new MultiplexedOutput with optional combined log file.
-    pub fn new(combined_log_path: Option<&Path>) -> Self {
-        let combined_log = combined_log_path.and_then(|p| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .ok()
-        });
-
+    /// Create a new MultiplexedOutput.
+    ///
+    /// Note: Combined event logging is handled separately by EventLogger.
+    pub fn new() -> Self {
         Self {
             worker_costs: HashMap::new(),
             worker_tasks: HashMap::new(),
-            combined_log,
         }
     }
 
@@ -105,23 +94,11 @@ impl MultiplexedOutput {
         self.worker_costs.values().map(|(c, _, _)| c).sum()
     }
 
-    /// Get total tokens across all workers.
-    /// Used in tests for cost tracking validation.
-    #[allow(dead_code)] // Test utility for validating token aggregation across workers
-    pub fn total_tokens(&self) -> (u64, u64) {
-        let input: u64 = self.worker_costs.values().map(|(_, i, _)| i).sum();
-        let output: u64 = self.worker_costs.values().map(|(_, _, o)| o).sum();
-        (input, output)
-    }
+    // Removed: total_tokens() method (task 2.4)
+    // Only used in a single test, not in production code.
 
-    /// Write a line to the combined log (if configured).
-    /// Currently unused but provided as part of the public logging API.
-    #[allow(dead_code)] // Public API: reserved for future combined log file writing
-    pub fn log_line(&mut self, line: &str) {
-        if let Some(log) = &mut self.combined_log {
-            writeln!(log, "{line}").ok();
-        }
-    }
+    // Removed: log_line() method (task 2.4)
+    // Never called in production. Combined log is written via EventLogger instead.
 }
 
 #[cfg(test)]
@@ -145,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_format_worker_line() {
-        let mut output = MultiplexedOutput::new(None);
+        let mut output = MultiplexedOutput::new();
         output.assign_worker(1, "T01");
 
         let line = output.format_worker_line(1, "Hello world");
@@ -156,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_format_worker_line_no_task() {
-        let output = MultiplexedOutput::new(None);
+        let output = MultiplexedOutput::new();
         let line = output.format_worker_line(1, "idle message");
         assert!(line.contains("[W1|---]"));
     }
@@ -170,7 +147,7 @@ mod tests {
 
     #[test]
     fn test_cost_tracking() {
-        let mut output = MultiplexedOutput::new(None);
+        let mut output = MultiplexedOutput::new();
 
         output.update_cost(1, 0.01, 100, 50);
         output.update_cost(1, 0.02, 200, 100);
@@ -183,14 +160,13 @@ mod tests {
 
         assert!((output.total_cost() - 0.08).abs() < f64::EPSILON);
 
-        let (total_in, total_out) = output.total_tokens();
-        assert_eq!(total_in, 800);
-        assert_eq!(total_out, 400);
+        // Removed: total_tokens() test assertion (task 2.4)
+        // Method removed as it was only used in this test
     }
 
     #[test]
     fn test_worker_cost_unknown() {
-        let output = MultiplexedOutput::new(None);
+        let output = MultiplexedOutput::new();
         let (cost, input, out) = output.worker_cost(99);
         assert_eq!(cost, 0.0);
         assert_eq!(input, 0);
@@ -199,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_assign_clear_worker() {
-        let mut output = MultiplexedOutput::new(None);
+        let mut output = MultiplexedOutput::new();
 
         output.assign_worker(1, "T03");
         let line = output.format_worker_line(1, "text");

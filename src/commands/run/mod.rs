@@ -1,11 +1,15 @@
 mod args;
 mod config;
+mod event_formatting;
 mod events;
+mod formatting_helpers;
 mod once;
 pub(crate) mod output;
+mod promise;
 mod prompt;
 pub(crate) mod runner;
 pub(crate) mod state;
+mod tool_formatting;
 pub(crate) mod ui;
 
 pub use args::RunArgs;
@@ -21,7 +25,8 @@ use crate::updater::version_checker::UpdateInfo;
 
 use config::Config;
 use events::InputThread;
-use output::{OutputFormatter, find_promise};
+use output::OutputFormatter;
+use promise::find_promise;
 use prompt::build_system_prompt;
 use runner::{ClaudeEvent, ClaudeRunner};
 use state::StateManager;

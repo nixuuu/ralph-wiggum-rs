@@ -100,25 +100,16 @@ pub enum WorkerEventKind {
         worker_id: u32,
         lines: Vec<String>,
     },
+    /// Periodic heartbeat signal from a worker to indicate it's alive and working.
+    Heartbeat {
+        worker_id: u32,
+        phase: WorkerPhase,
+    },
 }
 
-/// Command sent from orchestrator to a worker.
-/// Currently defined for protocol completeness but not actively used.
-/// Kept for future worker communication needs.
-#[allow(dead_code)] // Protocol definition: reserved for future bidirectional orchestrator-worker communication
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "command")]
-pub enum OrchestratorCommand {
-    AssignTask {
-        task_id: String,
-        task_description: String,
-        model: Option<String>,
-        worktree_path: PathBuf,
-        branch: String,
-    },
-    Shutdown,
-    Abort,
-}
+// Removed: OrchestratorCommand enum (task 2.4)
+// Was only used in tests, not in production code. Reserved for future bidirectional
+// orchestrator-worker communication but never implemented.
 
 impl WorkerEvent {
     /// Create a new WorkerEvent with the current UTC timestamp.
@@ -271,27 +262,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_orchestrator_command_serialize() {
-        let cmd = OrchestratorCommand::AssignTask {
-            task_id: "T01".to_string(),
-            task_description: "Setup JWT".to_string(),
-            model: Some("claude-opus-4-6".to_string()),
-            worktree_path: PathBuf::from("../proj-rw-w1"),
-            branch: "ralph/w1/T01".to_string(),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"command\":\"AssignTask\""));
-        assert!(json.contains("\"task_id\":\"T01\""));
-    }
-
-    #[test]
-    fn test_orchestrator_command_roundtrip() {
-        let cmd = OrchestratorCommand::Shutdown;
-        let json = serde_json::to_string(&cmd).unwrap();
-        let deserialized: OrchestratorCommand = serde_json::from_str(&json).unwrap();
-        assert!(matches!(deserialized, OrchestratorCommand::Shutdown));
-    }
+    // Removed: test_orchestrator_command_serialize and test_orchestrator_command_roundtrip (task 2.4)
+    // Tests removed along with OrchestratorCommand enum
 
     #[test]
     fn test_worker_phase_display() {
@@ -354,6 +326,10 @@ mod tests {
                 worker_id: 1,
                 lines: vec!["$ git merge --squash".to_string()],
             },
+            WorkerEventKind::Heartbeat {
+                worker_id: 1,
+                phase: WorkerPhase::Implement,
+            },
         ];
 
         for kind in events {
@@ -391,5 +367,37 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_worker_event_serialize_heartbeat() {
+        let event = WorkerEvent::new(WorkerEventKind::Heartbeat {
+            worker_id: 3,
+            phase: WorkerPhase::ReviewFix,
+        });
+        let json = event.to_jsonl().unwrap();
+        assert!(json.contains("\"event\":\"Heartbeat\""));
+        assert!(json.contains("\"worker_id\":3"));
+        assert!(json.contains("\"phase\":\"ReviewFix\""));
+        assert!(json.contains("\"timestamp\""));
+        // Must be single line
+        assert!(!json.contains('\n'));
+    }
+
+    #[test]
+    fn test_heartbeat_event_roundtrip() {
+        let original = WorkerEvent::new(WorkerEventKind::Heartbeat {
+            worker_id: 5,
+            phase: WorkerPhase::Verify,
+        });
+        let json = original.to_jsonl().unwrap();
+        let deserialized: WorkerEvent = serde_json::from_str(&json).unwrap();
+        // Verify key fields survived roundtrip
+        if let WorkerEventKind::Heartbeat { worker_id, phase } = &deserialized.kind {
+            assert_eq!(*worker_id, 5);
+            assert_eq!(*phase, WorkerPhase::Verify);
+        } else {
+            panic!("Wrong event type after roundtrip");
+        }
     }
 }

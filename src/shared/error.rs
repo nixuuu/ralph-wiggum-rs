@@ -49,6 +49,9 @@ pub enum RalphError {
 
     #[error("Session resume error: {0}")]
     SessionResume(String),
+
+    #[error("Task not found: {0}")]
+    TaskNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, RalphError>;

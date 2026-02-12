@@ -12,7 +12,8 @@ where
 {
     let mut tf = TasksFile::load(tasks_path).map_err(|e| e.to_string())?;
     let result = f(&mut tf)?;
-    tf.validate().map_err(|e| format!("Validation failed: {e}"))?;
+    tf.validate()
+        .map_err(|e| format!("Validation failed: {e}"))?;
     tf.save(tasks_path).map_err(|e| e.to_string())?;
     Ok(result)
 }
@@ -355,7 +356,6 @@ pub fn tasks_set_default_model(tasks_path: &Path, params: &Value) -> Result<Valu
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,7 +437,12 @@ tasks:
             }),
         )
         .unwrap();
-        assert!(result["created"].as_array().unwrap().contains(&json!("1.3")));
+        assert!(
+            result["created"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("1.3"))
+        );
 
         // Verify it was saved
         let tf = TasksFile::load(&path).unwrap();
@@ -526,8 +531,7 @@ tasks:
     #[test]
     fn test_tasks_set_deps() {
         let (path, _dir) = setup_test_file();
-        let result =
-            tasks_set_deps(&path, &json!({"id": "2", "deps": ["1.1", "1.2"]})).unwrap();
+        let result = tasks_set_deps(&path, &json!({"id": "2", "deps": ["1.1", "1.2"]})).unwrap();
         assert_eq!(result["id"], "2");
 
         let tf = TasksFile::load(&path).unwrap();
@@ -538,8 +542,7 @@ tasks:
     #[test]
     fn test_tasks_set_default_model() {
         let (path, _dir) = setup_test_file();
-        let result =
-            tasks_set_default_model(&path, &json!({"model": "claude-opus-4-6"})).unwrap();
+        let result = tasks_set_default_model(&path, &json!({"model": "claude-opus-4-6"})).unwrap();
         assert_eq!(result["default_model"], "claude-opus-4-6");
 
         let tf = TasksFile::load(&path).unwrap();

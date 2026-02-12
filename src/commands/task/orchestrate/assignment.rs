@@ -3,14 +3,15 @@ use std::time::{Instant, SystemTime};
 
 use crate::commands::task::orchestrate::events::WorkerPhase;
 use crate::commands::task::orchestrate::output::MultiplexedOutput;
-use crate::commands::task::orchestrate::shared_types::{WorkerState, WorkerStatus};
-use crate::commands::task::orchestrate::worker::Worker;
+use crate::commands::task::orchestrate::worker::{Worker, WorkerConfig};
+use crate::commands::task::orchestrate::worker_status::{WorkerState, WorkerStatus};
 use crate::commands::task::orchestrate::worktree::WorktreeInfo;
 use crate::shared::error::Result;
 use crate::shared::progress::TaskStatus;
 use crate::shared::tasks::TasksFile;
 
-use super::orchestrator::{Orchestrator, RunLoopContext};
+use super::orchestrator::Orchestrator;
+use super::run_loop::RunLoopContext;
 
 // ── Worker slot tracking ────────────────────────────────────────────
 
@@ -20,10 +21,10 @@ pub(super) enum WorkerSlot {
     Idle,
     Busy {
         /// Task ID tracked in worker slot for debugging and state consistency.
-        #[allow(dead_code)]
-        // Tracked for debugging and consistency but not actively used in logic
         task_id: String,
         worktree: WorktreeInfo,
+        /// When this worker started its current task (for watchdog stuck detection).
+        started_at: Instant,
     },
 }
 
@@ -63,10 +64,7 @@ impl Orchestrator {
             let model = self.resolve_model(&task_id, ctx.tasks_file);
 
             // Create worktree
-            let worktree = ctx
-                .worktree_manager
-                .create_worktree(worker_id, &task_id)
-                .await?;
+            let worktree = ctx.worktree_manager.create_worktree(&task_id).await?;
 
             // Print assignment via TUI
             let msg = ctx.tui.mux_output.format_worker_line(
@@ -86,6 +84,9 @@ impl Orchestrator {
                 task_id: Some(task_id.clone()),
                 component: task_info.map(|t| t.component.clone()),
                 phase: Some(WorkerPhase::Implement),
+                model: model
+                    .as_ref()
+                    .map(|m| crate::shared::tasks::reverse_model_alias(m)),
                 cost_usd: 0.0,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -120,20 +121,29 @@ impl Orchestrator {
                 WorkerSlot::Busy {
                     task_id: task_id.clone(),
                     worktree,
+                    started_at: Instant::now(),
                 },
             );
 
             // Spawn worker as tokio task
+            let worker_config = WorkerConfig {
+                system_prompt: self.system_prompt.clone(),
+                max_retries: self.config.max_retries,
+                use_nerd_font: self.use_nerd_font,
+                prompt_prefix: self.prompt_prefix.clone(),
+                prompt_suffix: self.prompt_suffix.clone(),
+                phase_timeout: self.config.phase_timeout,
+                git_timeout: self.config.git_timeout,
+                setup_timeout: self.config.setup_timeout,
+            };
             let worker = Worker::new(
                 worker_id,
                 ctx.event_tx.clone(),
                 Arc::clone(&ctx.flags.shutdown),
-                self.system_prompt.clone(),
-                self.config.max_retries,
-                self.use_nerd_font,
+                worker_config,
             );
 
-            let verification_cmds = self.verification_commands.clone();
+            let verify_cmds = self.verify_commands.clone();
             // task_id moved (not cloned) — last use of the owned String
             let task_id_owned = task_id;
             let task_desc_owned = task_desc;
@@ -147,7 +157,7 @@ impl Orchestrator {
                         model_owned.as_deref(),
                         &worktree_path,
                         &expanded_setup,
-                        verification_cmds.as_deref(),
+                        &verify_cmds,
                     )
                     .await
             });
@@ -190,6 +200,12 @@ impl Orchestrator {
                 ctx.tui.dashboard.push_log_line(&msg);
             } else if let Some(mt) = get_mtime(&self.tasks_path) {
                 ctx.progress_mtime = Some(mt);
+                // Sync cached TasksFile for all started tasks
+                let mut updated = (*ctx.cached_tasks_file).clone();
+                for (task_id, status) in &updates {
+                    let _ = updated.update_status(task_id, status.clone());
+                }
+                ctx.cached_tasks_file = Arc::new(updated);
             }
         }
 
@@ -200,6 +216,15 @@ impl Orchestrator {
 // ── Helpers ─────────────────────────────────────────────────────────
 
 /// Expand template variables in a setup command string.
+///
+/// Supported variables:
+/// - `{ROOT_DIR}` — Project root directory (main repository)
+/// - `{WORKTREE_DIR}` — Task-specific worktree path (e.g., `/path/to/project-ralph-task-T03`)
+/// - `{TASK_ID}` — Task identifier (e.g., "T03", "1.2.3")
+/// - `{WORKER_ID}` — Worker slot number (1-based, contextual to worker, not tied to worktree path)
+///
+/// Note: `{WORKER_ID}` is preserved for contextual use (logs, debugging) but worktree paths
+/// are now task-based (format: `{prefix}task-{task_id}`) rather than worker-based.
 pub(super) fn expand_setup_command(
     cmd: &str,
     root_dir: &std::path::Path,
@@ -227,13 +252,13 @@ mod tests {
         let result = expand_setup_command(
             "cp {ROOT_DIR}/.env {WORKTREE_DIR}/.env && echo {TASK_ID} w{WORKER_ID}",
             std::path::Path::new("/home/user/project"),
-            std::path::Path::new("/tmp/worktrees/w1"),
-            "T03",
+            std::path::Path::new("/home/user/project-ralph-task-1-2-3"),
+            "1.2.3",
             1,
         );
         assert_eq!(
             result,
-            "cp /home/user/project/.env /tmp/worktrees/w1/.env && echo T03 w1"
+            "cp /home/user/project/.env /home/user/project-ralph-task-1-2-3/.env && echo 1.2.3 w1"
         );
     }
 
@@ -241,12 +266,46 @@ mod tests {
     fn test_expand_setup_command_no_variables() {
         let result = expand_setup_command(
             "npm install",
-            std::path::Path::new("/root"),
-            std::path::Path::new("/wt"),
+            std::path::Path::new("/home/user/project"),
+            std::path::Path::new("/home/user/project-ralph-task-T01"),
             "T01",
             2,
         );
         assert_eq!(result, "npm install");
+    }
+
+    #[test]
+    fn test_expand_setup_command_worker_id_independent_of_path() {
+        // Verify that WORKER_ID is contextual and independent of worktree path
+        // Worker #3 working on task T01 should still expand WORKER_ID to "3"
+        let result = expand_setup_command(
+            "echo 'Worker {WORKER_ID} working in {WORKTREE_DIR} on {TASK_ID}'",
+            std::path::Path::new("/home/user/project"),
+            std::path::Path::new("/home/user/project-ralph-task-T01"),
+            "T01",
+            3,
+        );
+        assert_eq!(
+            result,
+            "echo 'Worker 3 working in /home/user/project-ralph-task-T01 on T01'"
+        );
+    }
+
+    #[test]
+    fn test_expand_setup_command_dotted_task_id() {
+        // Task IDs like "1.2.3" are sanitized to "1-2-3" in worktree path,
+        // but {TASK_ID} variable should preserve original format
+        let result = expand_setup_command(
+            "echo 'Task {TASK_ID} in {WORKTREE_DIR}'",
+            std::path::Path::new("/home/user/project"),
+            std::path::Path::new("/home/user/project-ralph-task-1-2-3"),
+            "1.2.3",
+            1,
+        );
+        assert_eq!(
+            result,
+            "echo 'Task 1.2.3 in /home/user/project-ralph-task-1-2-3'"
+        );
     }
 
     #[test]
@@ -263,10 +322,10 @@ mod tests {
             task_id: "T01".to_string(),
             worktree: WorktreeInfo {
                 path: std::path::PathBuf::from("/tmp/wt1"),
-                branch: "ralph/w1/T01".to_string(),
-                worker_id: 1,
+                branch: "ralph/task/T01".to_string(),
                 task_id: "T01".to_string(),
             },
+            started_at: Instant::now(),
         };
         assert!(matches!(busy, WorkerSlot::Busy { .. }));
     }

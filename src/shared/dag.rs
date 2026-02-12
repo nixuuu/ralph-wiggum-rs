@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use crate::shared::progress::ProgressFrontmatter;
 use crate::shared::tasks::TasksFile;
@@ -11,7 +11,8 @@ pub struct TaskDag {
     /// task_id → list of tasks it depends on (predecessors)
     deps: HashMap<String, Vec<String>>,
     /// task_id → list of tasks that depend on it (successors)
-    /// Used by `dependents()` for reverse dependency traversal in topological_sort().
+    /// Used by `dependents()` in test suite for reverse dependency traversal.
+    #[allow(dead_code)]
     reverse: HashMap<String, Vec<String>>,
     /// All known task IDs in the DAG
     all_tasks: HashSet<String>,
@@ -69,17 +70,6 @@ impl TaskDag {
         }
     }
 
-    /// Create an empty DAG with no tasks.
-    /// Currently used only in tests, but preserved for test utilities.
-    #[allow(dead_code)] // Test utility for creating empty DAG instances
-    pub fn empty() -> Self {
-        Self {
-            deps: HashMap::new(),
-            reverse: HashMap::new(),
-            all_tasks: HashSet::new(),
-        }
-    }
-
     /// Register additional task IDs (e.g. from PROGRESS.md task list)
     /// that may not appear in the deps map.
     pub fn register_tasks(&mut self, task_ids: impl IntoIterator<Item = String>) {
@@ -96,12 +86,6 @@ impl TaskDag {
     /// Return deps for a given task (empty slice if none).
     pub fn task_deps(&self, task_id: &str) -> &[String] {
         self.deps.get(task_id).map_or(&[], |v| v.as_slice())
-    }
-
-    /// Return tasks that depend on the given task (successors).
-    /// Used by topological_sort() for dependency resolution.
-    pub fn dependents(&self, task_id: &str) -> &[String] {
-        self.reverse.get(task_id).map_or(&[], |v| v.as_slice())
     }
 
     /// Detect cycles using DFS with 3-color marking.
@@ -167,63 +151,6 @@ impl TaskDag {
         None
     }
 
-    /// Topological sort using Kahn's algorithm.
-    ///
-    /// Returns tasks in dependency order (tasks with no deps first).
-    /// Returns `Err` with cycle path if the graph contains cycles.
-    ///
-    /// Currently used only in tests, but preserved for future advanced scheduling features.
-    #[allow(dead_code)] // Test utility and reserved for future priority-based task scheduling
-    pub fn topological_sort(&self) -> Result<Vec<String>, Vec<String>> {
-        // Compute in-degree for each task (number of deps)
-        let mut in_degree: HashMap<&str, usize> = HashMap::new();
-        for task in &self.all_tasks {
-            in_degree.insert(task.as_str(), self.task_deps(task).len());
-        }
-
-        // Start with tasks that have zero in-degree (no deps)
-        let mut queue: VecDeque<String> = in_degree
-            .iter()
-            .filter(|&(_, &deg)| deg == 0)
-            .map(|(&task, _)| task.to_string())
-            .collect();
-        // Sort queue for deterministic order
-        let mut sorted_queue: Vec<String> = queue.drain(..).collect();
-        sorted_queue.sort_by(|a, b| compare_task_ids(a, b));
-        queue.extend(sorted_queue);
-
-        let mut result = Vec::new();
-
-        while let Some(task) = queue.pop_front() {
-            // Clone required: moving task into result vector while keeping
-            // it available for lookup in dependents(). Could use indices
-            // instead but would complicate the algorithm significantly.
-            result.push(task.clone());
-
-            // For each task that depends on this one, decrement in-degree
-            for dependent in self.dependents(&task) {
-                if let Some(deg) = in_degree.get_mut(dependent.as_str()) {
-                    *deg -= 1;
-                    if *deg == 0 {
-                        // Clone required: queue needs owned String for dequeue/push_back
-                        queue.push_back(dependent.clone());
-                    }
-                }
-            }
-        }
-
-        if result.len() != self.all_tasks.len() {
-            // Cycle detected — find and return cycle path
-            if let Some(cycle) = self.detect_cycles() {
-                Err(cycle)
-            } else {
-                Err(vec!["unknown cycle".to_string()])
-            }
-        } else {
-            Ok(result)
-        }
-    }
-
     /// Return tasks that are ready to execute: all deps are in `done` set,
     /// not currently `in_progress`, and not already `done`.
     ///
@@ -273,6 +200,76 @@ fn compare_task_ids(a: &str, b: &str) -> std::cmp::Ordering {
         }
     }
     a_parts.len().cmp(&b_parts.len())
+}
+
+#[cfg(test)]
+impl TaskDag {
+    /// Create an empty DAG with no tasks (test utility).
+    pub fn empty() -> Self {
+        Self {
+            deps: HashMap::new(),
+            reverse: HashMap::new(),
+            all_tasks: HashSet::new(),
+        }
+    }
+
+    /// Return tasks that depend on the given task (successors).
+    pub fn dependents(&self, task_id: &str) -> &[String] {
+        self.reverse.get(task_id).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Topological sort using Kahn's algorithm.
+    ///
+    /// Returns tasks in dependency order (tasks with no deps first).
+    /// Returns `Err` with cycle path if the graph contains cycles.
+    pub fn topological_sort(&self) -> Result<Vec<String>, Vec<String>> {
+        // Compute in-degree for each task (number of deps)
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        for task in &self.all_tasks {
+            in_degree.insert(task.as_str(), self.task_deps(task).len());
+        }
+
+        // Start with tasks that have zero in-degree (no deps)
+        let mut queue: std::collections::VecDeque<String> = in_degree
+            .iter()
+            .filter(|&(_, &deg)| deg == 0)
+            .map(|(&task, _)| task.to_string())
+            .collect();
+        // Sort queue for deterministic order
+        let mut sorted_queue: Vec<String> = queue.drain(..).collect();
+        sorted_queue.sort_by(|a, b| compare_task_ids(a, b));
+        queue.extend(sorted_queue);
+
+        let mut result = Vec::new();
+
+        while let Some(task) = queue.pop_front() {
+            // Clone required: task is used both in result.push() and
+            // self.dependents() call, so we need to keep a copy.
+            result.push(task.clone());
+
+            // For each task that depends on this one, decrement in-degree
+            for dependent in self.dependents(&task) {
+                if let Some(deg) = in_degree.get_mut(dependent.as_str()) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        // Clone required: queue needs owned String for dequeue/push_back
+                        queue.push_back(dependent.clone());
+                    }
+                }
+            }
+        }
+
+        if result.len() != self.all_tasks.len() {
+            // Cycle detected — find and return cycle path
+            if let Some(cycle) = self.detect_cycles() {
+                Err(cycle)
+            } else {
+                Err(vec!["unknown cycle".to_string()])
+            }
+        } else {
+            Ok(result)
+        }
+    }
 }
 
 #[cfg(test)]

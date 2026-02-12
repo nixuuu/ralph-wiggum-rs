@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::shared::error::Result;
 
-use protocol::{JsonRpcRequest, JsonRpcResponse, INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND};
+use protocol::{INTERNAL_ERROR, INVALID_PARAMS, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND};
 
 /// Run the MCP server on stdin/stdout (JSON-RPC 2.0).
 pub fn execute(tasks_file: PathBuf) -> Result<()> {
@@ -65,9 +65,7 @@ fn handle_request(req: &JsonRpcRequest, tasks_file: &Path) -> Option<JsonRpcResp
         // Tool execution
         "tools/call" => {
             let params = req.params.as_ref();
-            let tool_name = params
-                .and_then(|p| p.get("name"))
-                .and_then(|n| n.as_str());
+            let tool_name = params.and_then(|p| p.get("name")).and_then(|n| n.as_str());
             let tool_args = params
                 .and_then(|p| p.get("arguments"))
                 .cloned()

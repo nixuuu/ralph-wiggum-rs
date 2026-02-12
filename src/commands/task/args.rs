@@ -117,6 +117,10 @@ pub struct OrchestrateArgs {
     /// Filter specific tasks (comma-separated IDs, e.g. "T01,T03,T07")
     #[arg(long)]
     pub tasks: Option<String>,
+
+    /// Claude model to use for merge conflict resolution (default: "opus")
+    #[arg(long)]
+    pub conflict_model: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -232,6 +236,7 @@ mod tests {
             assert!(args.max_cost.is_none());
             assert!(args.timeout.is_none());
             assert!(args.tasks.is_none());
+            assert!(args.conflict_model.is_none());
         } else {
             panic!("Expected Orchestrate command");
         }
@@ -268,6 +273,7 @@ mod tests {
             assert_eq!(args.max_cost, Some(10.0));
             assert_eq!(args.timeout.as_deref(), Some("2h"));
             assert_eq!(args.tasks.as_deref(), Some("T01,T03,T07"));
+            assert!(args.conflict_model.is_none());
         } else {
             panic!("Expected Orchestrate command");
         }
@@ -306,6 +312,17 @@ mod tests {
             assert_eq!(args.model.as_deref(), Some("claude-opus-4-6"));
         } else {
             panic!("Expected GenerateDeps command");
+        }
+    }
+
+    #[test]
+    fn test_orchestrate_conflict_model_flag() {
+        let cli =
+            TestCli::parse_from(["test", "orchestrate", "--conflict-model", "claude-opus-4-6"]);
+        if let super::TaskCommands::Orchestrate(args) = cli.command {
+            assert_eq!(args.conflict_model.as_deref(), Some("claude-opus-4-6"));
+        } else {
+            panic!("Expected Orchestrate command");
         }
     }
 }

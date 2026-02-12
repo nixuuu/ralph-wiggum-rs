@@ -3,13 +3,14 @@ use std::time::Instant;
 
 use crate::commands::task::orchestrate::dashboard::Dashboard;
 use crate::commands::task::orchestrate::output::MultiplexedOutput;
-use crate::commands::task::orchestrate::shared_types::{OrchestratorStatus, ShutdownState};
+use crate::commands::task::orchestrate::shutdown_types::{OrchestratorStatus, ShutdownState};
 use crate::commands::task::orchestrate::summary::TaskSummaryEntry;
 use crate::shared::error::Result;
 
 use std::collections::HashMap;
 
-use super::orchestrator::{Orchestrator, RunLoopContext};
+use super::orchestrator::Orchestrator;
+use super::run_loop::RunLoopContext;
 
 // ── TUI context ─────────────────────────────────────────────────────
 
@@ -45,9 +46,9 @@ impl Orchestrator {
         }
 
         // Determine shutdown state and remaining time
-        let (shutdown_state, shutdown_remaining) = if ctx.flags.shutdown.load(Ordering::Relaxed) {
+        let (shutdown_state, shutdown_remaining) = if ctx.flags.shutdown.load(Ordering::SeqCst) {
             (ShutdownState::Aborting, None)
-        } else if ctx.flags.graceful_shutdown.load(Ordering::Relaxed) {
+        } else if ctx.flags.graceful_shutdown.load(Ordering::SeqCst) {
             let remaining = graceful_shutdown_started.map(|start| {
                 const GRACE: std::time::Duration = std::time::Duration::from_secs(120);
                 GRACE.saturating_sub(start.elapsed())

@@ -161,18 +161,14 @@ impl TaskScheduler {
         self.failed_retries.get(task_id).copied().unwrap_or(0)
     }
 
-    /// Public accessors for internal state — currently unused but part of public API.
-    #[allow(dead_code)] // Public API: accessor for done task set
     pub fn done_tasks(&self) -> &HashSet<String> {
         &self.done
     }
 
-    #[allow(dead_code)] // Public API: accessor for blocked task set
     pub fn blocked_tasks(&self) -> &HashSet<String> {
         &self.blocked
     }
 
-    #[allow(dead_code)] // Public API: accessor for in-progress task set
     pub fn in_progress_tasks(&self) -> &HashSet<String> {
         &self.in_progress
     }
@@ -407,5 +403,38 @@ mod tests {
 
         // Now T04 is ready
         assert_eq!(sched.next_ready_task(), Some("T04".to_string()));
+    }
+
+    #[test]
+    fn test_add_tasks_resets_complete() {
+        // Setup: Scheduler with all tasks done
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec![])]);
+        let progress = make_progress(vec![
+            ("T01", "api", "First", TaskStatus::Done),
+            ("T02", "api", "Second", TaskStatus::Done),
+        ]);
+
+        let mut sched = TaskScheduler::new(dag, &progress, 3);
+        assert!(
+            sched.is_complete(),
+            "Scheduler should be complete initially"
+        );
+
+        // Add new tasks including a todo task
+        let new_dag = make_dag(vec![
+            ("T01", vec![]),
+            ("T02", vec![]),
+            ("T03", vec![]), // New task
+        ]);
+        sched.add_tasks(new_dag);
+
+        // is_complete should now return false because T03 is neither done nor blocked
+        assert!(
+            !sched.is_complete(),
+            "Scheduler should not be complete after adding new todo tasks"
+        );
+
+        // Verify T03 is in the ready queue
+        assert_eq!(sched.next_ready_task(), Some("T03".to_string()));
     }
 }

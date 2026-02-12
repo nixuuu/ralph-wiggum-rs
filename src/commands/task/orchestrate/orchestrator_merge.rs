@@ -9,9 +9,12 @@ use tokio::task::JoinHandle;
 use crate::commands::task::orchestrate::events::{WorkerEvent, WorkerEventKind};
 use crate::commands::task::orchestrate::merge;
 use crate::commands::task::orchestrate::output::MultiplexedOutput;
-use crate::shared::error::Result;
+
+use super::orchestrator_events::conflict_resolution_end_separator;
+use crate::shared::error::{RalphError, Result};
+use crate::shared::markdown::render_markdown;
 use crate::shared::progress::TaskStatus;
-use crate::shared::tasks::TasksFile;
+use crate::shared::tasks::{TasksFile, resolve_model_alias};
 
 use super::assignment::get_mtime;
 use super::orchestrator::Orchestrator;
@@ -50,15 +53,20 @@ impl Orchestrator {
     /// Spawn a merge task in a separate tokio task.
     ///
     /// The merge runs sequentially (one at a time) and communicates via events.
+    #[allow(clippy::too_many_arguments)] // Grouped context for merge orchestration
     pub(super) fn spawn_merge_task(
         merge_ctx: &mut MergeContext,
         pending: PendingMerge,
         project_root: &std::path::Path,
         event_tx: mpsc::Sender<WorkerEvent>,
         shutdown: Arc<AtomicBool>,
+        conflict_resolution_model: &str,
+        merge_timeout: Option<std::time::Duration>,
+        phase_timeout: Option<std::time::Duration>,
     ) {
         merge_ctx.merge_in_progress = true;
         let root = project_root.to_path_buf();
+        let conflict_model = conflict_resolution_model.to_string();
         let PendingMerge {
             worker_id,
             task_id,
@@ -67,6 +75,74 @@ impl Orchestrator {
         } = pending;
 
         let handle = tokio::spawn(async move {
+            // Wrap entire merge task in timeout
+            let merge_future = Self::do_merge_internal(
+                worker_id,
+                task_id.clone(),
+                task_name,
+                branch,
+                root,
+                event_tx.clone(),
+                shutdown,
+                conflict_model,
+                phase_timeout,
+            );
+
+            if let Some(timeout) = merge_timeout {
+                let timeout_minutes = timeout.as_secs() / 60;
+                match tokio::time::timeout(timeout, merge_future).await {
+                    Ok(()) => {
+                        // Merge completed normally — do_merge_internal already sent MergeCompleted event
+                    }
+                    Err(_elapsed) => {
+                        // Timeout occurred — send synthetic failure event
+                        let _ = event_tx.try_send(WorkerEvent::new(WorkerEventKind::MergeStepOutput {
+                            worker_id,
+                            lines: vec![format!("✗ Merge timeout after {} minutes", timeout_minutes)],
+                        }));
+                        let _ = event_tx.send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                            worker_id,
+                            task_id,
+                            success: false,
+                            commit_hash: None,
+                        })).await;
+                    }
+                }
+            } else {
+                // No timeout configured — run merge to completion
+                merge_future.await;
+            }
+        });
+
+        merge_ctx.merge_join_handle = Some(handle);
+    }
+
+    /// Internal merge implementation. Sends all events inline.
+    #[allow(clippy::too_many_arguments)] // Temporary allow — refactor into struct if needed
+    async fn do_merge_internal(
+        worker_id: u32,
+        task_id: String,
+        task_name: String,
+        branch: String,
+        root: std::path::PathBuf,
+        event_tx: mpsc::Sender<WorkerEvent>,
+        shutdown: Arc<AtomicBool>,
+        conflict_model: String,
+        phase_timeout: Option<std::time::Duration>,
+    ) {
+            // Early exit if shutdown requested
+            if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = event_tx
+                    .send(WorkerEvent::new(WorkerEventKind::MergeCompleted {
+                        worker_id,
+                        task_id,
+                        success: false,
+                        commit_hash: None,
+                    }))
+                    .await;
+                return;
+            }
+
             // Emit MergeStarted
             let _ = event_tx
                 .send(WorkerEvent::new(WorkerEventKind::MergeStarted {
@@ -142,11 +218,17 @@ impl Orchestrator {
                         lines: vec!["⚡ Starting AI conflict resolution...".to_string()],
                     }));
 
-                    let runner = crate::commands::run::runner::ClaudeRunner::oneshot(
+                    let resolved_model = resolve_model_alias(&conflict_model);
+                    let mut runner = crate::commands::run::runner::ClaudeRunner::oneshot(
                         prompt,
-                        Some("claude-opus-4-6".to_string()),
+                        Some(resolved_model),
                         Some(root.clone()),
                     );
+
+                    // Apply phase timeout to AI conflict resolution
+                    if let Some(timeout) = phase_timeout {
+                        runner = runner.with_phase_timeout(timeout);
+                    }
 
                     let event_tx_clone = event_tx.clone();
                     let wid = worker_id;
@@ -164,8 +246,10 @@ impl Orchestrator {
                                             text,
                                         } = block
                                         {
+                                            // Render markdown to ANSI-styled text
+                                            let formatted = render_markdown(text);
                                             let lines: Vec<String> =
-                                                text.lines().map(|l| l.to_string()).collect();
+                                                formatted.lines().map(|l| l.to_string()).collect();
                                             if !lines.is_empty() {
                                                 let _ = event_tx_clone.try_send(WorkerEvent::new(
                                                     WorkerEventKind::MergeStepOutput {
@@ -197,6 +281,7 @@ impl Orchestrator {
                                     WorkerEventKind::MergeStepOutput {
                                         worker_id,
                                         lines: vec![
+                                            conflict_resolution_end_separator(true),
                                             "✓ Conflicts resolved successfully".to_string(),
                                         ],
                                     },
@@ -207,6 +292,7 @@ impl Orchestrator {
                                     WorkerEventKind::MergeStepOutput {
                                         worker_id,
                                         lines: vec![
+                                            conflict_resolution_end_separator(false),
                                             "✗ Conflict resolution failed — aborting merge"
                                                 .to_string(),
                                         ],
@@ -229,6 +315,7 @@ impl Orchestrator {
                                 WorkerEventKind::MergeStepOutput {
                                     worker_id,
                                     lines: vec![
+                                        conflict_resolution_end_separator(false),
                                         "✗ AI conflict resolution failed — aborting merge"
                                             .to_string(),
                                     ],
@@ -357,10 +444,7 @@ impl Orchestrator {
                     commit_hash: Some(commit_hash),
                 }))
                 .await;
-        });
-
-        merge_ctx.merge_join_handle = Some(handle);
-    }
+    } // end do_merge_internal
 
     /// Update tasks.yml status for a task. Non-fatal — logs warning on failure.
     /// Returns new mtime if successful.
@@ -372,7 +456,9 @@ impl Orchestrator {
     ) -> Option<SystemTime> {
         let result = (|| -> Result<()> {
             let mut tf = TasksFile::load(&self.tasks_path)?;
-            tf.update_status(task_id, new_status);
+            if !tf.update_status(task_id, new_status) {
+                return Err(RalphError::TaskNotFound(task_id.to_string()));
+            }
             tf.save(&self.tasks_path)
         })();
         if let Err(e) = result {

@@ -1,11 +1,15 @@
 #![allow(dead_code)]
 use std::path::Path;
+use std::time::Duration;
 
 use tokio::process::Command;
 
 use crate::commands::task::orchestrate::worktree::WorktreeInfo;
 use crate::shared::error::{RalphError, Result};
 use crate::shared::progress::ProgressTask;
+
+/// Timeout for individual git operations (merge, commit, rev-parse).
+const GIT_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Result of a squash merge attempt.
 #[derive(Debug, Clone)]
@@ -33,11 +37,14 @@ pub async fn step_merge_squash(
     branch: &str,
 ) -> Result<(StepOutput, Vec<String>)> {
     let command = format!("git merge --squash {branch}");
-    let output = Command::new("git")
+    let git_cmd = Command::new("git")
         .args(["merge", "--squash", branch])
         .current_dir(project_root)
-        .output()
+        .output();
+
+    let output = tokio::time::timeout(GIT_OPERATION_TIMEOUT, git_cmd)
         .await
+        .map_err(|_| RalphError::MergeConflict("git merge --squash timed out after 120s".to_string()))?
         .map_err(|e| RalphError::MergeConflict(format!("Failed to spawn git merge: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -69,11 +76,14 @@ pub async fn step_commit(
 ) -> Result<StepOutput> {
     let commit_msg = format_commit_message(task_id, task_name);
     let command = format!("git commit -m \"{commit_msg}\"");
-    let output = Command::new("git")
+    let git_cmd = Command::new("git")
         .args(["commit", "-m", &commit_msg])
         .current_dir(project_root)
-        .output()
+        .output();
+
+    let output = tokio::time::timeout(GIT_OPERATION_TIMEOUT, git_cmd)
         .await
+        .map_err(|_| RalphError::MergeConflict("git commit timed out after 120s".to_string()))?
         .map_err(|e| RalphError::MergeConflict(format!("Failed to commit merge: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -90,11 +100,14 @@ pub async fn step_commit(
 /// Step 3: `git rev-parse --short HEAD`
 pub async fn step_rev_parse(project_root: &Path) -> Result<(StepOutput, String)> {
     let command = "git rev-parse --short HEAD".to_string();
-    let output = Command::new("git")
+    let git_cmd = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(project_root)
-        .output()
+        .output();
+
+    let output = tokio::time::timeout(GIT_OPERATION_TIMEOUT, git_cmd)
         .await
+        .map_err(|_| RalphError::MergeConflict("git rev-parse timed out after 120s".to_string()))?
         .map_err(|e| RalphError::MergeConflict(format!("Failed to get commit hash: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -147,11 +160,14 @@ pub async fn squash_merge(
 
 /// Abort an in-progress merge.
 pub async fn abort_merge(project_root: &Path) -> Result<()> {
-    Command::new("git")
+    let git_cmd = Command::new("git")
         .args(["merge", "--abort"])
         .current_dir(project_root)
-        .output()
+        .output();
+
+    tokio::time::timeout(GIT_OPERATION_TIMEOUT, git_cmd)
         .await
+        .map_err(|_| RalphError::MergeConflict("git merge --abort timed out after 120s".to_string()))?
         .map_err(|e| RalphError::MergeConflict(format!("Failed to abort merge: {e}")))?;
     Ok(())
 }
@@ -257,13 +273,13 @@ Auto-merging README.md";
     #[test]
     fn test_step_output_lines_format() {
         let step = StepOutput {
-            command: "git merge --squash ralph/w1/T03".to_string(),
+            command: "git merge --squash ralph/task/T03".to_string(),
             stdout: "Auto-merging src/main.rs\n".to_string(),
             stderr: "".to_string(),
             success: true,
         };
         let lines = step_output_lines(&step);
-        assert_eq!(lines[0], "$ git merge --squash ralph/w1/T03");
+        assert_eq!(lines[0], "$ git merge --squash ralph/task/T03");
         assert_eq!(lines[1], "Auto-merging src/main.rs");
     }
 
