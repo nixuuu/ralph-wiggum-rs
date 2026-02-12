@@ -41,7 +41,7 @@ The binary will be available at `target/release/ralph-wiggum`.
 ### Updating
 
 ```bash
-ralph-wiggum --update
+ralph-wiggum update
 ```
 
 ## Usage
@@ -62,7 +62,7 @@ ralph-wiggum --prompt "Your task description here"
 | `--state-file` | | `.claude/ralph-loop.local.md` | Path to state file |
 | `--config` | `-c` | `.ralph.toml` | Path to config file |
 | `--continue-session` | | | Continue conversation from previous iteration |
-| `--update` | | | Update to the latest version |
+| `--no-nf` | | | Disable Nerd Font icons (use ASCII fallback) |
 
 ### Examples
 
@@ -127,20 +127,16 @@ nerd_font = false  # Set to false for ASCII-only icons
 [task]
 tasks_file = ".ralph/tasks.yml"
 progress_file = "PROGRESS.md"
-system_prompt_file = "SYSTEM_PROMPT.md"
 output_dir = "."
 default_model = "claude-sonnet-4-5-20250929"
-adaptive_iterations = true
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `tasks_file` | `.ralph/tasks.yml` | Path to hierarchical YAML task file |
 | `progress_file` | `PROGRESS.md` | Path to legacy Markdown task file |
-| `system_prompt_file` | `SYSTEM_PROMPT.md` | Path to system prompt used in `task continue` |
 | `output_dir` | current directory | Output directory for generated files (`task prd`) |
 | `default_model` | — | Default Claude model for task commands |
-| `adaptive_iterations` | `true` | Auto-adjust iteration limits based on remaining tasks |
 
 ### `[task.orchestrate]` — Parallel orchestration
 
@@ -150,8 +146,13 @@ workers = 4
 max_retries = 2
 default_model = "claude-sonnet-4-5-20250929"
 worktree_prefix = "my-project"
-verify_commands = "cargo test && cargo clippy --all-targets -- -D warnings"
+verify_commands = ["cargo test", "cargo clippy --all-targets -- -D warnings"]
 conflict_resolution_model = "opus"
+phase_timeout_minutes = 30
+git_timeout_secs = 120
+setup_timeout_secs = 300
+merge_timeout_minutes = 15
+watchdog_interval_secs = 10
 ```
 
 | Field | Default | Description |
@@ -160,8 +161,33 @@ conflict_resolution_model = "opus"
 | `max_retries` | `3` | Max retries per task before marking as blocked |
 | `default_model` | — | Override Claude model for workers (takes precedence over `[task].default_model`) |
 | `worktree_prefix` | — | Prefix for Git worktree directory names |
-| `verify_commands` | — | Shell commands run in verify phase after implementation |
+| `verify_commands` | — | Shell commands run in verify phase after implementation (list of strings or objects) |
 | `conflict_resolution_model` | `"opus"` | Claude model used for AI-assisted merge conflict resolution |
+| `phase_timeout_minutes` | `30` | Max duration (minutes) for a single worker phase. `0` = disabled |
+| `git_timeout_secs` | `120` | Timeout (seconds) for git commands (add, commit, status) |
+| `setup_timeout_secs` | `300` | Timeout (seconds) for setup commands |
+| `merge_timeout_minutes` | `15` | Max duration (minutes) for a merge task (including AI conflict resolution). `0` = disabled |
+| `watchdog_interval_secs` | `10` | How often (seconds) the watchdog checks for panicked/stuck workers |
+
+#### Verify commands
+
+Commands run after implementation to validate the worker's output. Can be simple strings or detailed objects with labels and descriptions.
+
+```toml
+# Simple form — list of shell commands
+[task.orchestrate]
+verify_commands = ["cargo test", "cargo clippy --all-targets -- -D warnings"]
+
+# Detailed form — with display labels and descriptions
+[[task.orchestrate.verify_commands]]
+command = "cargo test"
+name = "Unit tests"
+description = "Run all unit and integration tests"
+
+[[task.orchestrate.verify_commands]]
+command = "cargo clippy --all-targets -- -D warnings"
+name = "Lint"
+```
 
 #### Setup commands
 
@@ -208,7 +234,7 @@ default_model = "claude-sonnet-4-5-20250929"
 [task.orchestrate]
 workers = 3
 max_retries = 2
-verify_commands = "cargo test && cargo clippy -- -D warnings"
+verify_commands = ["cargo test", "cargo clippy -- -D warnings"]
 
 [[task.orchestrate.setup_commands]]
 run = "cp {ROOT_DIR}/.env {WORKTREE_DIR}/.env"
@@ -287,14 +313,12 @@ ralph-wiggum task prd --file requirements.md --output-dir ./project --model clau
 
 **Generated files:**
 - `.ralph/tasks.yml` — hierarchical task list with statuses and dependencies
-- `SYSTEM_PROMPT.md` — system prompt for the development loop
-- `CLAUDE.md` — project conventions (only if not already present)
 
 Input priority: `--file` > `--prompt` > stdin.
 
 #### `task continue` — Run the development loop
 
-Reads `.ralph/tasks.yml` (or `PROGRESS.md`) and `SYSTEM_PROMPT.md`, then enters the iterative loop — picking up the next task, executing it, and moving on until all tasks are complete.
+Reads `.ralph/tasks.yml` (or `PROGRESS.md`) and enters the iterative loop — picking up the next task, executing it, and moving on until all tasks are complete. Uses an embedded system prompt template.
 
 ```bash
 ralph-wiggum task continue
@@ -416,6 +440,18 @@ Removes leftover worktrees, branches, state files, and logs from previous orches
 ralph-wiggum task clean
 ```
 
+#### `mcp-server` — MCP server for tasks.yml
+
+Runs a stdio JSON-RPC 2.0 server exposing tasks.yml CRUD operations as MCP tools. Used internally by `task add` and `task edit` to give Claude direct access to the task tree.
+
+```bash
+ralph-wiggum mcp-server --tasks-file .ralph/tasks.yml
+```
+
+| Option | Description |
+|--------|-------------|
+| `--tasks-file PATH` | Path to tasks.yml file (required) |
+
 ### Quick Start
 
 ```bash
@@ -464,7 +500,7 @@ During execution, a status bar shows:
 
 ### Live Progress Refresh
 
-In `task continue` mode, the status bar displays task progress from `PROGRESS.md`. This data is refreshed:
+In `task continue` mode, the status bar displays task progress from `.ralph/tasks.yml` (or `PROGRESS.md`). This data is refreshed:
 - **Automatically** every 15 seconds (only when the file has actually changed)
 - **Manually** by pressing `r` at any time
 
