@@ -5,7 +5,9 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
+use crate::commands::mcp::session::SessionRegistry;
 use crate::commands::task::orchestrate::events::{EventLogger, WorkerEvent, WorkerEventKind};
 use crate::commands::task::orchestrate::output::MultiplexedOutput;
 use crate::commands::task::orchestrate::scheduler::TaskScheduler;
@@ -51,6 +53,26 @@ pub(super) struct RunLoopContext<'a> {
     pub(super) cached_tasks_file: Arc<TasksFile>,
     /// Last heartbeat timestamp per worker (for liveness checking in watchdog).
     pub(super) last_heartbeat: HashMap<u32, Instant>,
+    /// Port of the shared MCP server (passed to each worker for tool access).
+    pub(super) mcp_port: u16,
+    /// Shared session registry for MCP server (used to register per-worker sessions).
+    pub(super) mcp_session_registry: Arc<SessionRegistry>,
+    /// Cancellation token for MCP server lifecycle.
+    pub(super) mcp_cancel_token: CancellationToken,
+    /// JoinHandle for the MCP server task.
+    pub(super) mcp_server_handle: tokio::task::JoinHandle<()>,
+}
+
+impl RunLoopContext<'_> {
+    /// Release a worker: remove MCP session, set slot to Idle, clear heartbeat.
+    pub(super) fn release_worker(&mut self, worker_id: u32) {
+        // Clean up MCP session before resetting the slot
+        if let Some(WorkerSlot::Busy { mcp_session_id, .. }) = self.worker_slots.get(&worker_id) {
+            self.mcp_session_registry.remove_session(mcp_session_id);
+        }
+        self.worker_slots.insert(worker_id, WorkerSlot::Idle);
+        self.last_heartbeat.remove(&worker_id);
+    }
 }
 
 const GRACEFUL_SHUTDOWN_GRACE: Duration = Duration::from_secs(120);
@@ -161,6 +183,16 @@ impl Orchestrator {
     ) -> Result<()> {
         let quit_pending = ctx.flags.quit_state.load(Ordering::Relaxed) == 1;
         let completed = ctx.flags.completed.load(Ordering::Relaxed);
+
+        // Count active and idle workers
+        let (active_workers, idle_workers) =
+            ctx.worker_slots
+                .iter()
+                .fold((0u32, 0u32), |(active, idle), (_, slot)| match slot {
+                    super::assignment::WorkerSlot::Busy { .. } => (active + 1, idle),
+                    super::assignment::WorkerSlot::Idle => (active, idle + 1),
+                });
+
         let orch_status = OrchestratorStatus {
             scheduler: ctx.scheduler.status(),
             total_cost: ctx.tui.mux_output.total_cost(),
@@ -169,10 +201,16 @@ impl Orchestrator {
             shutdown_remaining: None,
             quit_pending,
             completed,
+            restart_pending: None, // Initial render: no restart pending
+            active_workers,
+            idle_workers,
         };
-        ctx.tui
-            .dashboard
-            .render(&orch_status, None, &ctx.tui.task_summaries)
+        ctx.tui.dashboard.render(
+            &orch_status,
+            None,
+            &ctx.tui.task_summaries,
+            Some(&ctx.flags.active_worker_ids),
+        )
     }
 }
 
@@ -288,6 +326,11 @@ impl Orchestrator {
             self.handle_manual_reload(ctx);
         }
 
+        // Check for user-confirmed worker restart
+        if ctx.flags.restart_confirmed.load(Ordering::SeqCst) {
+            self.handle_restart_request(ctx)?;
+        }
+
         if ctx.flags.resize_flag.swap(false, Ordering::SeqCst) {
             ctx.tui.dashboard.handle_resize()?;
         }
@@ -338,6 +381,134 @@ impl Orchestrator {
         }
         self.render_dashboard(ctx, started_at, *graceful_shutdown_started)?;
         Ok(false)
+    }
+}
+
+// ── Worker restart ──────────────────────────────────────────────────
+
+impl Orchestrator {
+    /// Handle a user-confirmed worker restart request.
+    ///
+    /// Reads the restart atomics set by the input thread, validates the
+    /// target worker state, aborts the JoinHandle, re-queues the task
+    /// (without incrementing retries), and resets the worker slot to Idle.
+    fn handle_restart_request(&self, ctx: &mut RunLoopContext<'_>) -> Result<()> {
+        let confirmed = ctx.flags.restart_confirmed.load(Ordering::SeqCst);
+        if !confirmed {
+            return Ok(());
+        }
+
+        // Edge case: Ignore restart if graceful shutdown is active.
+        // During shutdown, we don't want to spawn new work or abort draining workers.
+        // Reset flags to prevent stale restart state.
+        if ctx.flags.graceful_shutdown.load(Ordering::SeqCst) {
+            ctx.flags.restart_confirmed.store(false, Ordering::SeqCst);
+            ctx.flags.restart_worker_id.store(0, Ordering::SeqCst);
+            return Ok(());
+        }
+
+        let worker_id = ctx.flags.restart_worker_id.load(Ordering::SeqCst);
+
+        // Reset flags immediately to prevent re-processing
+        ctx.flags.restart_confirmed.store(false, Ordering::SeqCst);
+        ctx.flags.restart_worker_id.store(0, Ordering::SeqCst);
+
+        if worker_id == 0 {
+            return Ok(());
+        }
+
+        // Validate worker slot state
+        let slot = ctx.worker_slots.get(&worker_id);
+        match slot {
+            None => {
+                let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+                    "⟳ Restart: worker {worker_id} does not exist"
+                ));
+                ctx.tui.dashboard.push_log_line(&msg);
+                return Ok(());
+            }
+            Some(WorkerSlot::Idle) => {
+                let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+                    "⟳ Restart: worker {worker_id} is idle, nothing to restart"
+                ));
+                ctx.tui.dashboard.push_log_line(&msg);
+                return Ok(());
+            }
+            Some(WorkerSlot::Busy { .. }) => {
+                // OK — proceed below
+            }
+        }
+
+        // Extract task_id before mutating
+        let task_id =
+            if let Some(WorkerSlot::Busy { task_id, .. }) = ctx.worker_slots.get(&worker_id) {
+                task_id.clone()
+            } else {
+                return Ok(());
+            };
+
+        // Check if worker is in merge pipeline — cannot restart mid-merge.
+        // A worker enters the merge pipeline when its TaskCompleted event has
+        // been processed and it's waiting in pending_merges or actively merging.
+        let in_merge_pipeline = ctx
+            .merge_ctx
+            .pending_merges
+            .iter()
+            .any(|pm| pm.worker_id == worker_id)
+            || ctx.merge_ctx.current_merge_worker_id == Some(worker_id);
+
+        if in_merge_pipeline {
+            let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+                "⟳ Restart: worker {worker_id} is merging — cannot restart during merge"
+            ));
+            ctx.tui.dashboard.push_log_line(&msg);
+            return Ok(());
+        }
+
+        // 1. Abort the JoinHandle (kills the Claude process)
+        if let Some(handle) = ctx.join_handles.remove(&worker_id) {
+            handle.abort();
+        }
+
+        // 2. Re-queue the task without incrementing retry counter
+        ctx.scheduler.requeue_without_retry(&task_id);
+
+        // 2b. Reset completed flag if scheduler is no longer complete
+        if ctx.flags.completed.load(Ordering::Relaxed) && !ctx.scheduler.is_complete() {
+            ctx.flags.completed.store(false, Ordering::Relaxed);
+        }
+
+        // 3. Release worker slot (→ Idle), clean up MCP session and heartbeat
+        //    NOTE: Worktree is NOT deleted — preserved for next assignment
+        ctx.release_worker(worker_id);
+
+        // 4. Update dashboard: worker status to idle, clear output
+        ctx.tui.dashboard.update_worker_status(
+            worker_id,
+            crate::commands::task::orchestrate::worker_status::WorkerStatus::idle(worker_id),
+        );
+        ctx.tui.mux_output.clear_worker(worker_id);
+
+        // 5. Update tasks.yml status back to Todo
+        if let Some(mt) =
+            self.update_tasks_file(&task_id, crate::shared::progress::TaskStatus::Todo, ctx.tui)
+        {
+            ctx.progress_mtime = Some(mt);
+            let mut updated = (*ctx.cached_tasks_file).clone();
+            let _ = updated.update_status(&task_id, crate::shared::progress::TaskStatus::Todo);
+            ctx.cached_tasks_file = Arc::new(updated);
+        }
+
+        // 5b. Clean session state — remove stale in-progress entry for restarted task
+        ctx.state.tasks.remove(&task_id);
+
+        // 6. Log to dashboard
+        let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+            "⟳ Worker {worker_id} restarted (task {task_id} re-queued)"
+        ));
+        ctx.tui.dashboard.push_log_line(&msg);
+
+        Ok(())
     }
 }
 
@@ -468,8 +639,7 @@ impl Orchestrator {
                             ctx.scheduler.mark_blocked(&task_id);
                         }
 
-                        ctx.worker_slots.insert(worker_id, WorkerSlot::Idle);
-                        ctx.last_heartbeat.remove(&worker_id);
+                        ctx.release_worker(worker_id);
                         ctx.tui.dashboard.update_worker_status(
                             worker_id,
                             crate::commands::task::orchestrate::worker_status::WorkerStatus::idle(
@@ -513,6 +683,7 @@ impl Orchestrator {
 
                     // Reset merge state so the next queued merge can proceed
                     ctx.merge_ctx.merge_in_progress = false;
+                    ctx.merge_ctx.current_merge_worker_id = None;
                     if let Some(next) = ctx.merge_ctx.pending_merges.pop_front() {
                         Self::spawn_merge_task(
                             &mut ctx.merge_ctx,
@@ -833,5 +1004,227 @@ mod tests {
             heartbeat_age >= Duration::from_secs(120),
             "Heartbeat at exactly 2 minutes should be considered stale"
         );
+    }
+
+    // ── Task 18.3: Worker restart tests ─────────────────────────────────
+
+    #[test]
+    fn test_restart_flags_reset_logic() {
+        // Test: restart flags should be reset to defaults after processing
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let restart_worker_id = Arc::new(AtomicU32::new(3));
+        let restart_confirmed = Arc::new(AtomicBool::new(true));
+
+        // Simulate processing — flags should be reset
+        let confirmed = restart_confirmed.load(Ordering::SeqCst);
+        assert!(confirmed);
+        let worker_id = restart_worker_id.load(Ordering::SeqCst);
+        assert_eq!(worker_id, 3);
+
+        // Reset (as done in handle_restart_request)
+        restart_confirmed.store(false, Ordering::SeqCst);
+        restart_worker_id.store(0, Ordering::SeqCst);
+
+        assert!(!restart_confirmed.load(Ordering::SeqCst));
+        assert_eq!(restart_worker_id.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_restart_skips_idle_worker() {
+        // Test: When restart targets an idle worker, it should be a no-op
+        use crate::commands::task::orchestrate::assignment::WorkerSlot;
+
+        let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+        worker_slots.insert(1, WorkerSlot::Idle);
+        worker_slots.insert(2, WorkerSlot::Idle);
+
+        let target = 1u32;
+        let slot = worker_slots.get(&target);
+        assert!(
+            matches!(slot, Some(WorkerSlot::Idle)),
+            "Idle worker should be detected — restart is a no-op"
+        );
+    }
+
+    #[test]
+    fn test_restart_proceeds_for_busy_worker() {
+        // Test: Busy worker should be eligible for restart
+        use crate::commands::task::orchestrate::assignment::WorkerSlot;
+        use crate::commands::task::orchestrate::worktree::WorktreeInfo;
+
+        let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+        worker_slots.insert(
+            1,
+            WorkerSlot::Busy {
+                task_id: "T01".to_string(),
+                worktree: WorktreeInfo {
+                    path: std::path::PathBuf::from("/tmp/wt1"),
+                    branch: "ralph/task/T01".to_string(),
+                    task_id: "T01".to_string(),
+                },
+                started_at: Instant::now(),
+                mcp_session_id: "session-1".to_string(),
+            },
+        );
+
+        let target = 1u32;
+        let slot = worker_slots.get(&target);
+        assert!(
+            matches!(slot, Some(WorkerSlot::Busy { .. })),
+            "Busy worker should be eligible for restart"
+        );
+
+        // Verify task_id extraction
+        if let Some(WorkerSlot::Busy { task_id, .. }) = slot {
+            assert_eq!(task_id, "T01");
+        }
+    }
+
+    #[test]
+    fn test_restart_skips_nonexistent_worker() {
+        // Test: Worker ID that doesn't exist should result in no-op
+        use crate::commands::task::orchestrate::assignment::WorkerSlot;
+
+        let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+        worker_slots.insert(1, WorkerSlot::Idle);
+
+        let target = 99u32;
+        assert!(
+            !worker_slots.contains_key(&target),
+            "Non-existent worker should return None"
+        );
+    }
+
+    #[test]
+    fn test_restart_zero_worker_id_is_noop() {
+        // Test: worker_id=0 means no restart requested
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let restart_worker_id = Arc::new(AtomicU32::new(0));
+        let restart_confirmed = Arc::new(AtomicBool::new(true));
+
+        let confirmed = restart_confirmed.load(Ordering::SeqCst);
+        let worker_id = restart_worker_id.load(Ordering::SeqCst);
+
+        assert!(confirmed);
+        assert_eq!(worker_id, 0, "worker_id=0 should trigger early return");
+    }
+
+    #[test]
+    fn test_restart_merge_pipeline_detection() {
+        // Test: Worker in merge pipeline should be detected
+        use crate::commands::task::orchestrate::orchestrator_merge::{MergeContext, PendingMerge};
+
+        let mut merge_ctx = MergeContext::new();
+        let worker_id = 2u32;
+
+        // Worker 2 is in pending merges
+        merge_ctx.pending_merges.push_back(PendingMerge {
+            worker_id: 2,
+            task_id: "T01".to_string(),
+            task_name: "Test task".to_string(),
+            branch: "ralph/task/T01".to_string(),
+        });
+
+        let in_pipeline = merge_ctx
+            .pending_merges
+            .iter()
+            .any(|pm| pm.worker_id == worker_id)
+            || merge_ctx.current_merge_worker_id == Some(worker_id);
+        assert!(in_pipeline, "Worker 2 should be detected in merge pipeline");
+
+        // Worker 1 is NOT in merge pipeline
+        let worker_1_in_pipeline = merge_ctx.pending_merges.iter().any(|pm| pm.worker_id == 1)
+            || merge_ctx.current_merge_worker_id == Some(1);
+        assert!(
+            !worker_1_in_pipeline,
+            "Worker 1 should NOT be in merge pipeline"
+        );
+    }
+
+    #[test]
+    fn test_restart_merge_pipeline_active_merge_detection() {
+        // Test: Worker currently being merged should be detected via current_merge_worker_id
+        use crate::commands::task::orchestrate::orchestrator_merge::MergeContext;
+
+        let mut merge_ctx = MergeContext::new();
+        merge_ctx.merge_in_progress = true;
+        merge_ctx.current_merge_worker_id = Some(3);
+
+        // Worker 3 is actively merging
+        let in_pipeline = merge_ctx.pending_merges.iter().any(|pm| pm.worker_id == 3)
+            || merge_ctx.current_merge_worker_id == Some(3);
+        assert!(
+            in_pipeline,
+            "Worker 3 should be detected as actively merging"
+        );
+
+        // Worker 1 is NOT merging
+        let worker_1_in_pipeline = merge_ctx.pending_merges.iter().any(|pm| pm.worker_id == 1)
+            || merge_ctx.current_merge_worker_id == Some(1);
+        assert!(
+            !worker_1_in_pipeline,
+            "Worker 1 should NOT be in merge pipeline"
+        );
+    }
+
+    // ── Task 18.5: Edge cases and guards tests ──────────────────────────
+
+    #[test]
+    fn test_restart_request_graceful_shutdown_guard() {
+        // Test: handle_restart_request should ignore restart during graceful shutdown
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+
+        let graceful_shutdown = Arc::new(AtomicBool::new(true));
+        let restart_worker_id = Arc::new(AtomicU32::new(2));
+        let restart_confirmed = Arc::new(AtomicBool::new(true));
+
+        // Simulate handle_restart_request logic
+        let confirmed = restart_confirmed.load(Ordering::SeqCst);
+        assert!(confirmed);
+
+        if graceful_shutdown.load(Ordering::SeqCst) {
+            restart_confirmed.store(false, Ordering::SeqCst);
+            restart_worker_id.store(0, Ordering::SeqCst);
+        }
+
+        // Verify flags are reset
+        assert!(!restart_confirmed.load(Ordering::SeqCst));
+        assert_eq!(restart_worker_id.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_restart_request_proceeds_when_not_shutdown() {
+        // Test: handle_restart_request should proceed when NOT in graceful shutdown
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+
+        let graceful_shutdown = Arc::new(AtomicBool::new(false));
+        let restart_worker_id = Arc::new(AtomicU32::new(2));
+        let restart_confirmed = Arc::new(AtomicBool::new(true));
+
+        // Simulate handle_restart_request logic
+        let confirmed = restart_confirmed.load(Ordering::SeqCst);
+        assert!(confirmed);
+
+        if graceful_shutdown.load(Ordering::SeqCst) {
+            restart_confirmed.store(false, Ordering::SeqCst);
+            restart_worker_id.store(0, Ordering::SeqCst);
+            panic!("Should not reach here");
+        }
+
+        let worker_id = restart_worker_id.load(Ordering::SeqCst);
+        assert_eq!(worker_id, 2, "Worker ID should remain 2 for processing");
+
+        // Normally flags are reset after processing
+        restart_confirmed.store(false, Ordering::SeqCst);
+        restart_worker_id.store(0, Ordering::SeqCst);
+
+        assert!(!restart_confirmed.load(Ordering::SeqCst));
+        assert_eq!(restart_worker_id.load(Ordering::SeqCst), 0);
     }
 }

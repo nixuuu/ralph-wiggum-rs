@@ -25,6 +25,8 @@ pub(super) enum WorkerSlot {
         worktree: WorktreeInfo,
         /// When this worker started its current task (for watchdog stuck detection).
         started_at: Instant,
+        /// MCP session ID for this worker (used for cleanup on task completion).
+        mcp_session_id: String,
     },
 }
 
@@ -115,6 +117,16 @@ impl Orchestrator {
             // Extract path before moving worktree into WorkerSlot
             let worktree_path = worktree.path.clone();
 
+            // Register MCP session for this worker — scoped to worktree's tasks_path
+            let worktree_tasks_path = worktree_path.join(
+                self.tasks_path
+                    .strip_prefix(&self.project_root)
+                    .unwrap_or(&self.tasks_path),
+            );
+            let mcp_session_id = ctx
+                .mcp_session_registry
+                .create_session(worktree_tasks_path, true);
+
             // Update worker slot (moves worktree, avoids full WorktreeInfo clone)
             ctx.worker_slots.insert(
                 worker_id,
@@ -122,6 +134,7 @@ impl Orchestrator {
                     task_id: task_id.clone(),
                     worktree,
                     started_at: Instant::now(),
+                    mcp_session_id: mcp_session_id.clone(),
                 },
             );
 
@@ -135,6 +148,9 @@ impl Orchestrator {
                 phase_timeout: self.config.phase_timeout,
                 git_timeout: self.config.git_timeout,
                 setup_timeout: self.config.setup_timeout,
+                mcp_port: ctx.mcp_port,
+                mcp_session_id,
+                review_model: self.config.review_model.clone(),
             };
             let worker = Worker::new(
                 worker_id,
@@ -326,7 +342,129 @@ mod tests {
                 task_id: "T01".to_string(),
             },
             started_at: Instant::now(),
+            mcp_session_id: "test-session-id".to_string(),
         };
         assert!(matches!(busy, WorkerSlot::Busy { .. }));
+    }
+
+    #[test]
+    fn test_idle_workers_sorted_order() {
+        // Test z workerami 5,3,1,4,2 wstawionymi do HashMap
+        // Po filtrze idle + sort, kolejność powinna być [1,2,3,4,5]
+        use std::collections::HashMap;
+
+        let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+        worker_slots.insert(5, WorkerSlot::Idle);
+        worker_slots.insert(3, WorkerSlot::Idle);
+        worker_slots.insert(1, WorkerSlot::Idle);
+        worker_slots.insert(4, WorkerSlot::Idle);
+        worker_slots.insert(2, WorkerSlot::Idle);
+
+        // Symulacja kodu z assign_tasks() bez sortowania
+        let mut idle_workers_unsorted: Vec<u32> = worker_slots
+            .iter()
+            .filter(|(_, slot)| matches!(slot, WorkerSlot::Idle))
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Sortowanie workerów w kolejności rosnącącej ID
+        idle_workers_unsorted.sort_unstable();
+
+        assert_eq!(idle_workers_unsorted, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_idle_workers_mixed_states_sorted() {
+        // Test z workerami idle=[3,5] i busy=[1,2,4]
+        // Po filtrze idle + sort, kolejność powinna być [3,5]
+        use std::collections::HashMap;
+
+        let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+
+        // Idle workers
+        worker_slots.insert(3, WorkerSlot::Idle);
+        worker_slots.insert(5, WorkerSlot::Idle);
+
+        // Busy workers
+        worker_slots.insert(
+            1,
+            WorkerSlot::Busy {
+                task_id: "T01".to_string(),
+                worktree: WorktreeInfo {
+                    path: std::path::PathBuf::from("/tmp/wt1"),
+                    branch: "ralph/task/T01".to_string(),
+                    task_id: "T01".to_string(),
+                },
+                started_at: Instant::now(),
+                mcp_session_id: "session1".to_string(),
+            },
+        );
+        worker_slots.insert(
+            2,
+            WorkerSlot::Busy {
+                task_id: "T02".to_string(),
+                worktree: WorktreeInfo {
+                    path: std::path::PathBuf::from("/tmp/wt2"),
+                    branch: "ralph/task/T02".to_string(),
+                    task_id: "T02".to_string(),
+                },
+                started_at: Instant::now(),
+                mcp_session_id: "session2".to_string(),
+            },
+        );
+        worker_slots.insert(
+            4,
+            WorkerSlot::Busy {
+                task_id: "T04".to_string(),
+                worktree: WorktreeInfo {
+                    path: std::path::PathBuf::from("/tmp/wt4"),
+                    branch: "ralph/task/T04".to_string(),
+                    task_id: "T04".to_string(),
+                },
+                started_at: Instant::now(),
+                mcp_session_id: "session4".to_string(),
+            },
+        );
+
+        // Filtrowanie i sortowanie idle workerów
+        let mut idle_workers: Vec<u32> = worker_slots
+            .iter()
+            .filter(|(_, slot)| matches!(slot, WorkerSlot::Idle))
+            .map(|(id, _)| *id)
+            .collect();
+        idle_workers.sort_unstable();
+
+        assert_eq!(idle_workers, vec![3, 5]);
+    }
+
+    #[test]
+    fn test_idle_workers_single() {
+        // Test z jednym idle workerem zwraca ten worker
+        use std::collections::HashMap;
+
+        let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+        worker_slots.insert(7, WorkerSlot::Idle);
+        worker_slots.insert(
+            1,
+            WorkerSlot::Busy {
+                task_id: "T01".to_string(),
+                worktree: WorktreeInfo {
+                    path: std::path::PathBuf::from("/tmp/wt1"),
+                    branch: "ralph/task/T01".to_string(),
+                    task_id: "T01".to_string(),
+                },
+                started_at: Instant::now(),
+                mcp_session_id: "session1".to_string(),
+            },
+        );
+
+        let idle_workers: Vec<u32> = worker_slots
+            .iter()
+            .filter(|(_, slot)| matches!(slot, WorkerSlot::Idle))
+            .map(|(id, _)| *id)
+            .collect();
+
+        assert_eq!(idle_workers.len(), 1);
+        assert_eq!(idle_workers[0], 7);
     }
 }

@@ -32,15 +32,18 @@ src/
 │   │   └── ui.rs            # StatusTerminal (ratatui inline)
 │   ├── task/                # Task management commands
 │   │   ├── mod.rs           # Task command routing
-│   │   ├── args.rs          # TaskCommands enum, PrdArgs, AddArgs, etc.
+│   │   ├── args.rs          # TaskCommands enum, PrdArgs, AddArgs, PlanArgs, etc.
 │   │   ├── add.rs           # task add
-│   │   ├── clean.rs         # task clean (new)
+│   │   ├── clean.rs         # task clean
 │   │   ├── continue_cmd.rs  # task continue
 │   │   ├── edit.rs          # task edit
+│   │   ├── generate_deps_cmd.rs # task generate-deps
 │   │   ├── input.rs         # Input resolution (file/prompt/stdin)
+│   │   ├── migrate.rs       # task migrate
+│   │   ├── plan.rs          # task plan
 │   │   ├── prd.rs           # task prd
 │   │   ├── status.rs        # task status
-│   │   └── orchestrate/     # Orchestration subsystem (new)
+│   │   └── orchestrate/     # Orchestration subsystem
 │   │       ├── mod.rs       # Orchestrator core loop
 │   │       ├── ai.rs        # AI-assisted deps/conflict resolution
 │   │       ├── dry_run.rs   # DAG visualization
@@ -54,21 +57,46 @@ src/
 │   │       ├── worker.rs    # Worker 3-phase executor
 │   │       ├── worker_runner.rs # Adapted ClaudeRunner
 │   │       └── worktree.rs  # Git worktree manager
+│   ├── mcp/                 # HTTP MCP server
+│   │   ├── mod.rs           # MCP module entry point
+│   │   ├── ask_user.rs      # AskUserQuestion handler
+│   │   ├── handlers.rs      # HTTP request handlers
+│   │   ├── middleware.rs    # Origin validation middleware
+│   │   ├── protocol.rs      # MCP protocol types
+│   │   ├── router.rs        # Axum router setup
+│   │   ├── server.rs        # Server lifecycle
+│   │   ├── session.rs       # Session management
+│   │   ├── state.rs         # Shared server state
+│   │   ├── tools.rs         # Task MCP tools (list, get, update, add, edit, etc.)
+│   │   └── tui/             # TUI components for user interaction
+│   │       ├── mod.rs
+│   │       ├── choice_select.rs  # Single-choice picker
+│   │       ├── confirm_select.rs # Confirmation dialog
+│   │       ├── multi_select.rs   # Multi-choice picker
+│   │       └── text_input.rs     # Text input field
 │   └── update/              # Self-update command
 ├── shared/
 │   ├── mod.rs
 │   ├── banner.rs            # ASCII art banner
-│   ├── dag.rs               # DAG algorithms (new)
+│   ├── dag.rs               # DAG algorithms
 │   ├── error.rs             # RalphError enum
 │   ├── file_config.rs       # .ralph.toml config
 │   ├── icons.rs             # Nerd Font / ASCII icons
 │   ├── markdown.rs          # Terminal markdown rendering
-│   └── progress.rs          # PROGRESS.md parser
+│   ├── mcp.rs               # MCP shared utilities
+│   ├── progress.rs          # PROGRESS.md parser (legacy)
+│   └── tasks/               # Task tree data structures
+│       ├── mod.rs           # TaskTree, TaskNode exports
+│       ├── helpers.rs       # Utility functions
+│       ├── node.rs          # TaskNode struct
+│       ├── tree_ops.rs      # Tree operations (add, delete, move)
+│       └── validation.rs    # Tree validation (cycles, deps)
 ├── templates/               # Embedded prompt templates
 │   ├── mod.rs               # include_str! constants
 │   ├── prd_prompt.md
 │   ├── add_prompt.md
 │   ├── edit_prompt.md
+│   ├── plan_prompt.md
 │   ├── changenotes.md
 │   ├── implementation_issues.md
 │   ├── open_questions.md
@@ -100,9 +128,16 @@ cargo clippy --all-targets -- -D warnings
 
 # Run
 cargo run -- --prompt "your prompt"
+cargo run -- task prd --file PRD.md
+cargo run -- task plan --prompt "Plan task execution"
+cargo run -- task add --prompt "Add new feature"
+cargo run -- task edit --prompt "Update task 2.3"
 cargo run -- task continue
 cargo run -- task status
+cargo run -- task generate-deps
 cargo run -- task orchestrate --workers 3
 cargo run -- task orchestrate --dry-run
 cargo run -- task clean
+cargo run -- task migrate
+cargo run -- update
 ```

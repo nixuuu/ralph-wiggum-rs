@@ -192,6 +192,11 @@ pub enum ClaudeEvent {
     },
 
     /// System message from Claude CLI (e.g., init with session info)
+    /// User message (replayed via --replay-user-messages).
+    /// Contains tool_result blocks with ask_user answers.
+    #[serde(rename = "user")]
+    User { message: AssistantMessage },
+
     #[serde(rename = "system")]
     System {
         #[serde(default)]
@@ -236,8 +241,6 @@ pub enum ContentBlock {
     ToolUse {
         name: String,
         #[serde(default)]
-        #[allow(dead_code)]
-        // Serde field: deserialized from Claude API but not currently used in ralph-wiggum
         id: Option<String>,
         #[serde(default)]
         input: serde_json::Value,
@@ -246,12 +249,8 @@ pub enum ContentBlock {
     #[serde(rename = "tool_result")]
     ToolResult {
         #[serde(default)]
-        #[allow(dead_code)]
-        // Serde field: deserialized from Claude API but not currently used in ralph-wiggum
         tool_use_id: Option<String>,
         #[serde(default)]
-        #[allow(dead_code)]
-        // Serde field: deserialized from Claude API but not currently used in ralph-wiggum
         content: serde_json::Value,
     },
 
@@ -290,7 +289,11 @@ pub struct ClaudeRunner {
     continue_conversation: bool,
     model: Option<String>,
     output_dir: Option<PathBuf>,
+    /// When set, restricts Claude to this allowlist of tools (--allowedTools flag).
     allowed_tools: Option<String>,
+    /// When set, explicitly blocks these tools regardless of allowed_tools (--disallowedTools flag).
+    /// Takes precedence over allowed_tools to ensure certain tools are never available.
+    disallowed_tools: Option<String>,
     mcp_config: Option<serde_json::Value>,
     phase_timeout: Option<std::time::Duration>,
 }
@@ -305,6 +308,7 @@ impl ClaudeRunner {
             model: None,
             output_dir: None,
             allowed_tools: None,
+            disallowed_tools: None,
             mcp_config: None,
             phase_timeout: None,
         }
@@ -319,6 +323,7 @@ impl ClaudeRunner {
             model: None,
             output_dir: None,
             allowed_tools: None,
+            disallowed_tools: None,
             mcp_config: None,
             phase_timeout: None,
         }
@@ -333,6 +338,7 @@ impl ClaudeRunner {
             model,
             output_dir,
             allowed_tools: None,
+            disallowed_tools: None,
             mcp_config: None,
             phase_timeout: None,
         }
@@ -341,6 +347,12 @@ impl ClaudeRunner {
     /// Builder: restrict available tools (passed as --allowedTools to Claude CLI).
     pub fn with_allowed_tools(mut self, tools: String) -> Self {
         self.allowed_tools = Some(tools);
+        self
+    }
+
+    /// Builder: explicitly block specific tools (passed as --disallowedTools to Claude CLI).
+    pub fn with_disallowed_tools(mut self, tools: String) -> Self {
+        self.disallowed_tools = Some(tools);
         self
     }
 
@@ -417,6 +429,7 @@ impl ClaudeRunner {
         cmd.arg("--input-format").arg("stream-json");
         cmd.arg("--verbose");
         cmd.arg("--dangerously-skip-permissions");
+        cmd.arg("--replay-user-messages");
 
         if let Some(ref model) = self.model {
             cmd.arg("--model").arg(model);
@@ -427,10 +440,13 @@ impl ClaudeRunner {
         if let Some(ref tools) = self.allowed_tools {
             cmd.arg("--allowedTools").arg(tools);
         }
+        if let Some(ref tools) = self.disallowed_tools {
+            cmd.arg("--disallowedTools").arg(tools);
+        }
         if let Some(ref mcp_config) = self.mcp_config {
             let config_json =
                 serde_json::to_string(mcp_config).unwrap_or_else(|_| "{}".to_string());
-            cmd.arg("--mcp-config").arg(config_json);
+            cmd.arg("--mcp-config").arg(&config_json);
         }
 
         cmd.stdin(Stdio::piped());
@@ -708,8 +724,14 @@ impl ClaudeRunner {
         let (mut child, mut reader) = self.spawn_process().await?;
         let child_pid = child.id();
 
-        let (last_text, outcome, sub_agent_results_count) =
-            Self::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, self.phase_timeout).await?;
+        let (last_text, outcome, sub_agent_results_count) = Self::read_output(
+            &mut reader,
+            &shutdown,
+            &mut on_event,
+            &mut on_idle,
+            self.phase_timeout,
+        )
+        .await?;
 
         match outcome {
             ReadOutcome::Shutdown => {
@@ -795,6 +817,50 @@ mod tests {
         } else {
             panic!("Expected System event");
         }
+    }
+
+    #[test]
+    fn test_claude_event_parse_user() {
+        let json = r#"{"type":"user","session_id":"abc-123","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01ABC","content":"Answer"}]}}"#;
+        let event: ClaudeEvent = serde_json::from_str(json).unwrap();
+        if let ClaudeEvent::User { message } = event {
+            assert_eq!(message.role, "user");
+            assert_eq!(message.content.len(), 1);
+            assert!(matches!(
+                &message.content[0],
+                ContentBlock::ToolResult { .. }
+            ));
+        } else {
+            panic!("Expected User event");
+        }
+    }
+
+    #[test]
+    fn test_claude_event_parse_user_with_text_and_tool_result() {
+        // User events can contain both Text blocks (prompt) and ToolResult blocks
+        let json = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"User prompt"},{"type":"tool_result","tool_use_id":"toolu_01","content":"Answer"}]}}"#;
+        let event: ClaudeEvent = serde_json::from_str(json).unwrap();
+        if let ClaudeEvent::User { message } = event {
+            assert_eq!(message.content.len(), 2);
+            assert!(matches!(&message.content[0], ContentBlock::Text { .. }));
+            assert!(matches!(
+                &message.content[1],
+                ContentBlock::ToolResult { .. }
+            ));
+        } else {
+            panic!("Expected User event");
+        }
+    }
+
+    #[test]
+    fn test_build_command_has_replay_user_messages() {
+        let runner = ClaudeRunner::oneshot("test".into(), None, None);
+        let cmd = runner.build_command();
+        let debug_str = format!("{:?}", cmd);
+        assert!(
+            debug_str.contains("--replay-user-messages"),
+            "Command should contain --replay-user-messages flag"
+        );
     }
 
     #[test]
@@ -1074,7 +1140,8 @@ mod tests {
         };
 
         let result =
-            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None).await;
+            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None)
+                .await;
 
         assert!(result.is_ok(), "read_output should succeed");
         let (text, outcome, sub_agent_count) = result.unwrap();
@@ -1125,7 +1192,8 @@ mod tests {
         });
 
         let result =
-            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None).await;
+            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None)
+                .await;
 
         assert!(result.is_ok(), "read_output should succeed even on timeout");
         let (_text, outcome, sub_agent_count) = result.unwrap();
@@ -1179,7 +1247,8 @@ mod tests {
         let mut on_idle = || {};
 
         let result =
-            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None).await;
+            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None)
+                .await;
 
         assert!(result.is_ok(), "read_output should succeed");
         let (_text, outcome, sub_agent_count) = result.unwrap();
@@ -1292,7 +1361,8 @@ mod tests {
         let mut on_idle = || {};
 
         let result =
-            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None).await;
+            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None)
+                .await;
 
         assert!(result.is_ok(), "read_output should succeed");
         let (_text, outcome, _count) = result.unwrap();
@@ -1345,7 +1415,8 @@ mod tests {
         let mut on_idle = || {};
 
         let result =
-            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None).await;
+            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None)
+                .await;
 
         assert!(result.is_ok(), "read_output should succeed");
         let (_text, outcome, _count) = result.unwrap();
@@ -1395,6 +1466,43 @@ mod tests {
             &["success", "error", "turn_limit"],
             "MAIN_RESULT_SUBTYPES should match protocol specification"
         );
+    }
+
+    #[test]
+    fn test_build_command_with_disallowed_tools() {
+        let runner = ClaudeRunner::oneshot("test".into(), None, None)
+            .with_disallowed_tools("AskUserQuestion".to_string());
+        let cmd = runner.build_command();
+
+        // Convert Command to debug string to check args
+        let debug_str = format!("{:?}", cmd);
+        assert!(
+            debug_str.contains("--disallowedTools"),
+            "Command should contain --disallowedTools flag"
+        );
+        assert!(
+            debug_str.contains("AskUserQuestion"),
+            "Command should contain AskUserQuestion as disallowed tool"
+        );
+    }
+
+    #[test]
+    fn test_build_command_without_disallowed_tools() {
+        let runner = ClaudeRunner::oneshot("test".into(), None, None);
+        let cmd = runner.build_command();
+
+        let debug_str = format!("{:?}", cmd);
+        assert!(
+            !debug_str.contains("--disallowedTools"),
+            "Command should NOT contain --disallowedTools when not set"
+        );
+    }
+
+    #[test]
+    fn test_with_disallowed_tools_builder() {
+        let runner = ClaudeRunner::new("prompt".into(), "system".into())
+            .with_disallowed_tools("Tool1,Tool2".to_string());
+        assert_eq!(runner.disallowed_tools, Some("Tool1,Tool2".to_string()));
     }
 
     #[test]
@@ -1530,14 +1638,9 @@ mod tests {
         let mut on_event = |_: &ClaudeEvent| {};
         let mut on_idle = || {};
 
-        let result = ClaudeRunner::read_output(
-            &mut reader,
-            &shutdown,
-            &mut on_event,
-            &mut on_idle,
-            None,
-        )
-        .await;
+        let result =
+            ClaudeRunner::read_output(&mut reader, &shutdown, &mut on_event, &mut on_idle, None)
+                .await;
 
         assert!(result.is_ok());
         let (_text, outcome, _count) = result.unwrap();

@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::shared::file_config::FileConfig;
@@ -22,6 +22,15 @@ pub(super) struct InputFlags {
     /// Flag indicating that all tasks have completed.
     /// When set, orchestrator enters idle state waiting for user quit confirmation.
     pub(super) completed: Arc<AtomicBool>,
+    /// Worker ID to restart (0=none, >0=worker ID).
+    /// Set by input thread when user requests worker restart.
+    pub(super) restart_worker_id: Arc<AtomicU32>,
+    /// Confirmation flag for worker restart operation.
+    /// Set by input thread, cleared by orchestrator after processing.
+    pub(super) restart_confirmed: Arc<AtomicBool>,
+    /// List of currently active (non-idle) worker IDs, updated by dashboard on each render.
+    /// Used by input thread for focus navigation (Tab cycles only through active workers).
+    pub(super) active_worker_ids: Arc<Mutex<Vec<u32>>>,
 }
 
 // ── Resolved config ─────────────────────────────────────────────────────
@@ -45,6 +54,9 @@ pub struct ResolvedConfig {
     pub task_filter: Option<Vec<String>>,
     /// Model to use for merge conflict resolution (fallback: "opus")
     pub conflict_resolution_model: String,
+    /// Model to use for code review phase (review+fix). Defaults to "opus".
+    /// Used in worker's review phase instead of task's implementation model.
+    pub review_model: String,
     /// How often (seconds) the watchdog checks for panicked/stuck workers.
     pub watchdog_interval_secs: u32,
     /// Per-phase timeout for worker Claude processes. None = no timeout.
@@ -87,6 +99,13 @@ impl ResolvedConfig {
         let conflict_resolution_model =
             crate::shared::tasks::resolve_model_alias(&conflict_resolution_model);
 
+        let review_model = cli
+            .review_model
+            .clone()
+            .or_else(|| orch_cfg.review_model.clone())
+            .unwrap_or_else(|| "opus".to_string());
+        let review_model = crate::shared::tasks::resolve_model_alias(&review_model);
+
         let phase_timeout_minutes = orch_cfg.phase_timeout_minutes;
         let phase_timeout = if phase_timeout_minutes == 0 {
             None
@@ -117,6 +136,7 @@ impl ResolvedConfig {
             timeout,
             task_filter,
             conflict_resolution_model,
+            review_model,
             watchdog_interval_secs: orch_cfg.watchdog_interval_secs,
             phase_timeout,
             git_timeout,
@@ -172,6 +192,7 @@ mod tests {
             timeout: None,
             tasks: None,
             conflict_model: None,
+            review_model: None,
         }
     }
 
@@ -426,5 +447,142 @@ merge_timeout_minutes = 0
         let config = ResolvedConfig::from_args(&cli_args, &file_config);
 
         assert_eq!(config.merge_timeout, None);
+    }
+
+    // --- Review model tests ---
+
+    #[test]
+    fn test_review_model_cli_override() {
+        let cli_args = crate::commands::task::args::OrchestrateArgs {
+            review_model: Some("claude-opus-4-6".to_string()),
+            ..default_orchestrate_args()
+        };
+
+        let file_config = FileConfig::default();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+
+        assert_eq!(config.review_model, "claude-opus-4-6");
+    }
+
+    #[test]
+    fn test_review_model_config_fallback() {
+        let cli_args = default_orchestrate_args();
+
+        let toml_content = r#"
+[task.orchestrate]
+review_model = "sonnet"
+"#;
+        let file_config: FileConfig = toml::from_str(toml_content).unwrap();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+
+        // Config file value should be resolved to full ID
+        assert_eq!(config.review_model, "claude-sonnet-4-5-20250929");
+    }
+
+    #[test]
+    fn test_review_model_hardcoded_fallback() {
+        let cli_args = default_orchestrate_args();
+
+        let file_config = FileConfig::default();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+
+        // Default "opus" should be resolved to full ID
+        assert_eq!(config.review_model, "claude-opus-4-6");
+    }
+
+    #[test]
+    fn test_review_model_cli_alias_resolution() {
+        let cli_args = crate::commands::task::args::OrchestrateArgs {
+            review_model: Some("sonnet".to_string()),
+            ..default_orchestrate_args()
+        };
+
+        let file_config = FileConfig::default();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+
+        assert_eq!(config.review_model, "claude-sonnet-4-5-20250929");
+    }
+
+    #[test]
+    fn test_review_model_config_alias_resolution() {
+        let cli_args = default_orchestrate_args();
+
+        let toml_content = r#"
+[task.orchestrate]
+review_model = "haiku"
+"#;
+        let file_config: FileConfig = toml::from_str(toml_content).unwrap();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+
+        assert_eq!(config.review_model, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn test_review_model_default_opus_alias_resolution() {
+        let cli_args = default_orchestrate_args();
+
+        let file_config = FileConfig::default();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+
+        // Default "opus" should be resolved to full ID
+        assert_eq!(config.review_model, "claude-opus-4-6");
+    }
+
+    #[test]
+    fn test_review_model_full_id_passthrough() {
+        let cli_args = crate::commands::task::args::OrchestrateArgs {
+            review_model: Some("claude-opus-4-6".to_string()),
+            ..default_orchestrate_args()
+        };
+
+        let file_config = FileConfig::default();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+
+        // Full model ID should pass through unchanged
+        assert_eq!(config.review_model, "claude-opus-4-6");
+    }
+
+    #[test]
+    fn test_review_model_cli_overrides_config() {
+        let cli_args = crate::commands::task::args::OrchestrateArgs {
+            review_model: Some("sonnet".to_string()),
+            ..default_orchestrate_args()
+        };
+
+        let toml_content = r#"
+[task.orchestrate]
+review_model = "haiku"
+"#;
+        let file_config: FileConfig = toml::from_str(toml_content).unwrap();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+
+        // CLI flag should take precedence over config file (sonnet not haiku)
+        assert_eq!(config.review_model, "claude-sonnet-4-5-20250929");
+    }
+
+    /// Test backward compatibility: old .ralph.toml files without review_model field.
+    /// Should fall back to hardcoded default "opus" → "claude-opus-4-6".
+    #[test]
+    fn test_review_model_backward_compatibility_missing_field() {
+        let cli_args = default_orchestrate_args();
+
+        // Old .ralph.toml without review_model field
+        let toml_content = r#"
+[task.orchestrate]
+workers = 2
+max_retries = 3
+"#;
+        let file_config: FileConfig = toml::from_str(toml_content).unwrap();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+
+        // Should use hardcoded default "opus" → "claude-opus-4-6"
+        assert_eq!(config.review_model, "claude-opus-4-6");
+    }
+
+    /// Test that OrchestrateConfig correctly defaults review_model to None.
+    #[test]
+    fn test_orchestrate_config_review_model_none_by_default() {
+        let orch_cfg = crate::shared::file_config::OrchestrateConfig::default();
+        assert!(orch_cfg.review_model.is_none());
     }
 }

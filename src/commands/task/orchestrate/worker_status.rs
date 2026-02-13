@@ -32,6 +32,11 @@ impl WorkerStatus {
             output_tokens: 0,
         }
     }
+
+    /// Check if this worker is in Idle state.
+    pub fn is_idle(&self) -> bool {
+        self.state == WorkerState::Idle
+    }
 }
 
 /// Worker state for display purposes.

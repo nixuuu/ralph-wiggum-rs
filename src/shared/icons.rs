@@ -77,3 +77,12 @@ pub fn status_speed(nerd_font: bool) -> &'static str {
         "^"
     }
 }
+
+/// Answer/reply icon for user responses (ask_user tool results)
+pub fn answer_icon(nerd_font: bool) -> &'static str {
+    if nerd_font {
+        "\u{f112}" //  nf-fa-reply
+    } else {
+        "<-"
+    }
+}

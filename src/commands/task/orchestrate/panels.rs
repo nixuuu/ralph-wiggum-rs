@@ -27,8 +27,11 @@ pub fn render_panel_widget<'a>(
     // Build footer line
     let footer = build_footer_line(ws);
 
+    // Check if worker is in grace period (idle but recently)
+    let in_grace_period = ws.state == WorkerState::Idle && panel.idle_since.is_some();
+
     // Build border style
-    let (border_type, border_style) = build_border_style(is_focused, &ws.state);
+    let (border_type, border_style) = build_border_style(is_focused, &ws.state, in_grace_period);
 
     // Construct block with title and footer
     let block = Block::default()
@@ -101,10 +104,17 @@ fn build_footer_line(ws: &WorkerStatus) -> String {
     )
 }
 
-/// Build the border style (type, border style) based on focus and state.
-fn build_border_style(is_focused: bool, state: &WorkerState) -> (BorderType, Style) {
+/// Build the border style (type, border style) based on focus, state, and grace period.
+fn build_border_style(
+    is_focused: bool,
+    state: &WorkerState,
+    in_grace_period: bool,
+) -> (BorderType, Style) {
     let (border_type, border_color) = if is_focused {
         (BorderType::Double, Color::Cyan)
+    } else if in_grace_period {
+        // Worker in grace period — use dimmed color
+        (BorderType::Rounded, Color::Gray)
     } else {
         (BorderType::Rounded, state_color(state))
     };
@@ -113,6 +123,11 @@ fn build_border_style(is_focused: bool, state: &WorkerState) -> (BorderType, Sty
         Style::default()
             .fg(border_color)
             .add_modifier(Modifier::BOLD)
+    } else if in_grace_period {
+        // Dimmed border for grace period
+        Style::default()
+            .fg(border_color)
+            .add_modifier(Modifier::DIM)
     } else {
         Style::default().fg(border_color)
     };
@@ -199,6 +214,8 @@ fn state_icon(state: &WorkerState) -> (&'static str, Color) {
 // ── Compact render ───────────────────────────────────────────────────
 
 /// Compact render for small terminals — single panel + tab bar.
+/// Only shows non-idle workers in the tab bar and auto-focuses the next active worker
+/// when the focused worker becomes idle. Shows a placeholder when all workers are idle.
 #[allow(clippy::too_many_arguments)]
 pub fn render_compact(
     frame: &mut ratatui::Frame<'_>,
@@ -222,15 +239,45 @@ pub fn render_compact(
     let panel_area = vertical[1];
     let bar_area = vertical[2];
 
-    // Tab bar
-    let tab_spans = build_tab_bar(worker_count, focused);
+    // Filter panels to only non-idle workers
+    let active_workers: Vec<u32> = (1..=worker_count)
+        .filter(|&id| {
+            panels
+                .get(&id)
+                .map(|p| p.status.state != WorkerState::Idle)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    // Tab bar — only show active workers
+    let tab_spans = build_tab_bar_filtered(&active_workers, focused);
     frame.render_widget(Line::from(tab_spans), tab_area);
 
-    // Show focused panel (or W1)
-    let show_id = focused.unwrap_or(1);
-    if let Some(panel) = panels.get(&show_id) {
-        let widget = render_panel_widget(panel, panel_area, true);
-        frame.render_widget(widget, panel_area);
+    // Determine which worker to show
+    let show_id = if active_workers.is_empty() {
+        // All workers idle — show placeholder
+        None
+    } else if let Some(fid) = focused {
+        // Auto-shift focus to first active worker if focused worker is idle
+        if active_workers.contains(&fid) {
+            Some(fid)
+        } else {
+            // Focused worker is idle, pick first active
+            active_workers.first().copied()
+        }
+    } else {
+        // No focus, pick first active
+        active_workers.first().copied()
+    };
+
+    if let Some(wid) = show_id {
+        if let Some(panel) = panels.get(&wid) {
+            let widget = render_panel_widget(panel, panel_area, true);
+            frame.render_widget(widget, panel_area);
+        }
+    } else {
+        // Render placeholder when all workers are idle
+        render_idle_placeholder(frame, panel_area);
     }
 
     // Compact status bar (1 line)
@@ -238,11 +285,19 @@ pub fn render_compact(
     frame.render_widget(compact_bar, bar_area);
 }
 
-/// Build tab bar spans for worker selection.
-fn build_tab_bar(worker_count: u32, focused: Option<u32>) -> Vec<Span<'static>> {
+/// Build tab bar spans for only the provided active workers.
+/// Used in compact mode to show only non-idle workers.
+fn build_tab_bar_filtered(active_workers: &[u32], focused: Option<u32>) -> Vec<Span<'static>> {
+    if active_workers.is_empty() {
+        return vec![Span::styled(
+            " All workers idle ",
+            Style::default().fg(Color::DarkGray),
+        )];
+    }
+
     let mut tab_spans = Vec::new();
-    for i in 1..=worker_count {
-        let is_active = focused == Some(i) || (focused.is_none() && i == 1);
+    for &wid in active_workers {
+        let is_active = focused == Some(wid);
         let style = if is_active {
             Style::default()
                 .fg(Color::Black)
@@ -251,10 +306,43 @@ fn build_tab_bar(worker_count: u32, focused: Option<u32>) -> Vec<Span<'static>> 
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        tab_spans.push(Span::styled(format!(" W{i} "), style));
+        tab_spans.push(Span::styled(format!(" W{wid} "), style));
         tab_spans.push(Span::raw(" "));
     }
     tab_spans
+}
+
+/// Render placeholder panel when all workers are idle.
+fn render_idle_placeholder(frame: &mut ratatui::Frame<'_>, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            " Orchestrator ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let message = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "○ All workers idle",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Waiting for tasks to be assigned...",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let widget = Paragraph::new(message)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center);
+
+    frame.render_widget(widget, area);
 }
 
 /// Build compact status bar (1 line) for small terminals.
@@ -441,6 +529,9 @@ mod tests {
             quit_pending: false,
             total_cost: 1.2345,
             elapsed: Duration::from_secs(120),
+            restart_pending: None,
+            active_workers: 0,
+            idle_workers: 3,
         };
 
         let line = build_compact_bar(&status, false);
@@ -486,6 +577,7 @@ mod tests {
             status,
             output,
             scroll_offset: 1000, // Deliberately excessive offset
+            idle_since: None,
         };
 
         // Inner height = 10, minus 1 for status line = 9 output rows
@@ -518,15 +610,99 @@ mod tests {
     }
 
     #[test]
-    fn test_build_tab_bar() {
-        let spans = build_tab_bar(3, Some(2));
+    fn test_build_tab_bar_filtered_with_active_workers() {
+        let active_workers = vec![1, 3, 4];
+        let spans = build_tab_bar_filtered(&active_workers, Some(3));
 
-        // Should have 3 workers * 2 spans each = 6 spans
+        // Should have 3 workers * 2 spans each (worker + space) = 6 spans
         assert_eq!(spans.len(), 6);
 
-        // W2 should be highlighted (focused)
-        let w2_text = spans[2].content.as_ref();
-        assert!(w2_text.contains("W2"));
-        assert_eq!(spans[2].style.bg, Some(Color::Cyan));
+        // W3 should be highlighted (focused)
+        let w3_span = &spans[2]; // Third worker tab (index 2)
+        assert!(w3_span.content.contains("W3"));
+        assert_eq!(w3_span.style.bg, Some(Color::Cyan));
+
+        // W1 and W4 should not be highlighted
+        assert_eq!(spans[0].style.bg, None); // W1
+        assert_eq!(spans[4].style.bg, None); // W4
+    }
+
+    #[test]
+    fn test_build_tab_bar_filtered_all_idle() {
+        let active_workers = vec![];
+        let spans = build_tab_bar_filtered(&active_workers, None);
+
+        // Should show single "All workers idle" span
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].content.contains("All workers idle"));
+        assert_eq!(spans[0].style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn test_build_tab_bar_filtered_single_worker() {
+        let active_workers = vec![2];
+        let spans = build_tab_bar_filtered(&active_workers, Some(2));
+
+        // Should have 1 worker * 2 spans = 2 spans
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].content.contains("W2"));
+        assert_eq!(spans[0].style.bg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn test_build_tab_bar_filtered_no_focus() {
+        let active_workers = vec![1, 2];
+        let spans = build_tab_bar_filtered(&active_workers, None);
+
+        // Should have 2 workers * 2 spans each = 4 spans
+        assert_eq!(spans.len(), 4);
+
+        // None should be highlighted
+        assert_eq!(spans[0].style.bg, None);
+        assert_eq!(spans[2].style.bg, None);
+    }
+
+    // ── Grace period rendering tests ─────────────────────────────────────
+
+    #[test]
+    fn test_build_border_style_grace_period() {
+        // Test that grace period workers get dimmed border
+        let (border_type, border_style) = build_border_style(false, &WorkerState::Idle, true);
+
+        assert_eq!(border_type, BorderType::Rounded);
+        assert_eq!(border_style.fg, Some(Color::Gray));
+        assert!(border_style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn test_build_border_style_normal_idle() {
+        // Test that normal idle workers (not in grace period) get DarkGray border
+        let (border_type, border_style) = build_border_style(false, &WorkerState::Idle, false);
+
+        assert_eq!(border_type, BorderType::Rounded);
+        assert_eq!(border_style.fg, Some(Color::DarkGray));
+        assert!(!border_style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn test_build_border_style_focused_overrides_grace_period() {
+        // Test that focus takes precedence over grace period styling
+        let (border_type, border_style) = build_border_style(true, &WorkerState::Idle, true);
+
+        assert_eq!(border_type, BorderType::Double);
+        assert_eq!(border_style.fg, Some(Color::Cyan));
+        assert!(border_style.add_modifier.contains(Modifier::BOLD));
+        assert!(!border_style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn test_build_border_style_active_worker_not_in_grace() {
+        // Test that active (non-idle) workers ignore grace period flag
+        let (border_type, border_style) =
+            build_border_style(false, &WorkerState::Implementing, false);
+
+        assert_eq!(border_type, BorderType::Rounded);
+        assert_eq!(border_style.fg, Some(Color::Cyan));
+        assert!(!border_style.add_modifier.contains(Modifier::DIM));
     }
 }

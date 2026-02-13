@@ -140,8 +140,12 @@ impl Orchestrator {
                     WorkerPhase::Verify => WorkerState::Verifying,
                 };
                 let (cost, input, output) = ctx.tui.mux_output.worker_cost(*worker_id);
-                // Preserve model from task assignment
-                let model = self.resolve_model(task_id, ctx.tasks_file);
+                // Use review_model for ReviewFix phase, task's model for others
+                let model = if matches!(phase, WorkerPhase::ReviewFix) {
+                    Some(self.config.review_model.clone())
+                } else {
+                    self.resolve_model(task_id, ctx.tasks_file)
+                };
                 let ws = WorkerStatus {
                     state: new_state,
                     task_id: Some(task_id.clone()),
@@ -276,6 +280,47 @@ impl Orchestrator {
                                 self.config.phase_timeout,
                             );
                         }
+                    } else {
+                        // Silent drop guard: worker slot not Busy or task not in lookup.
+                        // Without this else branch, the worker would hang forever.
+                        let reason = if !matches!(
+                            ctx.worker_slots.get(worker_id),
+                            Some(WorkerSlot::Busy { .. })
+                        ) {
+                            "worker slot not Busy"
+                        } else {
+                            "task not in lookup"
+                        };
+                        let msg = ctx.tui.mux_output.format_worker_line(
+                            *worker_id,
+                            &format!("Cannot merge {task_id}: {reason} — releasing worker"),
+                        );
+                        ctx.tui.dashboard.push_log_line(&msg);
+
+                        ctx.scheduler.mark_blocked(task_id);
+                        if let Some(mt) =
+                            self.update_tasks_file(task_id, TaskStatus::Blocked, ctx.tui)
+                        {
+                            ctx.progress_mtime = Some(mt);
+                            let mut updated = (*ctx.cached_tasks_file).clone();
+                            let _ = updated.update_status(task_id, TaskStatus::Blocked);
+                            ctx.cached_tasks_file = Arc::new(updated);
+                        }
+
+                        ctx.tui.task_summaries.push(TaskSummaryEntry {
+                            task_id: task_id.clone(),
+                            status: "Blocked".to_string(),
+                            cost_usd: *cost_usd,
+                            duration,
+                            retries: ctx.scheduler.retry_count(task_id),
+                        });
+
+                        // Free the worker slot, clear MCP session, and reset TUI
+                        ctx.release_worker(*worker_id);
+                        ctx.tui
+                            .dashboard
+                            .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
+                        ctx.tui.mux_output.clear_worker(*worker_id);
                     }
                 } else if *success {
                     // --no-merge mode
@@ -301,9 +346,8 @@ impl Orchestrator {
                         retries: ctx.scheduler.retry_count(task_id),
                     });
 
-                    // Free the worker slot and clear model
-                    ctx.worker_slots.insert(*worker_id, WorkerSlot::Idle);
-                    ctx.last_heartbeat.remove(worker_id);
+                    // Free the worker slot, clear MCP session, and reset TUI
+                    ctx.release_worker(*worker_id);
                     ctx.tui
                         .dashboard
                         .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
@@ -342,9 +386,8 @@ impl Orchestrator {
                         });
                     }
 
-                    // Free the worker slot and clear model
-                    ctx.worker_slots.insert(*worker_id, WorkerSlot::Idle);
-                    ctx.last_heartbeat.remove(worker_id);
+                    // Free the worker slot, clear MCP session, and reset TUI
+                    ctx.release_worker(*worker_id);
                     ctx.tui
                         .dashboard
                         .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
@@ -491,9 +534,8 @@ impl Orchestrator {
                     });
                 }
 
-                // Free the worker slot and clear model
-                ctx.worker_slots.insert(*worker_id, WorkerSlot::Idle);
-                ctx.last_heartbeat.remove(worker_id);
+                // Free the worker slot, clear MCP session, and reset TUI
+                ctx.release_worker(*worker_id);
                 ctx.tui
                     .dashboard
                     .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
@@ -501,6 +543,7 @@ impl Orchestrator {
 
                 // Start next queued merge if any
                 ctx.merge_ctx.merge_in_progress = false;
+                ctx.merge_ctx.current_merge_worker_id = None;
                 if let Some(next) = ctx.merge_ctx.pending_merges.pop_front() {
                     Self::spawn_merge_task(
                         &mut ctx.merge_ctx,
@@ -560,7 +603,10 @@ impl Orchestrator {
                 ctx.tui.dashboard.push_worker_output(*worker_id, lines);
             }
 
-            WorkerEventKind::Heartbeat { worker_id, phase: _ } => {
+            WorkerEventKind::Heartbeat {
+                worker_id,
+                phase: _,
+            } => {
                 // Update last heartbeat timestamp for this worker
                 ctx.last_heartbeat
                     .insert(*worker_id, std::time::Instant::now());
@@ -575,8 +621,8 @@ impl Orchestrator {
 mod tests {
     use super::{
         conflict_resolution_end_separator, conflict_resolution_start_separator,
-        phase_end_separator, phase_start_separator, task_start_separator,
-        verify_end_separator, verify_start_separator,
+        phase_end_separator, phase_start_separator, task_start_separator, verify_end_separator,
+        verify_start_separator,
     };
     use crate::commands::task::orchestrate::events::WorkerPhase;
     use crate::shared::progress::TaskStatus;

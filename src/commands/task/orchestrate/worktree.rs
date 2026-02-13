@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 use std::path::{Path, PathBuf};
 
-use tokio::process::Command;
-
+use crate::commands::task::orchestrate::git_helpers::git_command;
 use crate::shared::error::{RalphError, Result};
 
 /// Information about a created git worktree.
@@ -106,7 +105,7 @@ impl WorktreeManager {
 
         if branch_exists {
             // Branch exists from a previous run — attach it to a new worktree
-            let output = Command::new("git")
+            let output = git_command()
                 .args(["worktree", "add"])
                 .arg(&path)
                 .arg(&branch)
@@ -125,7 +124,7 @@ impl WorktreeManager {
             }
         } else {
             // Fresh start — create new branch from HEAD
-            let output = Command::new("git")
+            let output = git_command()
                 .args(["worktree", "add", "-b", &branch])
                 .arg(&path)
                 .arg("HEAD")
@@ -153,7 +152,7 @@ impl WorktreeManager {
 
     /// Check if a git branch exists.
     async fn branch_exists(&self, branch: &str) -> bool {
-        Command::new("git")
+        git_command()
             .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
             .current_dir(&self.project_root)
             .output()
@@ -163,7 +162,7 @@ impl WorktreeManager {
 
     /// Check if a worktree directory is on the expected branch.
     async fn worktree_has_branch(&self, worktree_path: &Path, expected_branch: &str) -> bool {
-        Command::new("git")
+        git_command()
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(worktree_path)
             .output()
@@ -181,7 +180,7 @@ impl WorktreeManager {
 
     /// Remove a git worktree directory.
     pub async fn remove_worktree(&self, path: &Path) -> Result<()> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["worktree", "remove", "--force"])
             .arg(path)
             .current_dir(&self.project_root)
@@ -200,7 +199,7 @@ impl WorktreeManager {
 
     /// Delete a git branch.
     pub async fn remove_branch(&self, branch: &str) -> Result<()> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["branch", "-D", branch])
             .current_dir(&self.project_root)
             .output()
@@ -236,7 +235,7 @@ impl WorktreeManager {
     /// List orphaned ralph worktrees — worktrees matching our prefix
     /// that exist in `git worktree list` output.
     pub async fn list_orphaned(&self) -> Result<Vec<OrphanedWorktree>> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["worktree", "list", "--porcelain"])
             .current_dir(&self.project_root)
             .output()
@@ -278,7 +277,7 @@ impl WorktreeManager {
     /// Returns error with actionable hint if path cannot be removed.
     async fn force_cleanup_path(&self, path: &Path) -> Result<()> {
         // Try git worktree remove (best-effort — git may not track this path)
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["worktree", "remove", "--force"])
             .arg(path)
             .current_dir(&self.project_root)
@@ -313,7 +312,7 @@ impl WorktreeManager {
 
     /// Prune stale worktree entries from git's tracking.
     pub async fn prune(&self) -> Result<()> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["worktree", "prune"])
             .current_dir(&self.project_root)
             .output()

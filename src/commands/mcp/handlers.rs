@@ -6,6 +6,14 @@ use crate::shared::progress::TaskStatus;
 use crate::shared::tasks::{TaskNode, TasksFile};
 
 /// Load → modify → validate → save helper.
+///
+/// Standardowy wzorzec transakcyjny dla operacji na tasks.yml:
+/// 1. Ładuje TasksFile z dysku
+/// 2. Wykonuje modyfikację przez closure
+/// 3. Waliduje integralność (deps, cycles, status)
+/// 4. Zapisuje z powrotem na dysk
+///
+/// Automatycznie rollbackuje zmiany jeśli walidacja lub zapis się nie powiedzie.
 fn with_tasks_file<F>(tasks_path: &Path, f: F) -> Result<Value, String>
 where
     F: FnOnce(&mut TasksFile) -> Result<Value, String>,
@@ -356,6 +364,57 @@ pub fn tasks_set_default_model(tasks_path: &Path, params: &Value) -> Result<Valu
     })
 }
 
+/// ask_user: Ask the user a question and capture their response.
+///
+/// # Arguments
+///
+/// * `params` - JSON object with:
+///   - `question` (required): Question text to display to the user
+///   - `options` (optional): Array of string options for user to choose from
+///
+/// # Returns
+///
+/// Placeholder JSON response with question echo and status.
+///
+/// # Note
+///
+/// This is a placeholder implementation. In Phase 5, this will be replaced
+/// with SSE stream handler for real-time user interaction through TUI widgets.
+pub fn ask_user(params: &Value) -> Result<Value, String> {
+    let question = params
+        .get("question")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing required param: question")?;
+
+    // Validate options if provided (must be array)
+    let options = if let Some(opts) = params.get("options") {
+        if !opts.is_array() {
+            return Err("Parameter 'options' must be an array of strings".into());
+        }
+        opts.as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let multi_select = params
+        .get("multiSelect")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Placeholder response - Phase 5 will implement SSE stream
+    Ok(json!({
+        "question": question,
+        "options": options,
+        "multiSelect": multi_select,
+        "status": "not_implemented",
+        "note": "SSE stream implementation pending in Phase 5"
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +596,59 @@ tasks:
         let tf = TasksFile::load(&path).unwrap();
         let node = tf.find_node("2").unwrap();
         assert_eq!(node.deps, vec!["1.1", "1.2"]);
+    }
+
+    #[test]
+    fn test_ask_user_with_question_only() {
+        let params = json!({"question": "What is your name?"});
+        let result = ask_user(&params).unwrap();
+        assert_eq!(result["question"], "What is your name?");
+        assert_eq!(result["options"].as_array().unwrap().len(), 0);
+        assert_eq!(result["status"], "not_implemented");
+    }
+
+    #[test]
+    fn test_ask_user_with_options() {
+        let params = json!({
+            "question": "Choose one",
+            "options": ["A", "B", "C"]
+        });
+        let result = ask_user(&params).unwrap();
+        assert_eq!(result["question"], "Choose one");
+        let opts = result["options"].as_array().unwrap();
+        assert_eq!(opts.len(), 3);
+        assert_eq!(opts[0], "A");
+    }
+
+    #[test]
+    fn test_ask_user_missing_question() {
+        let params = json!({"options": ["A", "B"]});
+        let err = ask_user(&params).unwrap_err();
+        assert!(err.contains("Missing required param: question"));
+    }
+
+    #[test]
+    fn test_ask_user_options_not_array() {
+        let params = json!({
+            "question": "Test",
+            "options": "invalid_string"
+        });
+        let err = ask_user(&params).unwrap_err();
+        assert!(err.contains("must be an array"));
+    }
+
+    #[test]
+    fn test_ask_user_options_with_non_string_values() {
+        let params = json!({
+            "question": "Test",
+            "options": ["A", 123, null, "B"]
+        });
+        let result = ask_user(&params).unwrap();
+        // Should filter out non-string values
+        let opts = result["options"].as_array().unwrap();
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0], "A");
+        assert_eq!(opts[1], "B");
     }
 
     #[test]

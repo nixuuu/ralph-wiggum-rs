@@ -28,4 +28,10 @@ pub struct OrchestratorStatus {
     pub quit_pending: bool,
     /// Whether all tasks have completed (orchestrator in idle state)
     pub completed: bool,
+    /// Worker restart pending confirmation: (worker_id, task_id)
+    pub restart_pending: Option<(u32, String)>,
+    /// Number of active (busy) workers
+    pub active_workers: u32,
+    /// Number of idle workers
+    pub idle_workers: u32,
 }

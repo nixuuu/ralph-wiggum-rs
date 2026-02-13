@@ -34,13 +34,17 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
         .or_else(|| file_config.task.default_model.clone());
 
     // Run Claude with streaming output (all tools — needs Write for file generation)
+    // No tasks_path: PRD generates the tasks file, so no MCP server needed yet
     run_once(RunOnceOptions {
         prompt,
         model,
         output_dir: Some(output_dir.clone()),
         use_nerd_font: file_config.ui.nerd_font,
         allowed_tools: None,
+        disallowed_tools: None,
         mcp_config: None,
+        question_rx: None,
+        tasks_path: None,
     })
     .await?;
 

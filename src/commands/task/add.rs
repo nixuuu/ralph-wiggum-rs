@@ -2,10 +2,9 @@ use crossterm::style::Stylize;
 
 use super::args::AddArgs;
 use super::input::resolve_input;
-use crate::commands::run::{READONLY_TOOLS, RunOnceOptions, run_once};
+use crate::commands::run::{DANGEROUS_TOOLS, RunOnceOptions, run_once};
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
-use crate::shared::mcp::build_mcp_config;
 use crate::shared::tasks::TasksFile;
 use crate::templates;
 
@@ -33,15 +32,18 @@ pub async fn execute(args: AddArgs, file_config: &FileConfig) -> Result<()> {
         .model
         .or_else(|| file_config.task.default_model.clone());
 
-    // Run Claude with readonly built-in tools + MCP server for task mutations
-    let mcp_config = build_mcp_config(tasks_path);
+    // Run Claude with readonly built-in tools + MCP server for task mutations.
+    // Block AskUserQuestion to enforce MCP ask_user flow.
     run_once(RunOnceOptions {
         prompt,
         model,
         output_dir: None,
         use_nerd_font: file_config.ui.nerd_font,
-        allowed_tools: Some(READONLY_TOOLS.to_string()),
-        mcp_config: Some(mcp_config),
+        allowed_tools: None,
+        disallowed_tools: Some(format!("{},AskUserQuestion", DANGEROUS_TOOLS)),
+        mcp_config: None,
+        question_rx: None,
+        tasks_path: Some(tasks_path.clone()),
     })
     .await?;
 
@@ -62,7 +64,8 @@ pub async fn execute(args: AddArgs, file_config: &FileConfig) -> Result<()> {
     );
 
     // Update state file if it exists
-    update_state_file(file_config, &after_summary)?;
+    let state_path = std::path::PathBuf::from(".claude/ralph-loop.local.md");
+    super::state_helper::update_state_file(&state_path, &after_summary)?;
 
     if let Some(current) = after.current_task() {
         println!(
@@ -75,35 +78,5 @@ pub async fn execute(args: AddArgs, file_config: &FileConfig) -> Result<()> {
     }
     println!("{}", "━".repeat(60).dark_grey());
 
-    Ok(())
-}
-
-/// Update the state file (if it exists) with new min_iterations from updated task count.
-fn update_state_file(
-    file_config: &FileConfig,
-    summary: &crate::shared::progress::ProgressSummary,
-) -> Result<()> {
-    use crate::commands::run::state::StateManager;
-    use std::path::PathBuf;
-
-    let state_path = PathBuf::from(".claude/ralph-loop.local.md");
-    if !state_path.exists() {
-        return Ok(());
-    }
-
-    let (mut state, prompt) = StateManager::load_from_file(&state_path)?;
-    let remaining = summary.remaining() as u32;
-    let new_min = state.iteration.saturating_add(remaining);
-    state.min_iterations = new_min.max(state.iteration);
-    state.max_iterations = new_min + 5;
-
-    // Save state back
-    let yaml = serde_yaml::to_string(&state)?;
-    let content = format!("---\n{}---\n\n{}", yaml, prompt);
-    std::fs::write(&state_path, content).map_err(|e| {
-        crate::shared::error::RalphError::StateFile(format!("Failed to write state file: {}", e))
-    })?;
-
-    let _ = file_config; // used for consistency
     Ok(())
 }

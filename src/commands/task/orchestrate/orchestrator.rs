@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32};
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
+use crate::commands::mcp::server::McpServer;
+use crate::commands::mcp::state::QuestionEnvelope;
 use crate::commands::task::orchestrate::dashboard::Dashboard;
 use crate::commands::task::orchestrate::dashboard_input::{
     DashboardInputParams, DashboardInputThread,
@@ -170,6 +173,22 @@ impl Orchestrator {
         let reload_requested = Arc::new(AtomicBool::new(false));
         let quit_state = Arc::new(AtomicU8::new(0)); // 0=running, 1=quit_pending
         let completed = Arc::new(AtomicBool::new(false));
+        let restart_worker_id = Arc::new(AtomicU32::new(0)); // 0=none, >0=worker ID
+        let restart_confirmed = Arc::new(AtomicBool::new(false));
+
+        // 9b. Start shared MCP server for all workers
+        // Dummy channel — workers don't use ask_user, but McpServer requires it
+        let (question_tx, _question_rx) = mpsc::channel::<QuestionEnvelope>(1);
+        let mcp_cancel_token = CancellationToken::new();
+        let mcp_server = McpServer::new(
+            self.tasks_path.clone(),
+            question_tx,
+            mcp_cancel_token.clone(),
+        );
+        let (mcp_port, mcp_server_handle) = mcp_server.start().await?;
+        // Session registry is shared with the server's AppState — we access
+        // it through the server to register per-worker sessions later.
+        let mcp_session_registry = mcp_server.session_registry();
 
         // 10. Initialize TUI (fullscreen dashboard)
         let mut tui = TuiContext {
@@ -179,25 +198,33 @@ impl Orchestrator {
             task_summaries: Vec::new(),
         };
 
-        // 11. Spawn input thread (dedicated OS thread for crossterm)
+        // 11. Initialize active_worker_ids (Task 21.3)
+        // Start with all workers considered active (will be updated by dashboard on render)
+        let active_worker_ids = Arc::new(std::sync::Mutex::new(
+            (1..=worker_count).collect::<Vec<u32>>(),
+        ));
+
+        // 12. Spawn input thread (dedicated OS thread for crossterm)
         let mut input_thread = DashboardInputThread::spawn(DashboardInputParams {
             shutdown: Arc::clone(&shutdown),
             graceful_shutdown: Arc::clone(&graceful_shutdown),
             resize_flag: Arc::clone(&resize_flag),
             focused_worker: Arc::clone(&focused_worker),
-            worker_count,
             scroll_delta: Arc::clone(&scroll_delta),
             render_notify: Arc::clone(&render_notify),
             show_task_preview: Arc::clone(&show_task_preview),
             reload_requested: Arc::clone(&reload_requested),
             quit_state: Arc::clone(&quit_state),
+            restart_worker_id: Arc::clone(&restart_worker_id),
+            restart_confirmed: Arc::clone(&restart_confirmed),
+            active_worker_ids: Arc::clone(&active_worker_ids),
         });
 
-        // 12. Build task lookup for merge
+        // 13. Build task lookup for merge
         let task_lookup: HashMap<&str, &crate::shared::progress::ProgressTask> =
             progress.tasks.iter().map(|t| (t.id.as_str(), t)).collect();
 
-        // 13. Build run loop context
+        // 14. Build run loop context
         let flags = InputFlags {
             shutdown,
             graceful_shutdown,
@@ -209,6 +236,9 @@ impl Orchestrator {
             reload_requested,
             quit_state: Arc::clone(&quit_state),
             completed,
+            restart_worker_id,
+            restart_confirmed,
+            active_worker_ids,
         };
 
         // Cache TasksFile in Arc for efficient sharing with dashboard preview
@@ -234,6 +264,10 @@ impl Orchestrator {
             flags,
             cached_tasks_file: Arc::clone(&cached_tasks_file),
             last_heartbeat: HashMap::new(),
+            mcp_port,
+            mcp_session_registry,
+            mcp_cancel_token: mcp_cancel_token.clone(),
+            mcp_server_handle,
         };
 
         // 14. Run the main orchestration loop
@@ -296,6 +330,7 @@ mod tests {
             timeout: None,
             task_filter: None,
             conflict_resolution_model: "opus".to_string(),
+            review_model: "opus".to_string(),
             watchdog_interval_secs: 10,
             phase_timeout: None,
             git_timeout: std::time::Duration::from_secs(120),
@@ -359,6 +394,7 @@ mod tests {
             timeout: None,
             task_filter: None,
             conflict_resolution_model: "opus".to_string(),
+            review_model: "opus".to_string(),
             watchdog_interval_secs: 10,
             phase_timeout: None,
             git_timeout: std::time::Duration::from_secs(120),
@@ -1058,6 +1094,7 @@ mod tests {
             timeout: None,
             task_filter: None,
             conflict_resolution_model: "opus".to_string(),
+            review_model: "opus".to_string(),
             watchdog_interval_secs: 30,
             phase_timeout: None,
             git_timeout: std::time::Duration::from_secs(120),
@@ -1065,12 +1102,8 @@ mod tests {
             merge_timeout: None,
         };
 
-        let orch = Orchestrator::new(
-            config,
-            &file_config,
-            PathBuf::from("/tmp/test"),
-        )
-        .expect("Failed to create orchestrator");
+        let orch = Orchestrator::new(config, &file_config, PathBuf::from("/tmp/test"))
+            .expect("Failed to create orchestrator");
 
         // Verify custom system prompt is prepended to base template
         assert!(
@@ -1102,8 +1135,8 @@ mod tests {
 
         let file_config = FileConfig {
             prompt: PromptConfig {
-                prefix: Some("   ".to_string()), // Only whitespace
-                suffix: Some("".to_string()),     // Empty string
+                prefix: Some("   ".to_string()),    // Only whitespace
+                suffix: Some("".to_string()),       // Empty string
                 system: Some("  \n  ".to_string()), // Only whitespace
             },
             ui: UiConfig::default(),
@@ -1123,6 +1156,7 @@ mod tests {
             timeout: None,
             task_filter: None,
             conflict_resolution_model: "opus".to_string(),
+            review_model: "opus".to_string(),
             watchdog_interval_secs: 30,
             phase_timeout: None,
             git_timeout: std::time::Duration::from_secs(120),
@@ -1130,22 +1164,15 @@ mod tests {
             merge_timeout: None,
         };
 
-        let orch = Orchestrator::new(
-            config,
-            &file_config,
-            PathBuf::from("/tmp/test"),
-        )
-        .expect("Failed to create orchestrator");
+        let orch = Orchestrator::new(config, &file_config, PathBuf::from("/tmp/test"))
+            .expect("Failed to create orchestrator");
 
         // Verify empty/whitespace strings are filtered
         assert_eq!(
             orch.prompt_prefix, None,
             "Whitespace-only prefix should be filtered"
         );
-        assert_eq!(
-            orch.prompt_suffix, None,
-            "Empty suffix should be filtered"
-        );
+        assert_eq!(orch.prompt_suffix, None, "Empty suffix should be filtered");
         // System prompt should not have the whitespace prepended
         assert!(
             !orch.system_prompt.starts_with("  \n  "),
@@ -1181,6 +1208,7 @@ mod tests {
             timeout: None,
             task_filter: None,
             conflict_resolution_model: "opus".to_string(),
+            review_model: "opus".to_string(),
             watchdog_interval_secs: 30,
             phase_timeout: None,
             git_timeout: std::time::Duration::from_secs(120),
@@ -1188,12 +1216,8 @@ mod tests {
             merge_timeout: None,
         };
 
-        let orch = Orchestrator::new(
-            config,
-            &file_config,
-            PathBuf::from("/tmp/test"),
-        )
-        .expect("Failed to create orchestrator");
+        let orch = Orchestrator::new(config, &file_config, PathBuf::from("/tmp/test"))
+            .expect("Failed to create orchestrator");
 
         // Verify None values remain None
         assert_eq!(orch.prompt_prefix, None, "Prefix should be None");
@@ -1206,6 +1230,63 @@ mod tests {
         assert!(
             !orch.system_prompt.starts_with("\n\n"),
             "Should not have leading newlines from empty custom system"
+        );
+    }
+
+    #[test]
+    fn test_mcp_session_registration_per_worker() {
+        // Verify the pattern used in assignment.rs: each worker gets its own session
+        // with a worktree-scoped tasks_path
+        use crate::commands::mcp::session::SessionRegistry;
+        use std::sync::Arc;
+
+        let registry = Arc::new(SessionRegistry::new());
+
+        // Simulate 3 workers with different worktree paths
+        let worker_sessions: Vec<(u32, String)> = (1..=3)
+            .map(|id| {
+                let worktree_tasks =
+                    PathBuf::from(format!("/tmp/project-ralph-task-T0{id}/.ralph/tasks.yml"));
+                let session_id = registry.create_session(worktree_tasks, true);
+                (id, session_id)
+            })
+            .collect();
+
+        // Verify all sessions are registered
+        assert_eq!(registry.session_count(), 3);
+
+        // Verify each session has correct tasks_path
+        for (id, session_id) in &worker_sessions {
+            let state = registry
+                .validate_session(session_id)
+                .expect("Session should exist");
+            let expected_path =
+                PathBuf::from(format!("/tmp/project-ralph-task-T0{id}/.ralph/tasks.yml"));
+            assert_eq!(state.tasks_path, expected_path);
+        }
+
+        // Verify sessions have unique IDs
+        let ids: Vec<&String> = worker_sessions.iter().map(|(_, id)| id).collect();
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+    }
+
+    #[test]
+    fn test_mcp_worktree_tasks_path_resolution() {
+        // Verify the strip_prefix + join pattern from assignment.rs
+        let project_root = PathBuf::from("/home/user/project");
+        let tasks_path = project_root.join(".ralph/tasks.yml");
+        let worktree_path = PathBuf::from("/home/user/project-ralph-task-T01");
+
+        // This is the pattern used in assignment.rs to compute worktree-scoped tasks_path
+        let relative = tasks_path
+            .strip_prefix(&project_root)
+            .unwrap_or(&tasks_path);
+        let worktree_tasks_path = worktree_path.join(relative);
+
+        assert_eq!(
+            worktree_tasks_path,
+            PathBuf::from("/home/user/project-ralph-task-T01/.ralph/tasks.yml")
         );
     }
 }

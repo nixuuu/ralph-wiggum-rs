@@ -2,7 +2,9 @@ use std::path::Path;
 use tokio::sync::mpsc;
 
 use crate::commands::task::orchestrate::events::{WorkerEvent, WorkerEventKind};
-use crate::commands::task::orchestrate::orchestrator_events::{verify_start_separator, verify_end_separator};
+use crate::commands::task::orchestrate::orchestrator_events::{
+    verify_end_separator, verify_start_separator,
+};
 use crate::shared::file_config::VerifyCommand;
 
 /// Result of running verification commands.
@@ -486,16 +488,14 @@ mod tests {
         let cwd = std::env::temp_dir();
 
         // Run in background so we can receive events
-        let handle = tokio::spawn(async move {
-            run_verify_commands(&commands, &cwd, &tx, 1).await
-        });
+        let handle =
+            tokio::spawn(async move { run_verify_commands(&commands, &cwd, &tx, 1).await });
 
         // Collect events
         let mut events = Vec::new();
-        while let Ok(event) = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx.recv()
-        ).await {
+        while let Ok(event) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+        {
             if let Some(e) = event {
                 events.push(e);
             } else {

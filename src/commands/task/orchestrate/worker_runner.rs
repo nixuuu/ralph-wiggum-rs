@@ -20,13 +20,17 @@ pub struct PhaseResult {
 
 /// Configuration for WorkerRunner.
 ///
-/// Groups prompt customization, UI settings, and timeout configuration.
+/// Groups prompt customization, UI settings, timeout configuration, and MCP server connection.
 #[derive(Clone, Default)]
 pub struct WorkerRunnerConfig {
     pub use_nerd_font: bool,
     pub prompt_prefix: Option<String>,
     pub prompt_suffix: Option<String>,
     pub phase_timeout: Option<std::time::Duration>,
+    /// Port of the shared MCP HTTP server.
+    pub mcp_port: u16,
+    /// Session ID for this worker's MCP session.
+    pub mcp_session_id: String,
 }
 
 /// Adapted ClaudeRunner for orchestration workers.
@@ -60,9 +64,18 @@ impl WorkerRunner {
         }
     }
 
-    /// Build MCP config JSON from the tasks file path.
+    /// Build MCP config JSON using the shared HTTP MCP server.
+    ///
+    /// If MCP port is configured (non-zero), returns config pointing to the shared
+    /// HTTP server with worker-specific session ID. Otherwise returns None.
     fn mcp_config(&self) -> Option<serde_json::Value> {
-        None
+        if self.config.mcp_port == 0 || self.config.mcp_session_id.is_empty() {
+            return None;
+        }
+        Some(crate::shared::mcp::build_mcp_config_with_session(
+            self.config.mcp_port,
+            &self.config.mcp_session_id,
+        ))
     }
 
     /// Run a single phase of the worker lifecycle.
@@ -191,7 +204,8 @@ impl WorkerRunner {
         };
 
         // Extract accumulated metrics
-        let (cost_usd, input_tokens, output_tokens) = phase_cost.lock()
+        let (cost_usd, input_tokens, output_tokens) = phase_cost
+            .lock()
             .map(|m| (m.0, m.1, m.2))
             .unwrap_or((0.0, 0, 0));
 
@@ -341,11 +355,11 @@ impl WorkerRunner {
 
         // Simple check: look for pass/fail indicators in output
         let passed = result.output.contains("VERIFICATION PASSED")
-            || (!result.output.contains("VERIFICATION FAILED") && !result.output.contains("FAILED"));
+            || (!result.output.contains("VERIFICATION FAILED")
+                && !result.output.contains("FAILED"));
 
         Ok(passed)
     }
-
 
     async fn send_event(&self, kind: WorkerEventKind) {
         let event = WorkerEvent::new(kind);
@@ -445,6 +459,8 @@ mod tests {
             prompt_prefix: Some("PREFIX TEXT".to_string()),
             prompt_suffix: Some("SUFFIX TEXT".to_string()),
             phase_timeout: None,
+            mcp_port: 0,
+            mcp_session_id: String::new(),
         };
         let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
         assert_eq!(runner.config.prompt_prefix, Some("PREFIX TEXT".to_string()));
@@ -712,5 +728,113 @@ mod tests {
         assert!(prompt.contains("cargo test"));
         assert!(!prompt.contains("VERIFY: "));
         assert!(!prompt.contains("END VERIFY"));
+    }
+
+    #[test]
+    fn test_mcp_config_with_valid_port_and_session() {
+        let (tx, _rx) = mpsc::channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig {
+            use_nerd_font: false,
+            prompt_prefix: None,
+            prompt_suffix: None,
+            phase_timeout: None,
+            mcp_port: 8080,
+            mcp_session_id: "worker-123".to_string(),
+        };
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+
+        let mcp_config = runner.mcp_config();
+        assert!(mcp_config.is_some());
+
+        let config_json = mcp_config.unwrap();
+        let servers = config_json.get("mcpServers").unwrap();
+        let ralph = servers.get("ralph-tasks").unwrap();
+
+        assert_eq!(ralph.get("type").unwrap().as_str(), Some("http"));
+        let url = ralph.get("url").unwrap().as_str().unwrap();
+        assert_eq!(url, "http://127.0.0.1:8080/mcp?session=worker-123");
+    }
+
+    #[test]
+    fn test_mcp_config_with_zero_port() {
+        let (tx, _rx) = mpsc::channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig {
+            use_nerd_font: false,
+            prompt_prefix: None,
+            prompt_suffix: None,
+            phase_timeout: None,
+            mcp_port: 0, // Invalid port
+            mcp_session_id: "worker-123".to_string(),
+        };
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+
+        let mcp_config = runner.mcp_config();
+        assert!(mcp_config.is_none(), "MCP config should be None for port=0");
+    }
+
+    #[test]
+    fn test_mcp_config_with_empty_session_id() {
+        let (tx, _rx) = mpsc::channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig {
+            use_nerd_font: false,
+            prompt_prefix: None,
+            prompt_suffix: None,
+            phase_timeout: None,
+            mcp_port: 8080,
+            mcp_session_id: String::new(), // Empty session ID
+        };
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+
+        let mcp_config = runner.mcp_config();
+        assert!(
+            mcp_config.is_none(),
+            "MCP config should be None for empty session_id"
+        );
+    }
+
+    #[test]
+    fn test_mcp_config_with_default_config() {
+        let (tx, _rx) = mpsc::channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig::default(); // port=0, session_id=""
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+
+        let mcp_config = runner.mcp_config();
+        assert!(
+            mcp_config.is_none(),
+            "MCP config should be None for default config"
+        );
+    }
+
+    #[test]
+    fn test_mcp_config_with_special_chars_in_session_id() {
+        let (tx, _rx) = mpsc::channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig {
+            use_nerd_font: false,
+            prompt_prefix: None,
+            prompt_suffix: None,
+            phase_timeout: None,
+            mcp_port: 9000,
+            mcp_session_id: "worker/123 & test".to_string(),
+        };
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+
+        let mcp_config = runner.mcp_config();
+        assert!(mcp_config.is_some());
+
+        let config_json = mcp_config.unwrap();
+        let url = config_json["mcpServers"]["ralph-tasks"]["url"]
+            .as_str()
+            .unwrap();
+
+        // URL should be properly encoded
+        assert_eq!(
+            url,
+            "http://127.0.0.1:9000/mcp?session=worker%2F123%20%26%20test"
+        );
     }
 }

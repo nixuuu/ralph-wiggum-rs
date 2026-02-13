@@ -83,6 +83,16 @@ impl TaskScheduler {
         self.blocked.insert(task_id.to_string());
     }
 
+    /// Re-queue a task without incrementing the retry counter.
+    ///
+    /// Used for manual worker restart: the task is moved from in-progress
+    /// back to the front of the ready queue so it gets picked up immediately
+    /// by the next idle worker.
+    pub fn requeue_without_retry(&mut self, task_id: &str) {
+        self.in_progress.remove(task_id);
+        self.ready_queue.push_front(task_id.to_string());
+    }
+
     /// Handle a task failure: increment retry count, re-queue or block.
     ///
     /// Returns `true` if the task was re-queued, `false` if blocked.
@@ -436,5 +446,84 @@ mod tests {
 
         // Verify T03 is in the ready queue
         assert_eq!(sched.next_ready_task(), Some("T03".to_string()));
+    }
+
+    #[test]
+    fn test_requeue_without_retry_moves_to_front() {
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec![]), ("T03", vec![])]);
+        let progress = make_progress(vec![
+            ("T01", "api", "First", TaskStatus::Todo),
+            ("T02", "api", "Second", TaskStatus::Todo),
+            ("T03", "api", "Third", TaskStatus::Todo),
+        ]);
+
+        let mut sched = TaskScheduler::new(dag, &progress, 3);
+
+        // Take all tasks
+        let t1 = sched.next_ready_task().unwrap();
+        let t2 = sched.next_ready_task().unwrap();
+        let t3 = sched.next_ready_task().unwrap();
+        sched.mark_started(&t1);
+        sched.mark_started(&t2);
+        sched.mark_started(&t3);
+
+        // Requeue T02 without retry
+        sched.requeue_without_retry("T02");
+
+        // T02 should be at the front of the ready queue
+        assert_eq!(sched.next_ready_task(), Some("T02".to_string()));
+
+        // Retry count should remain 0
+        assert_eq!(sched.retry_count("T02"), 0);
+
+        // T02 should no longer be in in_progress
+        assert!(!sched.in_progress_tasks().contains(&"T02".to_string()));
+    }
+
+    #[test]
+    fn test_requeue_without_retry_preserves_retry_count() {
+        let dag = make_dag(vec![("T01", vec![])]);
+        let progress = make_progress(vec![("T01", "api", "First", TaskStatus::Todo)]);
+
+        let mut sched = TaskScheduler::new(dag, &progress, 3);
+
+        // First attempt: fail once to bump retry count
+        let task = sched.next_ready_task().unwrap();
+        sched.mark_started(&task);
+        assert!(sched.mark_failed(&task)); // retry 1
+        assert_eq!(sched.retry_count("T01"), 1);
+
+        // Second attempt: start and requeue
+        let task = sched.next_ready_task().unwrap();
+        sched.mark_started(&task);
+        sched.requeue_without_retry("T01");
+
+        // Retry count should still be 1 (not incremented by requeue)
+        assert_eq!(sched.retry_count("T01"), 1);
+
+        // Task should be back at front of queue
+        assert_eq!(sched.next_ready_task(), Some("T01".to_string()));
+    }
+
+    #[test]
+    fn test_requeue_without_retry_front_ordering() {
+        // Verify task is pushed to FRONT, not back
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec![])]);
+        let progress = make_progress(vec![
+            ("T01", "api", "First", TaskStatus::Todo),
+            ("T02", "api", "Second", TaskStatus::Todo),
+        ]);
+
+        let mut sched = TaskScheduler::new(dag, &progress, 3);
+
+        // Take T01, leave T02 in queue
+        let _t1 = sched.next_ready_task().unwrap(); // T01
+        sched.mark_started("T01");
+
+        // Now T02 is still in ready queue. Requeue T01 — it should come BEFORE T02.
+        sched.requeue_without_retry("T01");
+
+        assert_eq!(sched.next_ready_task(), Some("T01".to_string()));
+        assert_eq!(sched.next_ready_task(), Some("T02".to_string()));
     }
 }

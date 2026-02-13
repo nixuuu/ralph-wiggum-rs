@@ -82,9 +82,7 @@ impl VerifyCommand {
     pub fn label(&self) -> &str {
         match self {
             VerifyCommand::Simple(s) => s,
-            VerifyCommand::Detailed {
-                name: Some(n), ..
-            } => n,
+            VerifyCommand::Detailed { name: Some(n), .. } => n,
             VerifyCommand::Detailed { command, .. } => command,
         }
     }
@@ -210,6 +208,9 @@ pub struct OrchestrateConfig {
     /// Default: 15 minutes. Set to 0 to disable merge timeout.
     #[serde(default = "default_merge_timeout")]
     pub merge_timeout_minutes: u32,
+    /// Claude model to use for code review (default: "opus")
+    #[serde(default)]
+    pub review_model: Option<String>,
 }
 
 impl Default for OrchestrateConfig {
@@ -227,6 +228,7 @@ impl Default for OrchestrateConfig {
             git_timeout_secs: default_git_timeout(),
             setup_timeout_secs: default_setup_timeout(),
             merge_timeout_minutes: default_merge_timeout(),
+            review_model: None,
         }
     }
 }
@@ -689,7 +691,11 @@ verify_commands = ["cargo test", "cargo clippy --all-targets -- -D warnings"]
             "cargo test"
         );
         assert!(config.task.orchestrate.verify_commands[0].name().is_none());
-        assert!(config.task.orchestrate.verify_commands[0].description().is_none());
+        assert!(
+            config.task.orchestrate.verify_commands[0]
+                .description()
+                .is_none()
+        );
         assert_eq!(
             config.task.orchestrate.verify_commands[1].command(),
             "cargo clippy --all-targets -- -D warnings"
@@ -754,7 +760,11 @@ verify_commands = [
             "cargo fmt --check"
         );
         assert!(config.task.orchestrate.verify_commands[0].name().is_none());
-        assert!(config.task.orchestrate.verify_commands[0].description().is_none());
+        assert!(
+            config.task.orchestrate.verify_commands[0]
+                .description()
+                .is_none()
+        );
         // Second is detailed
         assert_eq!(
             config.task.orchestrate.verify_commands[1].command(),
@@ -820,9 +830,11 @@ command = "cargo test"
             "cargo test"
         );
         assert!(config.task.orchestrate.verify_commands[0].name().is_none());
-        assert!(config.task.orchestrate.verify_commands[0]
-            .description()
-            .is_none());
+        assert!(
+            config.task.orchestrate.verify_commands[0]
+                .description()
+                .is_none()
+        );
     }
 
     #[test]
@@ -834,10 +846,7 @@ verify_commands = [""]
 "#;
         let config: FileConfig = toml::from_str(toml_content).unwrap();
         assert_eq!(config.task.orchestrate.verify_commands.len(), 1);
-        assert_eq!(
-            config.task.orchestrate.verify_commands[0].command(),
-            ""
-        );
+        assert_eq!(config.task.orchestrate.verify_commands[0].command(), "");
     }
 
     #[test]
@@ -849,14 +858,8 @@ verify_commands = ["   ", "\t\n"]
 "#;
         let config: FileConfig = toml::from_str(toml_content).unwrap();
         assert_eq!(config.task.orchestrate.verify_commands.len(), 2);
-        assert_eq!(
-            config.task.orchestrate.verify_commands[0].command(),
-            "   "
-        );
-        assert_eq!(
-            config.task.orchestrate.verify_commands[1].command(),
-            "\t\n"
-        );
+        assert_eq!(config.task.orchestrate.verify_commands[0].command(), "   ");
+        assert_eq!(config.task.orchestrate.verify_commands[1].command(), "\t\n");
     }
 
     #[test]
@@ -1125,5 +1128,58 @@ setup_timeout_secs = 600
 "#;
         let config: FileConfig = toml::from_str(toml_content).unwrap();
         assert_eq!(config.task.orchestrate.setup_timeout_secs, 600);
+    }
+
+    // --- Review model tests ---
+
+    #[test]
+    fn test_orchestrate_config_review_model() {
+        let toml_content = r#"
+[task.orchestrate]
+review_model = "opus"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            config.task.orchestrate.review_model.as_deref(),
+            Some("opus")
+        );
+    }
+
+    #[test]
+    fn test_orchestrate_config_review_model_default_none() {
+        let config = FileConfig::default();
+        assert!(config.task.orchestrate.review_model.is_none());
+    }
+
+    #[test]
+    fn test_orchestrate_config_with_all_models() {
+        let toml_content = r#"
+[task.orchestrate]
+workers = 4
+max_retries = 5
+worktree_prefix = "my-project"
+default_model = "claude-sonnet-4-5-20250929"
+conflict_resolution_model = "claude-opus-4-6"
+review_model = "claude-opus-4-6"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.workers, 4);
+        assert_eq!(config.task.orchestrate.max_retries, 5);
+        assert_eq!(
+            config.task.orchestrate.worktree_prefix.as_deref(),
+            Some("my-project")
+        );
+        assert_eq!(
+            config.task.orchestrate.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+        assert_eq!(
+            config.task.orchestrate.conflict_resolution_model.as_deref(),
+            Some("claude-opus-4-6")
+        );
+        assert_eq!(
+            config.task.orchestrate.review_model.as_deref(),
+            Some("claude-opus-4-6")
+        );
     }
 }

@@ -29,7 +29,6 @@ async fn main() {
                 Err(e) => Err(e),
             }
         }
-        Some(Commands::McpServer { tasks_file }) => commands::mcp::execute(tasks_file),
         None => {
             shared::banner::print_banner();
             commands::run::execute(cli.run_args).await

@@ -52,6 +52,9 @@ pub enum RalphError {
 
     #[error("Task not found: {0}")]
     TaskNotFound(String),
+
+    #[error("MCP error: {0}")]
+    Mcp(String),
 }
 
 pub type Result<T> = std::result::Result<T, RalphError>;

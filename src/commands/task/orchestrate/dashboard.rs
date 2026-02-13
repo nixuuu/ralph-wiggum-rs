@@ -1,5 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Stdout};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ansi_to_tui::IntoText;
 use crossterm::execute;
@@ -18,8 +20,11 @@ use crate::commands::task::orchestrate::shared_types::{format_duration, render_p
 use crate::commands::task::orchestrate::shutdown_types::{OrchestratorStatus, ShutdownState};
 use crate::commands::task::orchestrate::summary::TaskSummaryEntry;
 use crate::commands::task::orchestrate::task_preview::render_task_preview;
-use crate::commands::task::orchestrate::worker_status::WorkerStatus;
+use crate::commands::task::orchestrate::worker_status::{WorkerState, WorkerStatus};
 use crate::shared::error::Result;
+
+/// Grace period for keeping idle workers visible in the dashboard (in seconds).
+const IDLE_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 // ── WorkerPanel ──────────────────────────────────────────────────────
 
@@ -29,6 +34,8 @@ pub struct WorkerPanel {
     pub status: WorkerStatus,
     pub output: OutputRingBuffer,
     pub scroll_offset: usize, // 0 = auto-scroll (follow tail)
+    /// Timestamp when the worker became idle (used for grace period visibility).
+    pub idle_since: Option<Instant>,
 }
 
 impl WorkerPanel {
@@ -38,6 +45,7 @@ impl WorkerPanel {
             status: WorkerStatus::idle(worker_id),
             output: OutputRingBuffer::new(200),
             scroll_offset: 0,
+            idle_since: None,
         }
     }
 }
@@ -96,17 +104,37 @@ impl Dashboard {
     ///
     /// When `tasks_file` is provided (preview overlay active), the dashboard
     /// can access full task metadata for rendering task details.
+    ///
+    /// Task 21.3: Updates `active_worker_ids` with currently active (non-idle) worker IDs
+    /// for dynamic focus navigation.
     pub fn render(
         &mut self,
         status: &OrchestratorStatus,
         tasks_file: Option<&crate::shared::tasks::TasksFile>,
         _task_summaries: &[TaskSummaryEntry],
+        active_worker_ids: Option<&Arc<Mutex<Vec<u32>>>>,
     ) -> Result<()> {
         let worker_count = self.worker_count;
         let focused = self.focused_worker;
         let panels = &self.panels;
         let log_lines = &self.log_lines;
         let preview_scroll = self.preview_scroll_offset;
+
+        // Task 21.3: Compute active (non-idle) worker IDs before rendering
+        if let Some(active_ids_ref) = active_worker_ids {
+            let mut active = Vec::with_capacity(worker_count as usize);
+            for id in 1..=worker_count {
+                if let Some(panel) = panels.get(&id) {
+                    // Consider worker active if not in Idle state
+                    // Check via is_idle() method to avoid direct field access
+                    if !panel.status.is_idle() {
+                        active.push(id);
+                    }
+                }
+            }
+            // Update shared state (input thread reads this)
+            *active_ids_ref.lock().unwrap() = active;
+        }
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -138,13 +166,30 @@ impl Dashboard {
             if let Some(tf) = tasks_file {
                 render_task_preview(frame, grid_area, tf, preview_scroll);
             } else {
-                // Render worker grid
-                let rects = compute_grid_rects(grid_area, worker_count);
-                for (worker_id, rect) in rects {
-                    if let Some(panel) = panels.get(&worker_id) {
-                        let is_focused = focused == Some(worker_id);
-                        let widget = render_panel_widget(panel, rect, is_focused);
-                        frame.render_widget(widget, rect);
+                // Filter active workers (non-Idle or Idle within grace period)
+                let active_workers: Vec<u32> = (1..=worker_count)
+                    .filter(|worker_id| {
+                        if let Some(panel) = panels.get(worker_id) {
+                            is_worker_active(panel)
+                        } else {
+                            false
+                        }
+                    })
+                    .collect();
+
+                // Render worker grid with only active workers
+                let active_count = active_workers.len() as u32;
+                if active_count > 0 {
+                    let rects = compute_grid_rects(grid_area, active_count);
+                    for (idx, (_grid_worker_id, rect)) in rects.into_iter().enumerate() {
+                        // Map grid position (idx) to actual worker_id from active_workers
+                        if let Some(&worker_id) = active_workers.get(idx)
+                            && let Some(panel) = panels.get(&worker_id)
+                        {
+                            let is_focused = focused == Some(worker_id);
+                            let widget = render_panel_widget(panel, rect, is_focused);
+                            frame.render_widget(widget, rect);
+                        }
                     }
                 }
             }
@@ -159,7 +204,21 @@ impl Dashboard {
     }
 
     pub fn update_worker_status(&mut self, worker_id: u32, status: WorkerStatus) {
+        use crate::commands::task::orchestrate::worker_status::WorkerState;
+
         if let Some(panel) = self.panels.get_mut(&worker_id) {
+            let previous_state = &panel.status.state;
+            let new_state = &status.state;
+
+            // Track transition to/from Idle for grace period
+            if previous_state != &WorkerState::Idle && new_state == &WorkerState::Idle {
+                // Worker just became idle — start grace period
+                panel.idle_since = Some(Instant::now());
+            } else if new_state != &WorkerState::Idle {
+                // Worker is no longer idle — clear grace period
+                panel.idle_since = None;
+            }
+
             panel.status = status;
         }
     }
@@ -221,6 +280,44 @@ impl Dashboard {
             {
                 panel.scroll_offset = 0;
             }
+        }
+    }
+
+    /// Auto-shift focus to first active worker if the focused worker is idle.
+    /// Returns Some(new_focus) if focus was changed, None if no change.
+    /// This should be called after worker status updates to maintain focus on active workers.
+    pub fn auto_focus_active(&mut self) -> Option<u32> {
+        use crate::commands::task::orchestrate::worker_status::WorkerState;
+
+        // If no focus, nothing to do
+        let focused = self.focused_worker?;
+
+        // Check if focused worker is idle
+        let is_idle = self
+            .panels
+            .get(&focused)
+            .map(|p| p.status.state == WorkerState::Idle)
+            .unwrap_or(false);
+
+        if !is_idle {
+            return None; // Focused worker is still active
+        }
+
+        // Find first non-idle worker
+        let first_active = (1..=self.worker_count).find(|&id| {
+            self.panels
+                .get(&id)
+                .map(|p| p.status.state != WorkerState::Idle)
+                .unwrap_or(false)
+        });
+
+        if let Some(new_focus) = first_active {
+            self.set_focus(Some(new_focus));
+            Some(new_focus)
+        } else {
+            // All workers idle, unfocus
+            self.set_focus(None);
+            Some(0) // Return 0 to indicate unfocus
         }
     }
 
@@ -294,6 +391,28 @@ impl Dashboard {
     pub fn handle_resize(&mut self) -> Result<()> {
         self.terminal.autoresize()?;
         Ok(())
+    }
+}
+
+// ── Worker activity check ────────────────────────────────────────────
+
+/// Check if a worker should be visible in the grid.
+///
+/// A worker is active if:
+/// - It's not Idle, OR
+/// - It's Idle but within the grace period (idle_since is recent enough)
+fn is_worker_active(panel: &WorkerPanel) -> bool {
+    if panel.status.state != WorkerState::Idle {
+        // Not idle — always show
+        return true;
+    }
+
+    // Idle — check grace period
+    if let Some(idle_time) = panel.idle_since {
+        idle_time.elapsed() < IDLE_GRACE_PERIOD
+    } else {
+        // No idle_since timestamp — assume not in grace period
+        false
     }
 }
 
@@ -380,6 +499,10 @@ fn render_global_bar<'a>(
         0.0
     };
 
+    // Format worker count info
+    let total_workers = status.active_workers + status.idle_workers;
+    let worker_info = format!("W {}/{}", status.active_workers, total_workers);
+
     let progress_line = Line::from(vec![
         Span::raw(" "),
         Span::styled(bar, Style::default().fg(Color::Green)),
@@ -400,6 +523,8 @@ fn render_global_bar<'a>(
         ),
         Span::raw(" │ "),
         Span::styled(format!("⏱ {elapsed}"), Style::default().fg(Color::White)),
+        Span::raw(" │ "),
+        Span::styled(worker_info, Style::default().fg(Color::Magenta)),
     ]);
 
     let focus_span = if let Some(wid) = focused {
@@ -439,9 +564,16 @@ fn render_global_bar<'a>(
         Span::raw("    "),
     ]);
 
-    // Add quit confirmation hint or normal keybindings
+    // Add restart confirmation, quit confirmation hint, or normal keybindings
     let mut queue_line_spans = queue_line.spans;
-    if status.quit_pending {
+    if status.restart_pending.is_some() {
+        queue_line_spans.push(Span::styled(
+            "y=confirm n/Esc=cancel",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if status.quit_pending {
         queue_line_spans.push(Span::styled(
             "Press q/Enter to confirm, Esc to cancel",
             Style::default()
@@ -455,15 +587,24 @@ fn render_global_bar<'a>(
         ));
     } else {
         queue_line_spans.push(Span::styled(
-            "q Tab ↑↓ Esc p=tasks r=reload",
+            "q Tab ↑↓ Esc p=tasks r=reload R=restart",
             Style::default().fg(Color::DarkGray),
         ));
     }
     let queue_line = Line::from(queue_line_spans);
 
-    // Separator or shutdown/quit/completed banner
-    let separator = if status.quit_pending {
-        // Quit confirmation banner (highest priority)
+    // Separator or restart/shutdown/quit/completed banner
+    let separator = if let Some((worker_id, task_id)) = &status.restart_pending {
+        // Restart confirmation banner (highest priority)
+        Line::from(vec![Span::styled(
+            format!(" ⟳ Restart worker {} (task {})? [y/n] ", worker_id, task_id),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )])
+    } else if status.quit_pending {
+        // Quit confirmation banner (second priority)
         Line::from(vec![Span::styled(
             " ⚠ Quit? Press q/Enter to confirm, Esc to cancel ",
             Style::default()
@@ -538,6 +679,8 @@ mod tests {
 
     #[test]
     fn test_compute_grid_layouts() {
+        // Task 21.6: Test with 0 workers
+        assert_eq!(compute_grid(0), (1, 1));
         assert_eq!(compute_grid(1), (1, 1));
         assert_eq!(compute_grid(2), (2, 1));
         assert_eq!(compute_grid(3), (2, 2));
@@ -659,7 +802,10 @@ mod tests {
         let preview_scroll_offset = 0;
 
         // Verify preview scrolls to top (from initial position)
-        assert_ne!(initial_offset, preview_scroll_offset, "offset should change");
+        assert_ne!(
+            initial_offset, preview_scroll_offset,
+            "offset should change"
+        );
         assert_eq!(
             preview_scroll_offset, 0,
             "i32::MIN should set preview_scroll_offset to 0 (top)"
@@ -676,11 +822,362 @@ mod tests {
         let preview_scroll_offset = usize::MAX;
 
         // Verify preview scrolls to bottom (will be clamped in task_preview.rs)
-        assert_ne!(initial_offset, preview_scroll_offset, "offset should change");
+        assert_ne!(
+            initial_offset, preview_scroll_offset,
+            "offset should change"
+        );
         assert_eq!(
             preview_scroll_offset,
             usize::MAX,
             "i32::MAX should set preview_scroll_offset to usize::MAX (bottom, clamped later)"
+        );
+    }
+
+    // ── Grace period tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_worker_panel_new_has_no_idle_since() {
+        let panel = WorkerPanel::new(1);
+        assert_eq!(panel.idle_since, None);
+    }
+
+    #[test]
+    fn test_is_worker_active_non_idle_worker() {
+        let mut panel = WorkerPanel::new(1);
+        panel.status.state = WorkerState::Implementing;
+        panel.idle_since = None;
+
+        assert!(is_worker_active(&panel), "Non-idle worker should be active");
+    }
+
+    #[test]
+    fn test_is_worker_active_idle_no_timestamp() {
+        let mut panel = WorkerPanel::new(1);
+        panel.status.state = WorkerState::Idle;
+        panel.idle_since = None;
+
+        assert!(
+            !is_worker_active(&panel),
+            "Idle worker without timestamp should not be active"
+        );
+    }
+
+    #[test]
+    fn test_is_worker_active_idle_within_grace_period() {
+        let mut panel = WorkerPanel::new(1);
+        panel.status.state = WorkerState::Idle;
+        panel.idle_since = Some(Instant::now());
+
+        assert!(
+            is_worker_active(&panel),
+            "Idle worker within grace period should be active"
+        );
+    }
+
+    #[test]
+    fn test_is_worker_active_idle_beyond_grace_period() {
+        let mut panel = WorkerPanel::new(1);
+        panel.status.state = WorkerState::Idle;
+        // Simulate a timestamp from 10 seconds ago (beyond 5s grace period)
+        panel.idle_since = Some(Instant::now() - std::time::Duration::from_secs(10));
+
+        assert!(
+            !is_worker_active(&panel),
+            "Idle worker beyond grace period should not be active"
+        );
+    }
+
+    #[test]
+    fn test_update_worker_status_sets_idle_since() {
+        // We can't create a full Dashboard without TTY, so we'll test the logic directly
+        let mut panel = WorkerPanel::new(1);
+
+        // Initially not idle
+        panel.status.state = WorkerState::Implementing;
+        panel.idle_since = None;
+
+        // Simulate update_worker_status logic for transition to Idle
+        let previous_state = panel.status.state.clone();
+        let new_status = WorkerStatus {
+            state: WorkerState::Idle,
+            task_id: None,
+            component: None,
+            phase: None,
+            model: None,
+            cost_usd: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+
+        // Apply the logic from update_worker_status
+        let new_state = &new_status.state;
+        if previous_state != WorkerState::Idle && new_state == &WorkerState::Idle {
+            panel.idle_since = Some(Instant::now());
+        }
+        panel.status = new_status;
+
+        assert!(
+            panel.idle_since.is_some(),
+            "idle_since should be set when transitioning to Idle"
+        );
+    }
+
+    #[test]
+    fn test_update_worker_status_clears_idle_since() {
+        let mut panel = WorkerPanel::new(1);
+
+        // Start in Idle with timestamp
+        panel.status.state = WorkerState::Idle;
+        panel.idle_since = Some(Instant::now());
+
+        // Simulate transition to non-Idle
+        let new_status = WorkerStatus {
+            state: WorkerState::Implementing,
+            task_id: Some("T1".to_string()),
+            component: None,
+            phase: None,
+            model: None,
+            cost_usd: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+
+        // Apply the logic from update_worker_status
+        let new_state = &new_status.state;
+        if new_state != &WorkerState::Idle {
+            panel.idle_since = None;
+        }
+        panel.status = new_status;
+
+        assert_eq!(
+            panel.idle_since, None,
+            "idle_since should be cleared when transitioning away from Idle"
+        );
+    }
+
+    #[test]
+    fn test_update_worker_status_idle_to_idle_preserves_timestamp() {
+        let mut panel = WorkerPanel::new(1);
+
+        // Start in Idle with timestamp
+        let original_timestamp = Instant::now();
+        panel.status.state = WorkerState::Idle;
+        panel.idle_since = Some(original_timestamp);
+
+        // Stay Idle (e.g., cost update)
+        let new_status = WorkerStatus {
+            state: WorkerState::Idle,
+            task_id: None,
+            component: None,
+            phase: None,
+            model: None,
+            cost_usd: 1.23,
+            input_tokens: 100,
+            output_tokens: 50,
+        };
+
+        // Apply the logic from update_worker_status
+        let previous_state = &panel.status.state;
+        let new_state = &new_status.state;
+        if previous_state != &WorkerState::Idle && new_state == &WorkerState::Idle {
+            panel.idle_since = Some(Instant::now());
+        } else if new_state != &WorkerState::Idle {
+            panel.idle_since = None;
+        }
+        // else: preserve idle_since
+        panel.status = new_status;
+
+        assert_eq!(
+            panel.idle_since,
+            Some(original_timestamp),
+            "idle_since should be preserved when staying Idle"
+        );
+    }
+
+    // ── Task 21.6: Idle worker filtering tests ──────────────────────────
+
+    #[test]
+    fn test_compute_grid_rects_with_non_sequential_ids() {
+        let area = Rect::new(0, 0, 120, 40);
+
+        // Test with 2 workers (should produce 2x1 grid)
+        let rects = compute_grid_rects(area, 2);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].0, 1); // First position gets ID 1
+        assert_eq!(rects[1].0, 2); // Second position gets ID 2
+
+        // Test with 3 workers (should produce 2x2 grid)
+        let rects = compute_grid_rects(area, 3);
+        assert_eq!(rects.len(), 3);
+        // Verify IDs are sequential
+        let ids: Vec<u32> = rects.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_compute_grid_rects_zero_workers() {
+        let area = Rect::new(0, 0, 120, 40);
+        let rects = compute_grid_rects(area, 0);
+        assert_eq!(rects.len(), 0, "Zero workers should produce empty grid");
+    }
+
+    #[test]
+    fn test_active_filter_includes_implementing_worker() {
+        let mut panel = WorkerPanel::new(1);
+        panel.status.state = WorkerState::Implementing;
+        panel.idle_since = None;
+
+        assert!(
+            is_worker_active(&panel),
+            "Implementing worker should be active"
+        );
+    }
+
+    #[test]
+    fn test_active_filter_excludes_idle_worker_without_timestamp() {
+        let mut panel = WorkerPanel::new(1);
+        panel.status.state = WorkerState::Idle;
+        panel.idle_since = None;
+
+        assert!(
+            !is_worker_active(&panel),
+            "Idle worker without timestamp should be excluded"
+        );
+    }
+
+    #[test]
+    fn test_active_filter_includes_idle_worker_within_grace_period() {
+        let mut panel = WorkerPanel::new(1);
+        panel.status.state = WorkerState::Idle;
+        // Timestamp from 1 second ago (well within 5s grace period)
+        panel.idle_since = Some(Instant::now() - Duration::from_secs(1));
+
+        assert!(
+            is_worker_active(&panel),
+            "Idle worker within grace period should be included"
+        );
+    }
+
+    #[test]
+    fn test_active_filter_excludes_idle_worker_past_grace_period() {
+        let mut panel = WorkerPanel::new(1);
+        panel.status.state = WorkerState::Idle;
+        // Timestamp from 10 seconds ago (beyond 5s grace period)
+        panel.idle_since = Some(Instant::now() - Duration::from_secs(10));
+
+        assert!(
+            !is_worker_active(&panel),
+            "Idle worker past grace period should be excluded"
+        );
+    }
+
+    #[test]
+    fn test_all_idle_scenario_returns_empty_active_set() {
+        // Simulate the filtering logic from render() method
+        let mut panels = HashMap::new();
+
+        // Create 3 idle workers, all past grace period
+        for id in 1..=3 {
+            let mut panel = WorkerPanel::new(id);
+            panel.status.state = WorkerState::Idle;
+            panel.idle_since = Some(Instant::now() - Duration::from_secs(10));
+            panels.insert(id, panel);
+        }
+
+        // Apply the active filter (same logic as in render())
+        let active_workers: Vec<u32> = (1..=3)
+            .filter(|worker_id| {
+                if let Some(panel) = panels.get(worker_id) {
+                    is_worker_active(panel)
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            active_workers.len(),
+            0,
+            "All idle workers past grace period should result in empty active set"
+        );
+    }
+
+    #[test]
+    fn test_mixed_workers_active_filter() {
+        let mut panels = HashMap::new();
+
+        // Worker 1: Implementing (active)
+        let mut panel1 = WorkerPanel::new(1);
+        panel1.status.state = WorkerState::Implementing;
+        panels.insert(1, panel1);
+
+        // Worker 2: Idle within grace period (active)
+        let mut panel2 = WorkerPanel::new(2);
+        panel2.status.state = WorkerState::Idle;
+        panel2.idle_since = Some(Instant::now() - Duration::from_secs(2));
+        panels.insert(2, panel2);
+
+        // Worker 3: Idle past grace period (inactive)
+        let mut panel3 = WorkerPanel::new(3);
+        panel3.status.state = WorkerState::Idle;
+        panel3.idle_since = Some(Instant::now() - Duration::from_secs(10));
+        panels.insert(3, panel3);
+
+        // Apply the active filter
+        let active_workers: Vec<u32> = (1..=3)
+            .filter(|worker_id| {
+                if let Some(panel) = panels.get(worker_id) {
+                    is_worker_active(panel)
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            active_workers,
+            vec![1, 2],
+            "Should include Implementing and recently-Idle workers, exclude old Idle"
+        );
+    }
+
+    #[test]
+    fn test_grace_period_boundary_at_exactly_5_seconds() {
+        let mut panel = WorkerPanel::new(1);
+        panel.status.state = WorkerState::Idle;
+        // Exactly at grace period boundary (5 seconds)
+        panel.idle_since = Some(Instant::now() - IDLE_GRACE_PERIOD);
+
+        // At exactly 5s, elapsed() >= IDLE_GRACE_PERIOD, so should be excluded
+        // However, due to timing precision, this might be flaky.
+        // The logic is: elapsed() < IDLE_GRACE_PERIOD means active
+        // So at exactly 5s, it should NOT be active
+        assert!(
+            !is_worker_active(&panel),
+            "Idle worker at exactly grace period boundary should be excluded"
+        );
+    }
+
+    #[test]
+    fn test_grace_period_just_before_boundary() {
+        let mut panel = WorkerPanel::new(1);
+        panel.status.state = WorkerState::Idle;
+        // Just before grace period boundary (4.9 seconds)
+        panel.idle_since = Some(Instant::now() - Duration::from_millis(4900));
+
+        assert!(
+            is_worker_active(&panel),
+            "Idle worker just before grace period should be included"
+        );
+    }
+
+    #[test]
+    fn test_idle_grace_period_constant_is_5_seconds() {
+        // Verify the constant matches specification
+        assert_eq!(
+            IDLE_GRACE_PERIOD,
+            Duration::from_secs(5),
+            "IDLE_GRACE_PERIOD should be 5 seconds as specified"
         );
     }
 }

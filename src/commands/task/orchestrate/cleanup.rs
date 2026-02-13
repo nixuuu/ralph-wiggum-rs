@@ -17,6 +17,7 @@ impl Orchestrator {
     /// 1. Cleans up orphaned worktrees from pending merges
     /// 2. Saves orchestrator state
     /// 3. Releases lockfile
+    /// 4. Shuts down the shared MCP server
     pub(in crate::commands::task::orchestrate) async fn post_loop_cleanup(
         &self,
         ctx: &mut RunLoopContext<'_>,
@@ -50,6 +51,14 @@ impl Orchestrator {
         {
             eprintln!("Warning: Failed to release lockfile: {e}");
         }
+
+        // Shut down shared MCP server via cancellation token
+        ctx.mcp_cancel_token.cancel();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            &mut ctx.mcp_server_handle,
+        )
+        .await;
 
         Ok(())
     }

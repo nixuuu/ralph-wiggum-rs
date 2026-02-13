@@ -384,15 +384,52 @@ impl StatusTerminal {
         Ok(())
     }
 
-    /// Clear the status bar and restore terminal
+    /// Clear the status bar and restore terminal.
+    ///
+    /// Kolapsuje inline viewport: przesuwa kursor na pozycję viewportu
+    /// i czyści wszystko poniżej, eliminując puste linie.
     pub fn cleanup(&mut self) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
 
+        // Capture current viewport Y via one last draw
+        let mut viewport_y = 0u16;
+        self.terminal.draw(|frame| {
+            viewport_y = frame.area().y;
+        })?;
+
+        // Collapse the inline viewport while still in raw mode
+        crossterm::execute!(
+            io::stdout(),
+            crossterm::cursor::MoveTo(0, viewport_y),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
+        )?;
+
         disable_raw_mode()?;
-        // Clear the inline viewport area
-        self.terminal.clear()?;
+        Ok(())
+    }
+
+    /// Re-enable raw mode after temporary cleanup (e.g. after TUI question widgets).
+    ///
+    /// Creates a fresh terminal with new Viewport::Inline to replace the stale one.
+    /// The old viewport was collapsed in `cleanup()`, so a new one is needed.
+    pub fn reinit(&mut self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        enable_raw_mode()?;
+
+        // Create a fresh terminal — the old viewport was collapsed in cleanup()
+        let backend = CrosstermBackend::new(io::stdout());
+        self.terminal = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: Viewport::Inline(self.height),
+            },
+        )?;
+
         Ok(())
     }
 }

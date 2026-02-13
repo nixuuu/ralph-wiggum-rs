@@ -7,7 +7,9 @@ mod generate_deps_cmd;
 mod input;
 mod migrate;
 pub mod orchestrate;
+mod plan;
 mod prd;
+mod state_helper;
 mod status;
 
 pub use args::TaskCommands;
@@ -23,6 +25,7 @@ pub async fn execute(command: TaskCommands, file_config: &FileConfig) -> Result<
         TaskCommands::Continue => continue_cmd::execute(file_config).await,
         TaskCommands::Add(args) => add::execute(args, file_config).await,
         TaskCommands::Edit(args) => edit::execute(args, file_config).await,
+        TaskCommands::Plan(args) => plan::execute(args, file_config).await,
         TaskCommands::Status => status::execute(file_config),
         TaskCommands::Orchestrate(args) => {
             let project_root = std::env::current_dir()?;

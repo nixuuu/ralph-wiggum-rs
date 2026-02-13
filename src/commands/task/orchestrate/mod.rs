@@ -1,6 +1,7 @@
 pub mod ai;
 mod assignment;
 mod cleanup;
+pub(crate) mod git_helpers;
 pub mod completion_summary;
 mod config;
 pub mod dashboard;

@@ -34,6 +34,7 @@ pub(super) struct TokenState<'a> {
 fn format_assistant_message(
     message: &super::runner::AssistantMessage,
     last_block_type: &mut BlockType,
+    tool_use_names: &mut HashMap<String, String>,
     use_nerd_font: bool,
 ) -> Vec<String> {
     let mut lines = Vec::new();
@@ -55,7 +56,12 @@ fn format_assistant_message(
                     lines.push(line.to_string());
                 }
             }
-            ContentBlock::ToolUse { name, input, .. } => {
+            ContentBlock::ToolUse { name, id, input } => {
+                // Track tool_use_id → name for displaying ask_user results later
+                if let Some(id) = id {
+                    tool_use_names.insert(id.clone(), name.clone());
+                }
+
                 // Add empty line if switching from text to tool
                 if *last_block_type == BlockType::Text {
                     lines.push(String::new());
@@ -92,14 +98,109 @@ fn format_assistant_message(
                     }
                 }
             }
-            ContentBlock::ToolResult { .. } => {
-                // Don't print tool results - too verbose
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+            } => {
+                // Display ask_user results so the user can see their answer
+                let is_ask_user = tool_use_id
+                    .as_deref()
+                    .and_then(|id| tool_use_names.get(id))
+                    .is_some_and(|name| name == "ask_user" || name.ends_with("__ask_user"));
+
+                if is_ask_user && let Some(text) = extract_tool_result_text(content) {
+                    if *last_block_type == BlockType::Tool {
+                        lines.push(String::new());
+                    }
+                    *last_block_type = BlockType::Text;
+
+                    let rendered = markdown::render_markdown(&text);
+                    for line in rendered.lines() {
+                        lines.push(line.to_string());
+                    }
+                }
             }
             ContentBlock::Other => {}
         }
     }
 
     lines
+}
+
+/// Format a user message event — only render ToolResult blocks (ask_user answers).
+///
+/// User events also contain Text blocks (the user's prompt), but we skip those
+/// to avoid cluttering the output with prompts that are already visible.
+/// Each ask_user answer gets a visual separator to distinguish it from assistant output.
+fn format_user_message(
+    message: &super::runner::AssistantMessage,
+    last_block_type: &mut BlockType,
+    tool_use_names: &mut HashMap<String, String>,
+    use_nerd_font: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for block in &message.content {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+        } = block
+        {
+            let is_ask_user = tool_use_id
+                .as_deref()
+                .and_then(|id| tool_use_names.get(id))
+                .is_some_and(|name| name == "ask_user" || name.ends_with("__ask_user"));
+
+            if is_ask_user && let Some(text) = extract_tool_result_text(content) {
+                // Blank line before answer block
+                lines.push(String::new());
+                *last_block_type = BlockType::Text;
+
+                // Visual separator: icon + "answer" label
+                let icon = icons::answer_icon(use_nerd_font);
+                lines.push(format!("  {} {}", icon, "answer".dark_grey()));
+
+                let rendered = markdown::render_markdown(&text);
+                for line in rendered.lines() {
+                    lines.push(line.to_string());
+                }
+            }
+        }
+    }
+
+    lines
+}
+
+/// Extract text from a ToolResult content value.
+///
+/// Claude CLI sends content as either:
+/// - a plain string
+/// - an array of `{type: "text", text: "..."}` blocks
+fn extract_tool_result_text(content: &serde_json::Value) -> Option<String> {
+    // Simple string
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+
+    // Array of content blocks: [{type: "text", text: "..."}]
+    if let Some(arr) = content.as_array() {
+        let texts: Vec<&str> = arr
+            .iter()
+            .filter_map(|block| {
+                if block.get("type")?.as_str()? == "text" {
+                    block.get("text")?.as_str()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !texts.is_empty() {
+            return Some(texts.join("\n"));
+        }
+    }
+
+    None
 }
 
 /// Format a result event and finalize usage tracking
@@ -156,6 +257,7 @@ pub(super) fn add_pending_usage(
 pub(super) fn format_event(
     event: &ClaudeEvent,
     last_block_type: &mut BlockType,
+    tool_use_names: &mut HashMap<String, String>,
     use_nerd_font: bool,
     tokens: &mut TokenState<'_>,
 ) -> Vec<String> {
@@ -165,7 +267,7 @@ pub(super) fn format_event(
             if let Some(u) = &message.usage {
                 add_pending_usage(u, tokens.pending_input_tokens, tokens.pending_output_tokens);
             }
-            format_assistant_message(message, last_block_type, use_nerd_font)
+            format_assistant_message(message, last_block_type, tool_use_names, use_nerd_font)
         }
         ClaudeEvent::Result {
             cost_usd,
@@ -175,10 +277,10 @@ pub(super) fn format_event(
             format_result_event(cost_usd, model_usage, tokens);
             Vec::new()
         }
-        ClaudeEvent::System { .. } => {
-            // System init messages are informational — no output needed
-            Vec::new()
+        ClaudeEvent::User { message } => {
+            format_user_message(message, last_block_type, tool_use_names, use_nerd_font)
         }
+        ClaudeEvent::System { .. } => Vec::new(),
         ClaudeEvent::Other => Vec::new(),
     }
 }
@@ -264,6 +366,7 @@ mod tests {
     #[test]
     fn test_format_assistant_message_renders_markdown() {
         use super::super::runner::{AssistantMessage, ContentBlock};
+        use std::collections::HashMap;
 
         let message = AssistantMessage {
             role: "assistant".to_string(),
@@ -274,7 +377,8 @@ mod tests {
         };
 
         let mut block_type = BlockType::None;
-        let lines = format_assistant_message(&message, &mut block_type, false);
+        let mut tool_names = HashMap::new();
+        let lines = format_assistant_message(&message, &mut block_type, &mut tool_names, false);
 
         // Should have multiple lines (markdown formatted)
         assert!(!lines.is_empty());
@@ -322,7 +426,8 @@ mod tests {
             model_costs: &mut model_costs,
         };
 
-        let lines = format_event(&event, &mut block_type, false, &mut tokens);
+        let mut tool_names = HashMap::new();
+        let lines = format_event(&event, &mut block_type, &mut tool_names, false, &mut tokens);
 
         // Verify markdown was processed (non-empty output)
         assert!(!lines.is_empty());
@@ -334,5 +439,129 @@ mod tests {
             output.contains("\x1b[") || output != "Plain text with **markdown**",
             "Markdown should be rendered with ANSI formatting"
         );
+    }
+
+    #[test]
+    fn test_format_user_message_renders_ask_user_tool_result() {
+        use super::super::runner::{AssistantMessage, ContentBlock};
+
+        // Set up tool_use_names with ask_user mapping
+        let mut tool_names = HashMap::new();
+        tool_names.insert("toolu_01".to_string(), "ask_user".to_string());
+
+        let message = AssistantMessage {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: Some("toolu_01".to_string()),
+                content: serde_json::json!("User's answer"),
+            }],
+            usage: None,
+        };
+
+        let mut block_type = BlockType::None;
+        let lines = format_user_message(&message, &mut block_type, &mut tool_names, false);
+
+        assert!(!lines.is_empty(), "Should render ask_user ToolResult");
+        assert_eq!(block_type, BlockType::Text);
+        // First line is blank separator, second is icon + "answer" header
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("answer"),
+            "Should contain 'answer' label header"
+        );
+    }
+
+    #[test]
+    fn test_format_user_message_skips_text_blocks() {
+        use super::super::runner::{AssistantMessage, ContentBlock};
+
+        let message = AssistantMessage {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "User prompt text".to_string(),
+            }],
+            usage: None,
+        };
+
+        let mut block_type = BlockType::None;
+        let mut tool_names = HashMap::new();
+        let lines = format_user_message(&message, &mut block_type, &mut tool_names, false);
+
+        assert!(
+            lines.is_empty(),
+            "User text blocks should be skipped in user events"
+        );
+    }
+
+    #[test]
+    fn test_format_user_message_skips_non_ask_user_tool_result() {
+        use super::super::runner::{AssistantMessage, ContentBlock};
+
+        let mut tool_names = HashMap::new();
+        tool_names.insert("toolu_01".to_string(), "Read".to_string());
+
+        let message = AssistantMessage {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: Some("toolu_01".to_string()),
+                content: serde_json::json!("file contents"),
+            }],
+            usage: None,
+        };
+
+        let mut block_type = BlockType::None;
+        let lines = format_user_message(&message, &mut block_type, &mut tool_names, false);
+
+        assert!(
+            lines.is_empty(),
+            "Non-ask_user ToolResults should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_format_event_handles_user_event() {
+        use super::super::runner::{AssistantMessage, ClaudeEvent, ContentBlock};
+
+        // Pre-register tool_use_id for ask_user
+        let mut tool_names = HashMap::new();
+        tool_names.insert("toolu_99".to_string(), "mcp__ralph__ask_user".to_string());
+
+        let event = ClaudeEvent::User {
+            message: AssistantMessage {
+                role: "user".to_string(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: Some("toolu_99".to_string()),
+                    content: serde_json::json!("**Bold answer**"),
+                }],
+                usage: None,
+            },
+        };
+
+        let mut block_type = BlockType::None;
+        let mut finalized_input = 0u64;
+        let mut finalized_output = 0u64;
+        let mut pending_input = 0u64;
+        let mut pending_output = 0u64;
+        let mut total_cost = 0.0;
+        let mut model_costs = HashMap::new();
+
+        let mut tokens = TokenState {
+            finalized_input_tokens: &mut finalized_input,
+            finalized_output_tokens: &mut finalized_output,
+            pending_input_tokens: &mut pending_input,
+            pending_output_tokens: &mut pending_output,
+            total_cost_usd: &mut total_cost,
+            model_costs: &mut model_costs,
+        };
+
+        let lines = format_event(&event, &mut block_type, &mut tool_names, false, &mut tokens);
+
+        assert!(
+            !lines.is_empty(),
+            "User event with ask_user ToolResult should produce output"
+        );
+        // Token counters should not be affected by user events
+        assert_eq!(pending_input, 0);
+        assert_eq!(pending_output, 0);
     }
 }

@@ -24,6 +24,8 @@ pub struct OutputFormatter {
     /// Per-model cost breakdown
     model_costs: HashMap<String, f64>,
     last_block_type: BlockType,
+    /// Tracks tool_use_id → tool_name for displaying ask_user results
+    tool_use_names: HashMap<String, String>,
     use_nerd_font: bool,
     task_progress: Option<TaskProgress>,
     /// Number of done tasks at session start (baseline for speed calculation)
@@ -48,6 +50,7 @@ impl OutputFormatter {
             pending_output_tokens: 0,
             model_costs: HashMap::new(),
             last_block_type: BlockType::None,
+            tool_use_names: HashMap::new(),
             use_nerd_font,
             task_progress: None,
             initial_done_count: 0,
@@ -270,6 +273,7 @@ impl OutputFormatter {
         format_event(
             event,
             &mut self.last_block_type,
+            &mut self.tool_use_names,
             self.use_nerd_font,
             &mut tokens,
         )

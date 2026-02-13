@@ -30,13 +30,17 @@ pub async fn execute(args: GenerateDepsArgs, file_config: &FileConfig) -> Result
         .or_else(|| file_config.task.default_model.clone());
 
     // Run Claude with streaming output — Claude reads and edits .ralph/tasks.yml directly
+    // No MCP server needed: Claude uses built-in Edit tool for tasks.yml
     run_once(RunOnceOptions {
         prompt,
         model,
         output_dir: None,
         use_nerd_font: file_config.ui.nerd_font,
         allowed_tools: None,
+        disallowed_tools: None,
         mcp_config: None,
+        question_rx: None,
+        tasks_path: None, // generate_deps uses built-in tools, not MCP
     })
     .await?;
 

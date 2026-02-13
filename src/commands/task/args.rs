@@ -11,6 +11,8 @@ pub enum TaskCommands {
     Add(AddArgs),
     /// Edit existing tasks in PROGRESS.md
     Edit(EditArgs),
+    /// Plan task execution with optional customization
+    Plan(PlanArgs),
     /// Show task status dashboard
     Status,
     /// Orchestrate parallel workers on tasks from PROGRESS.md
@@ -73,6 +75,21 @@ pub struct EditArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct PlanArgs {
+    /// Path to plan file
+    #[arg(short, long)]
+    pub file: Option<PathBuf>,
+
+    /// Plan content as text
+    #[arg(short, long)]
+    pub prompt: Option<String>,
+
+    /// Claude model to use
+    #[arg(short, long)]
+    pub model: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct OrchestrateArgs {
     /// Number of parallel workers
     #[arg(short, long)]
@@ -121,6 +138,10 @@ pub struct OrchestrateArgs {
     /// Claude model to use for merge conflict resolution (default: "opus")
     #[arg(long)]
     pub conflict_model: Option<String>,
+
+    /// Claude model to use for code review (default: "opus")
+    #[arg(long)]
+    pub review_model: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -237,6 +258,7 @@ mod tests {
             assert!(args.timeout.is_none());
             assert!(args.tasks.is_none());
             assert!(args.conflict_model.is_none());
+            assert!(args.review_model.is_none());
         } else {
             panic!("Expected Orchestrate command");
         }
@@ -274,6 +296,7 @@ mod tests {
             assert_eq!(args.timeout.as_deref(), Some("2h"));
             assert_eq!(args.tasks.as_deref(), Some("T01,T03,T07"));
             assert!(args.conflict_model.is_none());
+            assert!(args.review_model.is_none());
         } else {
             panic!("Expected Orchestrate command");
         }
@@ -321,6 +344,57 @@ mod tests {
             TestCli::parse_from(["test", "orchestrate", "--conflict-model", "claude-opus-4-6"]);
         if let super::TaskCommands::Orchestrate(args) = cli.command {
             assert_eq!(args.conflict_model.as_deref(), Some("claude-opus-4-6"));
+        } else {
+            panic!("Expected Orchestrate command");
+        }
+    }
+
+    #[test]
+    fn test_plan_with_prompt() {
+        let cli = TestCli::parse_from(["test", "plan", "--prompt", "Plan task execution"]);
+        if let super::TaskCommands::Plan(args) = cli.command {
+            assert_eq!(args.prompt.as_deref(), Some("Plan task execution"));
+        } else {
+            panic!("Expected Plan command");
+        }
+    }
+
+    #[test]
+    fn test_plan_with_file() {
+        let cli = TestCli::parse_from(["test", "plan", "--file", "plan.md"]);
+        if let super::TaskCommands::Plan(args) = cli.command {
+            assert!(args.file.is_some());
+        } else {
+            panic!("Expected Plan command");
+        }
+    }
+
+    #[test]
+    fn test_plan_with_all_flags() {
+        let cli = TestCli::parse_from([
+            "test",
+            "plan",
+            "--file",
+            "plan.md",
+            "--prompt",
+            "Analyze",
+            "--model",
+            "claude-opus-4-6",
+        ]);
+        if let super::TaskCommands::Plan(args) = cli.command {
+            assert!(args.file.is_some());
+            assert_eq!(args.prompt.as_deref(), Some("Analyze"));
+            assert_eq!(args.model.as_deref(), Some("claude-opus-4-6"));
+        } else {
+            panic!("Expected Plan command");
+        }
+    }
+
+    #[test]
+    fn test_orchestrate_review_model_flag() {
+        let cli = TestCli::parse_from(["test", "orchestrate", "--review-model", "claude-opus-4-6"]);
+        if let super::TaskCommands::Orchestrate(args) = cli.command {
+            assert_eq!(args.review_model.as_deref(), Some("claude-opus-4-6"));
         } else {
             panic!("Expected Orchestrate command");
         }

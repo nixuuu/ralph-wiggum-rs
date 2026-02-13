@@ -148,6 +148,7 @@ default_model = "claude-sonnet-4-5-20250929"
 worktree_prefix = "my-project"
 verify_commands = ["cargo test", "cargo clippy --all-targets -- -D warnings"]
 conflict_resolution_model = "opus"
+review_model = "opus"
 phase_timeout_minutes = 30
 git_timeout_secs = 120
 setup_timeout_secs = 300
@@ -163,6 +164,7 @@ watchdog_interval_secs = 10
 | `worktree_prefix` | — | Prefix for Git worktree directory names |
 | `verify_commands` | — | Shell commands run in verify phase after implementation (list of strings or objects) |
 | `conflict_resolution_model` | `"opus"` | Claude model used for AI-assisted merge conflict resolution |
+| `review_model` | `"opus"` | Claude model used for post-implementation code review phase |
 | `phase_timeout_minutes` | `30` | Max duration (minutes) for a single worker phase. `0` = disabled |
 | `git_timeout_secs` | `120` | Timeout (seconds) for git commands (add, commit, status) |
 | `setup_timeout_secs` | `300` | Timeout (seconds) for setup commands |
@@ -234,6 +236,7 @@ default_model = "claude-sonnet-4-5-20250929"
 [task.orchestrate]
 workers = 3
 max_retries = 2
+review_model = "opus"
 verify_commands = ["cargo test", "cargo clippy -- -D warnings"]
 
 [[task.orchestrate.setup_commands]]
@@ -361,6 +364,7 @@ ralph-wiggum task orchestrate --max-cost 5.0 --timeout 2h
 | `--verbose` | Enable verbose JSONL event logging |
 | `--worktree-prefix PREFIX` | Custom prefix for worktree directories |
 | `--conflict-model NAME` | Claude model for merge conflict resolution (default: `opus`) |
+| `--review-model NAME` | Claude model for code review phase (default: `opus`) |
 
 **Dashboard keyboard shortcuts:**
 
@@ -372,9 +376,34 @@ ralph-wiggum task orchestrate --max-cost 5.0 --timeout 2h
 | `Up` / `Down` | Scroll focused worker output |
 | `p` | Toggle task preview overlay |
 | `r` | Reload tasks.yml |
+| `R` | Restart a failed/blocked worker (with confirmation) |
 | `q` | Quit (with confirmation — press twice to force) |
 
 After completion, a summary table is printed with per-task status, cost, duration, and retry count.
+
+#### `task plan` — Plan task execution
+
+Generates an execution plan from your tasks, analyzing dependencies, resource allocation, and optimal scheduling.
+
+```bash
+# From a file
+ralph-wiggum task plan --file plan-instructions.md
+
+# From inline text
+ralph-wiggum task plan --prompt "Plan execution prioritizing auth tasks"
+
+# From stdin
+cat instructions.md | ralph-wiggum task plan
+
+# With specific model
+ralph-wiggum task plan --prompt "Optimize for minimal conflicts" --model claude-opus-4-6
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--file` | `-f` | Path to plan instructions file |
+| `--prompt` | `-p` | Plan instructions as text |
+| `--model` | `-m` | Claude model to use |
 
 #### `task add` — Add new tasks
 
@@ -440,17 +469,9 @@ Removes leftover worktrees, branches, state files, and logs from previous orches
 ralph-wiggum task clean
 ```
 
-#### `mcp-server` — MCP server for tasks.yml
+#### MCP server (internal)
 
-Runs a stdio JSON-RPC 2.0 server exposing tasks.yml CRUD operations as MCP tools. Used internally by `task add` and `task edit` to give Claude direct access to the task tree.
-
-```bash
-ralph-wiggum mcp-server --tasks-file .ralph/tasks.yml
-```
-
-| Option | Description |
-|--------|-------------|
-| `--tasks-file PATH` | Path to tasks.yml file (required) |
+Ralph Wiggum runs an HTTP MCP server (Streamable HTTP transport) automatically during `task add`, `task edit`, `task plan`, and `task orchestrate`. The server exposes tasks.yml CRUD operations as MCP tools, giving Claude direct access to read and modify the task tree. No manual setup is needed.
 
 ### Quick Start
 
