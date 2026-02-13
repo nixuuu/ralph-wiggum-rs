@@ -31,6 +31,8 @@ pub struct WorkerRunnerConfig {
     pub mcp_port: u16,
     /// Session ID for this worker's MCP session.
     pub mcp_session_id: String,
+    /// Tools to explicitly block (passed as --disallowedTools to Claude CLI).
+    pub disallowed_tools: Option<String>,
 }
 
 /// Adapted ClaudeRunner for orchestration workers.
@@ -110,6 +112,11 @@ impl WorkerRunner {
         };
         let runner = if let Some(timeout) = self.config.phase_timeout {
             runner.with_phase_timeout(timeout)
+        } else {
+            runner
+        };
+        let runner = if let Some(ref tools) = self.config.disallowed_tools {
+            runner.with_disallowed_tools(tools.clone())
         } else {
             runner
         };
@@ -461,6 +468,7 @@ mod tests {
             phase_timeout: None,
             mcp_port: 0,
             mcp_session_id: String::new(),
+            disallowed_tools: None,
         };
         let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
         assert_eq!(runner.config.prompt_prefix, Some("PREFIX TEXT".to_string()));
@@ -741,6 +749,7 @@ mod tests {
             phase_timeout: None,
             mcp_port: 8080,
             mcp_session_id: "worker-123".to_string(),
+            disallowed_tools: None,
         };
         let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
 
@@ -767,6 +776,7 @@ mod tests {
             phase_timeout: None,
             mcp_port: 0, // Invalid port
             mcp_session_id: "worker-123".to_string(),
+            disallowed_tools: None,
         };
         let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
 
@@ -785,6 +795,7 @@ mod tests {
             phase_timeout: None,
             mcp_port: 8080,
             mcp_session_id: String::new(), // Empty session ID
+            disallowed_tools: None,
         };
         let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
 
@@ -820,6 +831,7 @@ mod tests {
             phase_timeout: None,
             mcp_port: 9000,
             mcp_session_id: "worker/123 & test".to_string(),
+            disallowed_tools: None,
         };
         let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
 
@@ -835,6 +847,28 @@ mod tests {
         assert_eq!(
             url,
             "http://127.0.0.1:9000/mcp?session=worker%2F123%20%26%20test"
+        );
+    }
+
+    #[test]
+    fn test_disallowed_tools_propagation() {
+        let (tx, _rx) = mpsc::channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig {
+            use_nerd_font: false,
+            prompt_prefix: None,
+            prompt_suffix: None,
+            phase_timeout: None,
+            mcp_port: 0,
+            mcp_session_id: String::new(),
+            disallowed_tools: Some("AskUserQuestion,SendMessage".to_string()),
+        };
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+
+        assert_eq!(
+            runner.config.disallowed_tools,
+            Some("AskUserQuestion,SendMessage".to_string()),
+            "disallowed_tools should be set in config"
         );
     }
 }

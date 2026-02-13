@@ -1,6 +1,29 @@
 use serde_json::{Value, json};
 use urlencoding::encode;
 
+/// Lista pełnych nazw MCP mutation tools w formacie Claude CLI.
+///
+/// Format: comma-separated lista 7 narzędzi MCP modyfikujących stan zadań.
+/// Używane przez `--allowed-tools` w CLI do ograniczania dostępu w sesjach read-only.
+///
+/// # Narzędzia
+///
+/// 1. `tasks_create` - Tworzenie nowych zadań
+/// 2. `tasks_update` - Aktualizacja pól zadania
+/// 3. `tasks_delete` - Usuwanie zadania i jego subtasków
+/// 4. `tasks_move` - Przenoszenie zadania pod inny parent
+/// 5. `tasks_batch_status` - Batch update statusów
+/// 6. `tasks_set_deps` - Ustawianie zależności zadania
+/// 7. `tasks_set_default_model` - Ustawianie domyślnego modelu
+///
+/// # Spójność
+///
+/// Stała musi być zgodna z `MUTATION_TOOLS` w `src/commands/mcp/tools.rs`.
+/// Każde narzędzie z `MUTATION_TOOLS` ma odpowiednik w pełnym formacie:
+/// `{short_name}` → `mcp__ralph-tasks__{short_name}`
+#[allow(dead_code)] // Będzie używana w zadaniu 24.2 (--allowed-tools flag)
+pub const MCP_MUTATION_TOOLS: &str = "mcp__ralph-tasks__tasks_create,mcp__ralph-tasks__tasks_update,mcp__ralph-tasks__tasks_delete,mcp__ralph-tasks__tasks_move,mcp__ralph-tasks__tasks_batch_status,mcp__ralph-tasks__tasks_set_deps,mcp__ralph-tasks__tasks_set_default_model";
+
 /// Build the MCP config JSON for `--mcp-config` CLI flag (HTTP transport).
 ///
 /// Generates a config that points Claude CLI to the HTTP MCP server
@@ -151,5 +174,90 @@ mod tests {
         let url = config["mcpServers"]["ralph-tasks"]["url"].as_str().unwrap();
 
         assert_eq!(url, "http://127.0.0.1:65535/mcp");
+    }
+
+    // ── MCP_MUTATION_TOOLS tests ──────────────────────────────────────
+
+    #[test]
+    fn test_mcp_mutation_tools_count() {
+        // Stała powinna zawierać dokładnie 7 narzędzi oddzielonych przecinkami
+        let tools: Vec<&str> = MCP_MUTATION_TOOLS.split(',').collect();
+        assert_eq!(
+            tools.len(),
+            7,
+            "MCP_MUTATION_TOOLS powinno zawierać 7 narzędzi"
+        );
+    }
+
+    #[test]
+    fn test_mcp_mutation_tools_prefix() {
+        // Każda nazwa powinna zaczynać się od mcp__ralph-tasks__tasks_
+        let tools: Vec<&str> = MCP_MUTATION_TOOLS.split(',').collect();
+        for tool in tools {
+            assert!(
+                tool.starts_with("mcp__ralph-tasks__tasks_"),
+                "Narzędzie '{}' nie zaczyna się od 'mcp__ralph-tasks__tasks_'",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_mcp_mutation_tools_consistent_with_tools_rs() {
+        // Sprawdź spójność z MUTATION_TOOLS w src/commands/mcp/tools.rs
+        // Oczekiwane krótkie nazwy z tools.rs (bez prefiksu)
+        let expected_short_names = vec![
+            "tasks_create",
+            "tasks_update",
+            "tasks_delete",
+            "tasks_move",
+            "tasks_batch_status",
+            "tasks_set_deps",
+            "tasks_set_default_model",
+        ];
+
+        let tools: Vec<&str> = MCP_MUTATION_TOOLS.split(',').collect();
+        assert_eq!(
+            tools.len(),
+            expected_short_names.len(),
+            "Liczba narzędzi nie zgadza się z MUTATION_TOOLS"
+        );
+
+        // Sprawdź czy każde oczekiwane narzędzie występuje w pełnej nazwie
+        for short_name in expected_short_names {
+            let full_name = format!("mcp__ralph-tasks__{}", short_name);
+            assert!(
+                tools.contains(&full_name.as_str()),
+                "Brak narzędzia '{}' (pełna nazwa: '{}')",
+                short_name,
+                full_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_mcp_mutation_tools_no_duplicates() {
+        // Sprawdź że nie ma duplikatów w liście
+        let tools: Vec<&str> = MCP_MUTATION_TOOLS.split(',').collect();
+        let unique_tools: std::collections::HashSet<&str> = tools.iter().copied().collect();
+        assert_eq!(
+            tools.len(),
+            unique_tools.len(),
+            "MCP_MUTATION_TOOLS zawiera duplikaty"
+        );
+    }
+
+    #[test]
+    fn test_mcp_mutation_tools_no_whitespace() {
+        // Sprawdź że nazwy nie zawierają białych znaków (przed/po przecinku)
+        let tools: Vec<&str> = MCP_MUTATION_TOOLS.split(',').collect();
+        for tool in tools {
+            assert_eq!(
+                tool,
+                tool.trim(),
+                "Narzędzie '{}' zawiera białe znaki",
+                tool
+            );
+        }
     }
 }

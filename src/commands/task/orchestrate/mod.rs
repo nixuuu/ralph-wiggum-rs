@@ -1,13 +1,15 @@
 pub mod ai;
 mod assignment;
 mod cleanup;
-pub(crate) mod git_helpers;
 pub mod completion_summary;
 mod config;
 pub mod dashboard;
 pub mod dashboard_input;
 pub mod dry_run;
 pub mod events;
+pub(crate) mod git_helpers;
+#[cfg(test)]
+mod integration_tests;
 pub mod merge;
 pub mod orchestrator;
 mod orchestrator_events;

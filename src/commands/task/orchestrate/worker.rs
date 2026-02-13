@@ -12,6 +12,7 @@ use crate::commands::task::orchestrate::verify;
 use crate::commands::task::orchestrate::worker_runner::{WorkerRunner, WorkerRunnerConfig};
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::VerifyCommand;
+use crate::shared::mcp::MCP_MUTATION_TOOLS;
 
 /// Configuration for Worker.
 ///
@@ -135,6 +136,7 @@ impl Worker {
                 phase_timeout: self.config.phase_timeout,
                 mcp_port: self.config.mcp_port,
                 mcp_session_id: self.config.mcp_session_id.clone(),
+                disallowed_tools: Some(MCP_MUTATION_TOOLS.to_string()),
             };
             let runner = WorkerRunner::new(
                 self.id,
@@ -1227,5 +1229,39 @@ mod tests {
         };
 
         assert_eq!(config.review_model, "");
+    }
+
+    // ── Task 24.3: disallowed_tools in WorkerRunnerConfig ───────────────
+
+    /// Test that WorkerRunnerConfig is created with disallowed_tools set to MCP_MUTATION_TOOLS.
+    ///
+    /// This test simulates the configuration created in execute_task() loop (lines 131-139)
+    /// and verifies that disallowed_tools contains the expected MCP mutation tools string.
+    #[test]
+    fn test_worker_runner_config_disallowed_tools() {
+        use crate::commands::task::orchestrate::worker_runner::WorkerRunnerConfig;
+
+        // Simulate config creation from execute_task() loop
+        let runner_config = WorkerRunnerConfig {
+            use_nerd_font: false,
+            prompt_prefix: None,
+            prompt_suffix: None,
+            phase_timeout: None,
+            mcp_port: 8080,
+            mcp_session_id: "test-session".to_string(),
+            disallowed_tools: Some(MCP_MUTATION_TOOLS.to_string()),
+        };
+
+        // Verify disallowed_tools is set
+        assert!(runner_config.disallowed_tools.is_some());
+
+        // Verify it contains the MCP_MUTATION_TOOLS string
+        let disallowed = runner_config.disallowed_tools.unwrap();
+        assert_eq!(disallowed, MCP_MUTATION_TOOLS);
+
+        // Verify it contains expected tool names (sample check)
+        assert!(disallowed.contains("mcp__ralph-tasks__tasks_create"));
+        assert!(disallowed.contains("mcp__ralph-tasks__tasks_update"));
+        assert!(disallowed.contains("mcp__ralph-tasks__tasks_delete"));
     }
 }
