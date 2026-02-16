@@ -61,7 +61,9 @@ pub fn snap(buffer: &Buffer) -> String {
         output.push('\n');
     }
 
-    output
+    // Replace dynamic version string with stable placeholder for snapshot stability
+    let version = concat!("v", env!("CARGO_PKG_VERSION"));
+    output.replace(version, "v[VERSION]")
 }
 
 #[cfg(test)]
