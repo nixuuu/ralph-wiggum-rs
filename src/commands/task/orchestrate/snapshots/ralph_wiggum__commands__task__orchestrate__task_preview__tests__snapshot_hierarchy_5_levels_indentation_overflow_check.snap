@@ -1,0 +1,18 @@
+---
+source: src/commands/task/orchestrate/task_preview.rs
+expression: snapshot
+---
+╔ Task List (p to close, ↑↓ to scroll) ════════════════════════════════════════╗
+║1 L0                                                                          ║
+║  1.1 L1                                                                      ║
+║    1.1.1 L2                                                                  ║
+║      1.1.1.1 L3                                                              ║
+║        ● 1.1.1.1.1: Very long task name that should still fit [component]    ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝

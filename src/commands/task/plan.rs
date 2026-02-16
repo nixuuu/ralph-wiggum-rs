@@ -4,7 +4,7 @@ use super::args::PlanArgs;
 use super::input::resolve_input;
 use crate::commands::run::{DANGEROUS_TOOLS, RunOnceOptions, run_once};
 use crate::shared::error::Result;
-use crate::shared::file_config::FileConfig;
+use crate::shared::file_config::{FileConfig, format_profiles_info};
 use crate::shared::tasks::TasksFile;
 use crate::templates;
 
@@ -13,7 +13,11 @@ const DEFAULT_PLAN_MODEL: &str = "opus";
 
 pub async fn execute(args: PlanArgs, file_config: &FileConfig) -> Result<()> {
     // Resolve input (file > prompt > stdin)
-    let input = resolve_input(args.file.as_ref(), args.prompt.as_deref())?;
+    let input = resolve_input(
+        args.file.as_ref(),
+        args.prompt.as_deref(),
+        Some("Opisz wymagania projektu do zaplanowania..."),
+    )?;
 
     let tasks_path = file_config.task.tasks_file.clone();
 
@@ -21,10 +25,20 @@ pub async fn execute(args: PlanArgs, file_config: &FileConfig) -> Result<()> {
     let context = build_task_context(&tasks_path);
     ensure_ralph_dir(&tasks_path)?;
 
+    // Initialize empty tasks.yml if it doesn't exist
+    // This allows the MCP server to operate on the file from the start
+    if !tasks_path.exists() {
+        TasksFile::load_or_init(&tasks_path)?;
+    }
+
+    // Build profiles_info from FileConfig
+    let profiles_info = format_profiles_info(&file_config.task.orchestrate.profiles);
+
     // Build prompt from template
     let prompt = templates::PLAN_PROMPT
         .replace("{requirements}", &input)
-        .replace("{context}", &context);
+        .replace("{context}", &context)
+        .replace("{profiles_info}", &profiles_info);
 
     // Model: args > config > default (opus for plan)
     let model = Some(
@@ -288,11 +302,99 @@ tasks:
     fn test_prompt_template_substitution() {
         let prompt = templates::PLAN_PROMPT
             .replace("{requirements}", "Build a REST API")
-            .replace("{context}", "No existing tasks");
+            .replace("{context}", "No existing tasks")
+            .replace("{profiles_info}", "");
 
         assert!(prompt.contains("Build a REST API"));
         assert!(prompt.contains("No existing tasks"));
         assert!(!prompt.contains("{requirements}"));
         assert!(!prompt.contains("{context}"));
+        assert!(!prompt.contains("{profiles_info}"));
+    }
+
+    #[test]
+    fn test_tasks_yml_initialized_after_ensure_ralph_dir() {
+        let dir = std::env::temp_dir().join("ralph_plan_test_init_tasks");
+        let ralph_dir = dir.join(".ralph");
+        let tasks_path = ralph_dir.join("tasks.yml");
+
+        // Clean up if exists from previous run
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Ensure directory exists
+        ensure_ralph_dir(&tasks_path).unwrap();
+        assert!(ralph_dir.exists());
+        assert!(!tasks_path.exists());
+
+        // Initialize tasks.yml if missing (simulate plan.rs:25-28)
+        if !tasks_path.exists() {
+            TasksFile::load_or_init(&tasks_path).unwrap();
+        }
+
+        // Verify tasks.yml was created
+        assert!(tasks_path.exists());
+
+        // Verify it's a valid empty tasks file
+        let tasks_file = TasksFile::load(&tasks_path).unwrap();
+        assert_eq!(tasks_file.tasks.len(), 0);
+        assert!(tasks_file.default_model.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_profiles_info_empty_when_no_profiles() {
+        let profiles = vec![];
+        let profiles_info = format_profiles_info(&profiles);
+        assert_eq!(profiles_info, "");
+    }
+
+    #[test]
+    fn test_profiles_info_with_profiles() {
+        use crate::shared::file_config::{VerifyCommand, VerifyProfile};
+
+        let profiles = vec![VerifyProfile {
+            name: "rust".to_string(),
+            description: Some("Rust verification".to_string()),
+            paths: vec!["src/**/*.rs".to_string()],
+            working_dir: None,
+            verify_commands: vec![
+                VerifyCommand::Simple("cargo check".to_string()),
+                VerifyCommand::Simple("cargo test".to_string()),
+            ],
+            setup_commands: vec![],
+        }];
+
+        let profiles_info = format_profiles_info(&profiles);
+        assert!(profiles_info.contains("**rust**"));
+        assert!(profiles_info.contains("Rust verification"));
+        assert!(profiles_info.contains("src/**/*.rs"));
+        assert!(profiles_info.contains("cargo check"));
+        assert!(profiles_info.contains("cargo test"));
+    }
+
+    #[test]
+    fn test_prompt_includes_profiles_info() {
+        use crate::shared::file_config::VerifyProfile;
+
+        let profiles = vec![VerifyProfile {
+            name: "test".to_string(),
+            description: None,
+            paths: vec!["test/**".to_string()],
+            working_dir: None,
+            verify_commands: vec![],
+            setup_commands: vec![],
+        }];
+
+        let profiles_info = format_profiles_info(&profiles);
+        let prompt = templates::PLAN_PROMPT
+            .replace("{requirements}", "Build API")
+            .replace("{context}", "No tasks")
+            .replace("{profiles_info}", &profiles_info);
+
+        assert!(prompt.contains("Build API"));
+        assert!(prompt.contains("No tasks"));
+        assert!(prompt.contains("**test**"));
+        assert!(!prompt.contains("{profiles_info}"));
     }
 }

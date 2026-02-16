@@ -49,9 +49,17 @@ impl WorktreeManager {
     }
 
     /// Sanitize a task ID for use in filesystem paths and branch names.
-    /// Replaces '.' with '-' (e.g., "1.2.3" → "1-2-3").
+    ///
+    /// Security: strips path separators (`/`, `\`) and parent-directory sequences (`..`)
+    /// to prevent path traversal attacks. Only alphanumeric, `-`, and `_` survive.
     pub fn sanitize_task_id(task_id: &str) -> String {
-        task_id.replace('.', "-")
+        task_id
+            .chars()
+            .map(|c| match c {
+                c if c.is_ascii_alphanumeric() || c == '-' || c == '_' => c,
+                _ => '-',
+            })
+            .collect()
     }
 
     /// Generate the worktree directory path for a given task ID.
@@ -457,6 +465,66 @@ mod tests {
     }
 
     #[test]
+    fn test_worktree_path_when_project_root_is_fs_root() {
+        // Edge case: project_root = "/" — parent() returns None, fallback to /tmp.
+        // file_name() also returns None, so project_name defaults to "project".
+        let mgr = WorktreeManager::new(PathBuf::from("/"), None);
+        let path = mgr.worktree_path("T01");
+
+        assert_eq!(path, PathBuf::from("/tmp/project-ralph-task-T01"));
+
+        // No double separators in the generated path
+        assert!(!path.to_string_lossy().contains("//"));
+    }
+
+    #[test]
+    fn test_sanitize_task_id_unicode() {
+        // sanitize_task_id przepuszcza TYLKO ASCII alphanumeric, '-' i '_'.
+        // Znaki unicode (non-ASCII) zostają zamienione na '-'.
+        assert_eq!(WorktreeManager::sanitize_task_id("zażółć"), "za----");
+        assert_eq!(
+            WorktreeManager::sanitize_task_id("task (copy)"),
+            "task--copy-"
+        );
+        assert_eq!(WorktreeManager::sanitize_task_id("task:name"), "task-name");
+        assert_eq!(WorktreeManager::sanitize_task_id("task~1"), "task-1");
+        assert_eq!(
+            WorktreeManager::sanitize_task_id("task[1].name~2"),
+            "task-1--name-2"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_task_id_git_branch_compatibility() {
+        // sanitize_task_id jest używane TYLKO dla ścieżek filesystem (worktree_path).
+        // branch_name() używa oryginalnego task_id bez sanityzacji.
+        // Znaki zabronione w git branch: space, ~, ^, :, ?, *, [, ], \
+
+        let forbidden_in_git = [
+            (" ", "space"),
+            ("~", "tilde"),
+            ("^", "caret"),
+            (":", "colon"),
+            ("?", "question"),
+            ("*", "asterisk"),
+            ("[", "bracket-open"),
+            ("]", "bracket-close"),
+            ("\\", "backslash"),
+        ];
+
+        for (ch, label) in forbidden_in_git {
+            let task_id = format!("task{ch}name");
+            let branch = WorktreeManager::branch_name(&task_id);
+
+            // Dokumentacja obecnego zachowania: branch_name nie filtruje specjalnych znaków
+            assert!(
+                branch.contains(ch),
+                "branch_name nie filtruje znaku {label}: {branch}"
+            );
+        }
+    }
+
+    #[test]
     fn test_list_orphaned_parsing_logic() {
         // Test the parsing logic used in list_orphaned() method
         // This verifies the algorithm handles various edge cases correctly
@@ -589,5 +657,390 @@ branch refs/heads/ralph/w1/T99";
         assert_eq!(orphans3.len(), 2);
         assert!(orphans3.iter().any(|(_, b)| b == "ralph/task/1.2.3"));
         assert!(orphans3.iter().any(|(_, b)| b == "ralph/w1/T99"));
+    }
+
+    // --- Path traversal security tests (task 54.1) ---
+
+    /// Unix-style path traversal: "../../../etc" must not contain slashes.
+    #[test]
+    fn test_sanitize_task_id_path_traversal_unix() {
+        let sanitized = WorktreeManager::sanitize_task_id("../../../etc");
+        assert!(
+            !sanitized.contains('/'),
+            "sanitized ID must not contain '/'"
+        );
+        assert!(
+            !sanitized.contains('\\'),
+            "sanitized ID must not contain '\\'"
+        );
+        assert!(
+            !sanitized.contains(".."),
+            "sanitized ID must not contain '..'"
+        );
+        // Each non-alphanumeric char becomes '-': "../../../etc" has 9 such chars
+        assert_eq!(sanitized, "---------etc");
+    }
+
+    /// Mixed traversal: "task/../../secret" — slashes stripped.
+    #[test]
+    fn test_sanitize_task_id_path_traversal_mixed() {
+        let sanitized = WorktreeManager::sanitize_task_id("task/../../secret");
+        assert!(!sanitized.contains('/'));
+        assert!(!sanitized.contains(".."));
+        assert_eq!(sanitized, "task-------secret");
+    }
+
+    /// Windows-style traversal: "task\..\..\secret" — backslashes stripped.
+    #[test]
+    fn test_sanitize_task_id_path_traversal_windows() {
+        let sanitized = WorktreeManager::sanitize_task_id(r"task\..\..\secret");
+        assert!(!sanitized.contains('\\'));
+        assert!(!sanitized.contains('/'));
+        assert!(!sanitized.contains(".."));
+        assert_eq!(sanitized, "task-------secret");
+    }
+
+    /// Worktree path with traversal ID stays inside parent directory.
+    #[test]
+    fn test_worktree_path_no_traversal() {
+        let mgr = WorktreeManager::new(PathBuf::from("/home/user/myproject"), None);
+        let path = mgr.worktree_path("../../../etc/passwd");
+        let path_str = path.to_string_lossy();
+
+        // Path must stay under /home/user/ (sibling to project)
+        assert!(
+            path_str.starts_with("/home/user/"),
+            "worktree path escaped parent: {path_str}"
+        );
+        assert!(
+            !path_str.contains(".."),
+            "worktree path contains '..': {path_str}"
+        );
+        assert!(
+            !path_str.contains("/etc/"),
+            "worktree path reached /etc/: {path_str}"
+        );
+    }
+
+    /// Branch name with traversal ID — slashes in ID are sanitized before use.
+    /// Note: branch_name() uses raw task_id by design (git refs allow slashes).
+    /// Security boundary is at worktree_path() and sanitize_task_id().
+    #[test]
+    fn test_branch_name_with_traversal_id() {
+        // branch_name uses raw ID — callers must sanitize if needed
+        let branch = WorktreeManager::branch_name("../../../etc");
+        assert_eq!(branch, "ralph/task/../../../etc");
+
+        // But worktree_path always sanitizes:
+        let mgr = WorktreeManager::new(PathBuf::from("/home/user/proj"), None);
+        let path = mgr.worktree_path("../../../etc");
+        assert!(!path.to_string_lossy().contains(".."));
+    }
+
+    /// Edge cases: null bytes, spaces, special characters.
+    #[test]
+    fn test_sanitize_task_id_special_chars() {
+        // Only alphanumeric, dash, underscore survive
+        assert_eq!(WorktreeManager::sanitize_task_id("a b"), "a-b");
+        assert_eq!(WorktreeManager::sanitize_task_id("a\0b"), "a-b");
+        assert_eq!(WorktreeManager::sanitize_task_id("a:b"), "a-b");
+        assert_eq!(WorktreeManager::sanitize_task_id("a_b"), "a_b");
+        assert_eq!(WorktreeManager::sanitize_task_id(""), "");
+    }
+
+    // --- Worker failure cleanup tests (task 54.4) ---
+
+    /// Helper: tworzy tymczasowe git repo z jednym commitem (wymagany dla worktree).
+    fn init_test_git_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::fs;
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let root = temp_dir.path().to_path_buf();
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .output()
+            .expect("git init failed");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&root)
+            .output()
+            .ok();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&root)
+            .output()
+            .ok();
+
+        fs::write(root.join("README.md"), "test").expect("write failed");
+        std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&root)
+            .output()
+            .expect("git add failed");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(&root)
+            .output()
+            .expect("git commit failed");
+
+        (temp_dir, root)
+    }
+
+    /// Helper: sprawdza czy branch istnieje w repozytorium.
+    fn branch_exists(project_root: &Path, branch: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--verify", branch])
+            .current_dir(project_root)
+            .output()
+            .expect("git rev-parse failed")
+            .status
+            .success()
+    }
+
+    /// Test cleanup po worker failure — worktree i branch usunięte, brak orphans.
+    ///
+    /// Scenariusz:
+    /// 1. Worker tworzy worktree dla zadania
+    /// 2. Worker kończy się błędem
+    /// 3. Orchestrator wywołuje cleanup (remove_worktree + remove_branch)
+    /// 4. Weryfikacja: worktree nie istnieje, branch usunięty, brak orphaned worktrees
+    #[tokio::test]
+    async fn test_worktree_cleanup_after_worker_failure() {
+        let (_temp_dir, project_root) = init_test_git_repo();
+        let mgr = WorktreeManager::new(project_root.clone(), None);
+        let task_id = "54.4";
+
+        // Worker tworzy worktree
+        let wt = mgr
+            .create_worktree(task_id)
+            .await
+            .expect("Failed to create worktree");
+
+        assert!(wt.path.exists(), "Worktree should exist after creation");
+        assert_eq!(wt.task_id, task_id);
+        assert_eq!(wt.branch, format!("ralph/task/{task_id}"));
+        assert!(
+            branch_exists(&project_root, &wt.branch),
+            "Branch should exist after worktree creation"
+        );
+
+        // Orchestrator robi cleanup po failure
+        mgr.remove_worktree(&wt.path)
+            .await
+            .expect("Failed to remove worktree");
+        mgr.remove_branch(&wt.branch)
+            .await
+            .expect("Failed to remove branch");
+
+        // Weryfikacja
+        assert!(
+            !wt.path.exists(),
+            "Worktree path should not exist after cleanup"
+        );
+        assert!(
+            !branch_exists(&project_root, &wt.branch),
+            "Branch should not exist after cleanup"
+        );
+        let orphans = mgr.list_orphaned().await.expect("list_orphaned failed");
+        assert!(
+            orphans.is_empty(),
+            "Should have no orphaned worktrees after cleanup, found: {orphans:?}"
+        );
+    }
+
+    /// Test cleanup dirty worktree — worktree z niecommitowanymi zmianami.
+    ///
+    /// Edge case: worker zaczął modyfikować pliki w worktree ale nie zcommitował.
+    /// Cleanup powinien nadal działać poprawnie.
+    #[tokio::test]
+    async fn test_worktree_cleanup_with_dirty_working_tree() {
+        let (_temp_dir, project_root) = init_test_git_repo();
+        let mgr = WorktreeManager::new(project_root.clone(), None);
+        let task_id = "dirty-wt";
+
+        let wt = mgr
+            .create_worktree(task_id)
+            .await
+            .expect("Failed to create worktree");
+        assert!(wt.path.exists());
+
+        // Symuluj pracę workera — niecommitowane zmiany w worktree
+        std::fs::write(wt.path.join("dirty_file.txt"), "uncommitted work")
+            .expect("write to worktree failed");
+        std::fs::write(wt.path.join("README.md"), "modified content")
+            .expect("modify file in worktree failed");
+
+        // Cleanup powinien działać mimo dirty worktree
+        let cleanup_result = mgr.remove_worktree(&wt.path).await;
+        assert!(
+            cleanup_result.is_ok(),
+            "Cleanup should succeed on dirty worktree: {cleanup_result:?}"
+        );
+
+        let branch_result = mgr.remove_branch(&wt.branch).await;
+        assert!(
+            branch_result.is_ok(),
+            "Branch cleanup should succeed: {branch_result:?}"
+        );
+
+        assert!(!wt.path.exists(), "Dirty worktree should be removed");
+        assert!(
+            !branch_exists(&project_root, &wt.branch),
+            "Branch should be removed"
+        );
+        let orphans = mgr.list_orphaned().await.expect("list_orphaned failed");
+        assert!(orphans.is_empty(), "No orphaned worktrees should remain");
+    }
+
+    // --- Task 55.2: ID with hyphens and underscores ---
+
+    /// Test: sanitize_task_id z myślnikami (np. "1.1-beta", "2.0-rc1")
+    /// Myślniki są dozwolone, kropki zamieniamy na myślniki
+    #[test]
+    fn test_sanitize_task_id_with_hyphens() {
+        // Myślniki są już dozwolone — przetrwają sanityzację
+        assert_eq!(WorktreeManager::sanitize_task_id("1-beta"), "1-beta");
+        assert_eq!(WorktreeManager::sanitize_task_id("2-0-rc1"), "2-0-rc1");
+
+        // Kropki są zamieniane na myślniki
+        assert_eq!(WorktreeManager::sanitize_task_id("1.1-beta"), "1-1-beta");
+        assert_eq!(WorktreeManager::sanitize_task_id("2.0-rc1"), "2-0-rc1");
+    }
+
+    /// Test: sanitize_task_id z podkreśleniami (np. "T01_draft", "T01_v2")
+    /// Podkreślenia są dozwolone
+    #[test]
+    fn test_sanitize_task_id_with_underscores() {
+        assert_eq!(WorktreeManager::sanitize_task_id("T01_draft"), "T01_draft");
+        assert_eq!(WorktreeManager::sanitize_task_id("T01_v2"), "T01_v2");
+        assert_eq!(
+            WorktreeManager::sanitize_task_id("TASK_001_FINAL"),
+            "TASK_001_FINAL"
+        );
+    }
+
+    /// Test: worktree_path z ID zawierającymi myślniki
+    /// Sprawdza że ścieżka jest poprawnie generowana
+    #[test]
+    fn test_worktree_path_with_hyphens() {
+        let mgr = WorktreeManager::new(PathBuf::from("/home/user/myproject"), None);
+
+        let path = mgr.worktree_path("1.1-beta");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/myproject-ralph-task-1-1-beta")
+        );
+
+        let path = mgr.worktree_path("2.0-rc1");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/myproject-ralph-task-2-0-rc1")
+        );
+    }
+
+    /// Test: worktree_path z ID zawierającymi podkreślenia
+    #[test]
+    fn test_worktree_path_with_underscores() {
+        let mgr = WorktreeManager::new(PathBuf::from("/home/user/myproject"), None);
+
+        let path = mgr.worktree_path("T01_draft");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/myproject-ralph-task-T01_draft")
+        );
+
+        let path = mgr.worktree_path("T01_v2");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/myproject-ralph-task-T01_v2")
+        );
+
+        let path = mgr.worktree_path("TASK_001_FINAL");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/myproject-ralph-task-TASK_001_FINAL")
+        );
+    }
+
+    /// Test: branch_name z ID zawierającymi myślniki i podkreślenia
+    /// Branch name używa oryginalnego ID (bez sanityzacji)
+    #[test]
+    fn test_branch_name_with_special_chars() {
+        // Branch name NIE sanityzuje — używa raw ID
+        assert_eq!(
+            WorktreeManager::branch_name("1.1-beta"),
+            "ralph/task/1.1-beta"
+        );
+        assert_eq!(
+            WorktreeManager::branch_name("T01_draft"),
+            "ralph/task/T01_draft"
+        );
+        assert_eq!(
+            WorktreeManager::branch_name("2.0-rc1"),
+            "ralph/task/2.0-rc1"
+        );
+        assert_eq!(
+            WorktreeManager::branch_name("TASK_001_FINAL"),
+            "ralph/task/TASK_001_FINAL"
+        );
+    }
+
+    /// Test: is_ralph_branch z ID zawierającymi special chars
+    /// Sprawdza że pattern matching działa z myślnikami i podkreśleniami
+    #[test]
+    fn test_is_ralph_branch_with_special_chars() {
+        // New pattern: ralph/task/{task_id} z myślnikami i underscores
+        assert!(WorktreeManager::is_ralph_branch("ralph/task/1.1-beta"));
+        assert!(WorktreeManager::is_ralph_branch("ralph/task/T01_draft"));
+        assert!(WorktreeManager::is_ralph_branch("ralph/task/2.0-rc1"));
+        assert!(WorktreeManager::is_ralph_branch(
+            "ralph/task/TASK_001_FINAL"
+        ));
+        assert!(WorktreeManager::is_ralph_branch("ralph/task/v1.2.3-beta_1"));
+
+        // Legacy pattern: ralph/w{N}/{task_id}
+        assert!(WorktreeManager::is_ralph_branch("ralph/w0/1.1-beta"));
+        assert!(WorktreeManager::is_ralph_branch("ralph/w1/T01_draft"));
+        assert!(WorktreeManager::is_ralph_branch("ralph/w99/2.0-rc1"));
+    }
+
+    /// Test: Mieszane ID (myślniki + podkreślenia + kropki) w worktree path
+    /// Sprawdza poprawność sanityzacji dla złożonych ID
+    #[test]
+    fn test_worktree_path_mixed_special_chars() {
+        let mgr = WorktreeManager::new(PathBuf::from("/home/user/project"), None);
+
+        // "v1.2.3-beta_1" → kropki → myślniki, reszta bez zmian
+        let path = mgr.worktree_path("v1.2.3-beta_1");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/project-ralph-task-v1-2-3-beta_1")
+        );
+
+        // "alpha-1_beta" → bez kropek, wszystko przetrwa
+        let path = mgr.worktree_path("alpha-1_beta");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/project-ralph-task-alpha-1_beta")
+        );
+
+        // "T2_1-RC" → bez kropek
+        let path = mgr.worktree_path("T2_1-RC");
+        assert_eq!(path, PathBuf::from("/home/user/project-ralph-task-T2_1-RC"));
+    }
+
+    /// Test: Ścieżka worktree nie duplikuje separatorów dla ID z myślnikami
+    /// Sprawdza że nie występują podwójne myślniki w ścieżce
+    #[test]
+    fn test_worktree_path_no_double_separators() {
+        let mgr = WorktreeManager::new(PathBuf::from("/home/user/my-project"), None);
+
+        let path = mgr.worktree_path("1.1-beta");
+        let path_str = path.to_string_lossy();
+
+        // Separator pomiędzy prefix a "task-" jest pojedynczy
+        assert!(path_str.contains("my-project-ralph-task-"));
+        assert!(!path_str.contains("---"), "Path nie może zawierać ---");
     }
 }

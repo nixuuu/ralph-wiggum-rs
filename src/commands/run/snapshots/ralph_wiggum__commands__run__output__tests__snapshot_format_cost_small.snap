@@ -1,0 +1,6 @@
+---
+source: src/commands/run/output.rs
+expression: output
+---
+  Cost:      $0.0001
+            $0.0001 claude-sonnet-4-5

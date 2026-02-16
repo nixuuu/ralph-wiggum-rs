@@ -10,6 +10,11 @@ pub mod state;
 mod tools;
 pub mod tui;
 
+// Re-export dla wygodnego dostępu do text input z innych modułów
+// Allow unused: te importy są eksportowane dla użytku zewnętrznego
+#[allow(unused_imports)]
+pub use tui::{standalone_text_input, text_input};
+
 #[cfg(test)]
 mod tests {
     use super::session::SessionRegistry;

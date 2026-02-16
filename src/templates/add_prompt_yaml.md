@@ -37,6 +37,7 @@ You have MCP tools available for reading and modifying tasks. **You MUST use the
    - `component` — optional, inherited from parent
    - `status` — only on leaf nodes: `todo`, `done`, `in_progress`, `blocked`
    - `deps` — only on leaf nodes: array of task IDs
+   - `profiles` — only on leaf nodes: array of profile names (strings)
    - `subtasks` — array of child task nodes
    - `description` — optional, detailed task description with context and acceptance criteria
    - `related_files` — optional list of files relevant to the task
@@ -69,6 +70,7 @@ You have MCP tools available for reading and modifying tasks. **You MUST use the
 
    Set `default_model: sonnet` at the top level. Every leaf task MUST have a `model` field — use `sonnet` unless the task clearly fits `opus` or `haiku`.
 
+{profiles_section}
 ## IMPORTANT RULES
 
 - **NEVER use Read, Write, or Edit tools on `.ralph/tasks.yml` — use ONLY MCP tools listed above**

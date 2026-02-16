@@ -37,6 +37,48 @@ impl TasksFile {
         Ok(tf)
     }
 
+    /// Load or initialize: if path exists, load it; otherwise create empty TasksFile.
+    ///
+    /// This method is the recommended entry point for task operations as it handles
+    /// both existing files and new project initialization transparently.
+    ///
+    /// # Behavior
+    /// - If file exists → delegates to `load(path)` (existing behavior)
+    /// - If file doesn't exist:
+    ///   1. Creates parent directory with `create_dir_all`
+    ///   2. Creates new empty `TasksFile` with default model
+    ///   3. Saves atomically via `save(path)`
+    ///   4. Returns the empty TasksFile
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::path::Path;
+    /// use ralph_wiggum::shared::tasks::TasksFile;
+    ///
+    /// let path = Path::new(".ralph/tasks.yml");
+    /// let tasks = TasksFile::load_or_init(path)?;
+    /// // Works whether .ralph/ exists or not
+    /// # Ok::<(), ralph_wiggum::shared::error::RalphError>(())
+    /// ```
+    pub fn load_or_init(path: &Path) -> Result<Self> {
+        if path.exists() {
+            // File exists, delegate to existing load logic
+            return Self::load(path);
+        }
+
+        // File doesn't exist, create empty TasksFile
+        let empty = Self {
+            default_model: Some("claude-sonnet-4-5-20250929".to_string()),
+            tasks: vec![],
+        };
+
+        // Create parent directory and save atomically
+        // save() already handles create_dir_all for parent
+        empty.save(path)?;
+
+        Ok(empty)
+    }
+
     /// Atomic save: write to .tmp then rename.
     pub fn save(&self, path: &Path) -> Result<()> {
         let yaml = serde_yaml::to_string(self)?;
@@ -78,7 +120,7 @@ impl TasksFile {
             .unwrap_or("general");
 
         if node.is_leaf() {
-            // Clone overhead: 9 fields copied to create owned LeafTask.
+            // Clone overhead: 10 fields copied to create owned LeafTask.
             // Alternative would be LeafTask<'a> with borrowed fields, but that
             // complicates the API for all consumers. These clones happen only
             // during task collection (not in hot paths), so the trade-off favors
@@ -93,6 +135,7 @@ impl TasksFile {
                 description: node.description.clone(),
                 related_files: node.related_files.clone(),
                 implementation_steps: node.implementation_steps.clone(),
+                profiles: node.profiles.clone(),
             });
         } else {
             for child in &node.subtasks {
@@ -735,6 +778,135 @@ tasks:
         assert_eq!(leaves.len(), 2);
     }
 
+    // ── Tests for load_or_init ─────────────────────
+
+    #[test]
+    fn test_load_or_init_existing_file() {
+        // When file exists, load_or_init should behave exactly like load
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("ralph_test_load_or_init_existing");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("tasks.yml");
+
+        let yaml = sample_yaml();
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+        drop(file);
+
+        let tf = TasksFile::load_or_init(&path).unwrap();
+        assert_eq!(tf.tasks.len(), 2);
+        assert_eq!(
+            tf.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+        assert_eq!(tf.flatten_leaves().len(), 6);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_or_init_creates_directory_and_file() {
+        // When file doesn't exist, create directory + empty TasksFile
+        let dir = std::env::temp_dir().join("ralph_test_load_or_init_new");
+        // Ensure directory doesn't exist
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let path = dir.join("tasks.yml");
+
+        let tf = TasksFile::load_or_init(&path).unwrap();
+
+        // Verify empty TasksFile with default model
+        assert_eq!(tf.tasks.len(), 0);
+        assert_eq!(
+            tf.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+
+        // Verify file was created on disk
+        assert!(path.exists());
+        let loaded = TasksFile::load(&path).unwrap();
+        assert_eq!(loaded.tasks.len(), 0);
+        assert_eq!(
+            loaded.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_or_init_creates_nested_directory() {
+        // When parent directory doesn't exist, create entire path
+        let dir = std::env::temp_dir()
+            .join("ralph_test_load_or_init_nested")
+            .join("deeply")
+            .join("nested")
+            .join("path");
+        // Ensure directory doesn't exist
+        let _ =
+            std::fs::remove_dir_all(std::env::temp_dir().join("ralph_test_load_or_init_nested"));
+
+        let path = dir.join("tasks.yml");
+
+        let tf = TasksFile::load_or_init(&path).unwrap();
+
+        // Verify empty TasksFile was created
+        assert_eq!(tf.tasks.len(), 0);
+        assert!(path.exists());
+        assert!(dir.exists());
+
+        let _ =
+            std::fs::remove_dir_all(std::env::temp_dir().join("ralph_test_load_or_init_nested"));
+    }
+
+    #[test]
+    fn test_load_or_init_idempotent() {
+        // Calling load_or_init twice in a row should return same result
+        let dir = std::env::temp_dir().join("ralph_test_load_or_init_idempotent");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let path = dir.join("tasks.yml");
+
+        let tf1 = TasksFile::load_or_init(&path).unwrap();
+        assert_eq!(tf1.tasks.len(), 0);
+
+        let tf2 = TasksFile::load_or_init(&path).unwrap();
+        assert_eq!(tf2.tasks.len(), 0);
+        assert_eq!(tf1.default_model, tf2.default_model);
+
+        // Verify file wasn't corrupted or changed
+        let loaded = TasksFile::load(&path).unwrap();
+        assert_eq!(loaded.tasks.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_or_init_default_model() {
+        // When creating new file, default_model should be set to Sonnet 4.5
+        let dir = std::env::temp_dir().join("ralph_test_load_or_init_default_model");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let path = dir.join("tasks.yml");
+
+        let tf = TasksFile::load_or_init(&path).unwrap();
+
+        // Verify default_model is set correctly
+        assert_eq!(
+            tf.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+
+        // Verify it persists to disk
+        let loaded = TasksFile::load(&path).unwrap();
+        assert_eq!(
+            loaded.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ── Tests for find_node / all_ids ──────────────
 
     #[test]
@@ -769,5 +941,435 @@ tasks:
         assert!(ids.contains("1.1"));
         assert!(ids.contains("1.1.1"));
         assert!(ids.contains("2.2"));
+    }
+
+    #[test]
+    fn test_profiles_serialization_deserialization() {
+        // Test: profiles field is correctly serialized and deserialized
+        let yaml = r#"
+tasks:
+  - id: "1"
+    name: "Task with profiles"
+    component: api
+    status: todo
+    profiles: ["production", "staging"]
+  - id: "2"
+    name: "Task without profiles"
+    component: api
+    status: todo
+"#;
+        let tf: TasksFile = serde_yaml::from_str(yaml).unwrap();
+        let leaves = tf.flatten_leaves();
+
+        // Task 1 has profiles
+        assert_eq!(leaves[0].id, "1");
+        assert_eq!(leaves[0].profiles, vec!["production", "staging"]);
+
+        // Task 2 has no profiles (empty vec)
+        assert_eq!(leaves[1].id, "2");
+        assert!(leaves[1].profiles.is_empty());
+
+        // Roundtrip: serialize and deserialize
+        let serialized = serde_yaml::to_string(&tf).unwrap();
+        let tf2: TasksFile = serde_yaml::from_str(&serialized).unwrap();
+        let leaves2 = tf2.flatten_leaves();
+
+        assert_eq!(leaves2[0].profiles, vec!["production", "staging"]);
+        assert!(leaves2[1].profiles.is_empty());
+
+        // Verify empty profiles is omitted in YAML (skip_serializing_if)
+        assert!(!serialized.contains("profiles: []"));
+    }
+
+    #[test]
+    fn test_profiles_in_format_task_prompt() {
+        // Test: format_task_prompt includes profiles when present
+        let leaf = LeafTask {
+            id: "1.1".to_string(),
+            name: "Deploy API".to_string(),
+            component: "api".to_string(),
+            status: TaskStatus::Todo,
+            deps: vec![],
+            model: None,
+            description: Some("Deploy to production".to_string()),
+            related_files: vec![],
+            implementation_steps: vec![],
+            profiles: vec!["production".to_string(), "eu-west".to_string()],
+        };
+
+        let prompt = format_task_prompt(&leaf);
+
+        // Verify profiles section exists
+        assert!(prompt.contains("**Profiles:**"));
+        assert!(prompt.contains("production, eu-west"));
+    }
+
+    #[test]
+    fn test_profiles_omitted_when_empty() {
+        // Test: format_task_prompt omits profiles section when empty
+        let leaf = LeafTask {
+            id: "1.1".to_string(),
+            name: "Simple task".to_string(),
+            component: "api".to_string(),
+            status: TaskStatus::Todo,
+            deps: vec![],
+            model: None,
+            description: None,
+            related_files: vec![],
+            implementation_steps: vec![],
+            profiles: vec![],
+        };
+
+        let prompt = format_task_prompt(&leaf);
+
+        // Verify profiles section does not exist
+        assert!(!prompt.contains("**Profiles:**"));
+    }
+
+    #[test]
+    fn test_leaf_node_without_status_defaults_to_todo() {
+        // Test: Leaf node bez pola status — domyślnie Todo
+        // Sprawdza lukę w walidacji: validate() NIE zgłasza błędu dla leafa bez status
+        let yaml = r#"
+tasks:
+  - id: "1"
+    name: "Task without status"
+    component: test
+    subtasks: []
+"#;
+        let tf: TasksFile = serde_yaml::from_str(yaml).unwrap();
+
+        // 1. Sprawdź że node jest leafem
+        let node = tf.find_node("1").unwrap();
+        assert!(node.is_leaf(), "Node should be a leaf (empty subtasks)");
+        assert!(node.status.is_none(), "Node status should be None");
+
+        // 2. Wywołaj flatten_leaves i sprawdź że status == Todo
+        let leaves = tf.flatten_leaves();
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].id, "1");
+        assert_eq!(
+            leaves[0].status,
+            TaskStatus::Todo,
+            "Leaf without status should default to Todo"
+        );
+
+        // 3. Wywołaj validate() i sprawdź że NIE zwraca błędu
+        // To jest obecne zachowanie (luka w walidacji)
+        assert!(
+            tf.validate().is_ok(),
+            "Validation should not error for leaf without status (current behavior)"
+        );
+    }
+
+    // ── Tests for save() atomicity & tmp cleanup ──
+
+    #[test]
+    fn test_save_no_tmp_file_left_on_success() {
+        // Happy path: po udanym save(), .yml.tmp nie powinien istnieć
+        let dir = std::env::temp_dir().join("ralph_test_save_no_tmp");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let path = dir.join("tasks.yml");
+        let tf: TasksFile = serde_yaml::from_str(sample_yaml()).unwrap();
+
+        tf.save(&path).unwrap();
+
+        let tmp_path = path.with_extension("yml.tmp");
+        assert!(
+            !tmp_path.exists(),
+            ".yml.tmp should be removed after successful save"
+        );
+        assert!(path.exists(), "tasks.yml should exist after save");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_rename_fail_leaves_tmp_file() {
+        // Gdy rename fail (docelowy path to katalog), .yml.tmp zostaje na dysku
+        // Wymuszamy rename failure: tworzymy katalog o nazwie "tasks.yml"
+        let dir = std::env::temp_dir().join("ralph_test_save_rename_fail");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Stwórz katalog "tasks.yml" — std::fs::rename file→dir zwraca Err(IsADirectory)
+        let target_as_dir = dir.join("tasks.yml");
+        std::fs::create_dir_all(&target_as_dir).unwrap();
+
+        let path = dir.join("tasks.yml");
+        let tf: TasksFile = serde_yaml::from_str(sample_yaml()).unwrap();
+
+        let result = tf.save(&path);
+        assert!(
+            result.is_err(),
+            "save() should fail when rename target is a directory"
+        );
+
+        // .yml.tmp zostaje na dysku (leak) — save() nie sprząta po rename failure
+        let tmp_path = path.with_extension("yml.tmp");
+        assert!(
+            tmp_path.exists(),
+            ".yml.tmp should remain on disk when rename fails (known leak)"
+        );
+
+        // Oryginalny katalog "tasks.yml" nie został zmieniony
+        assert!(
+            target_as_dir.is_dir(),
+            "Original directory should remain unchanged"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_original_file_unchanged_on_rename_failure() {
+        // Rename failure nie nadpisuje celu — wymuszamy przez katalog w miejscu docelowym.
+        // Na Unix rename(file, dir) zwraca EISDIR, więc oryginalny katalog (symulujący
+        // "istniejące dane") pozostaje nietknięty.
+        let dir = std::env::temp_dir().join("ralph_test_save_original_unchanged");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let path = dir.join("tasks.yml");
+
+        // Stwórz katalog w miejscu docelowym — rename file→dir fail
+        std::fs::create_dir_all(&path).unwrap();
+        // Dodaj marker file w katalogu żeby sprawdzić że nie został naruszony
+        let marker = path.join("marker.txt");
+        std::fs::write(&marker, "untouched").unwrap();
+
+        let modified = TasksFile {
+            default_model: Some("modified-model".to_string()),
+            tasks: vec![],
+        };
+        let result = modified.save(&path);
+        assert!(result.is_err(), "save() should fail: rename file→dir");
+
+        // Katalog i jego zawartość pozostały nienaruszone
+        assert!(path.is_dir(), "Target directory should still exist");
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "untouched",
+            "Marker file inside target should be untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_write_fail_no_tmp_left() {
+        // Gdy write do .yml.tmp fail (np. read-only dir), tmp nie zostaje na dysku
+        let dir = std::env::temp_dir().join("ralph_test_save_write_fail");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Ustaw katalog na read-only — write do .yml.tmp też fail
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o555);
+            std::fs::set_permissions(&dir, perms).unwrap();
+        }
+
+        let path = dir.join("tasks.yml");
+        let tf: TasksFile = serde_yaml::from_str(sample_yaml()).unwrap();
+
+        let result = tf.save(&path);
+
+        #[cfg(unix)]
+        {
+            // save() powinien zwrócić Err (write failure)
+            assert!(result.is_err(), "save() should fail on read-only directory");
+
+            let tmp_path = path.with_extension("yml.tmp");
+            assert!(
+                !tmp_path.exists(),
+                ".yml.tmp should not exist when write itself fails"
+            );
+
+            // Przywróć permissions do cleanup
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(&dir, perms).unwrap();
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_atomicity_concurrent_readers() {
+        // Test atomowości: save() nie powinien zostawić pliku w stanie pośrednim
+        let dir = std::env::temp_dir().join("ralph_test_save_atomicity");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let path = dir.join("tasks.yml");
+
+        // Zapisz wersję 1
+        let v1 = TasksFile {
+            default_model: Some("v1".to_string()),
+            tasks: vec![],
+        };
+        v1.save(&path).unwrap();
+
+        // Zapisz wersję 2 — nadpisuje v1 atomowo (write tmp + rename)
+        let v2: TasksFile = serde_yaml::from_str(sample_yaml()).unwrap();
+        v2.save(&path).unwrap();
+
+        // Po save: plik powinien mieć treść v2, nie mieszankę v1/v2
+        let loaded = TasksFile::load(&path).unwrap();
+        assert_eq!(
+            loaded.tasks.len(),
+            2,
+            "File should contain v2 data (2 tasks)"
+        );
+        assert_eq!(
+            loaded.default_model.as_deref(),
+            Some("claude-sonnet-4-5-20250929"),
+            "default_model should be from v2"
+        );
+
+        // Brak .yml.tmp
+        let tmp_path = path.with_extension("yml.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "No leftover .yml.tmp after successful save"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_yaml_with_tab_indentation_returns_yaml_parse_error() {
+        // YAML z tabulatorami zamiast spacji powinien zwrócić RalphError::YamlParse
+        let yaml_with_tabs = "tasks:\n\t- id: \"1\"\n\t  name: \"Task\"\n\t  status: todo\n";
+
+        // Deserializacja powinna zwrócić błąd parsowania
+        let result = serde_yaml::from_str::<TasksFile>(yaml_with_tabs);
+        assert!(result.is_err(), "YAML with tab indentation should fail");
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("cannot start any token"),
+            "Error should mention invalid token, got: {err_msg}"
+        );
+
+        // Konwersja do RalphError::YamlParse (via From impl)
+        let ralph_err: RalphError = err.into();
+        assert!(
+            matches!(ralph_err, RalphError::YamlParse(_)),
+            "Expected RalphError::YamlParse, got: {ralph_err:?}"
+        );
+    }
+
+    // ── Tests for TasksFile::load z uszkodzonym YAML (Task 58.4) ──
+
+    /// Helper: tworzy plik tymczasowy z podaną zawartością i zwraca ścieżkę + dir do cleanup
+    fn write_temp_yaml(dir_name: &str, content: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(dir_name);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("tasks.yml");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(content).unwrap();
+        (path, dir)
+    }
+
+    #[test]
+    fn test_load_yaml_with_unclosed_bracket() {
+        // YAML z niezamkniętym flow mapping: `{ id: 1` bez `}`
+        let yaml = b"tasks:\n  - { id: 1\n";
+        let (path, dir) = write_temp_yaml("ralph_test_unclosed_bracket", yaml);
+
+        let result = TasksFile::load(&path);
+        assert!(result.is_err(), "Unclosed flow mapping should fail");
+
+        match result.unwrap_err() {
+            RalphError::YamlParse(err) => {
+                let msg = err.to_string();
+                assert!(
+                    !msg.is_empty(),
+                    "YamlParse error should have a message, got: {msg}"
+                );
+            }
+            other => panic!("Expected RalphError::YamlParse, got: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_yaml_with_invalid_unicode_escape() {
+        // YAML z invalid unicode escape — `\u` jest escape w double-quoted YAML strings
+        // `\uZZZZ` to niepoprawna sekwencja (hex wymaga [0-9a-fA-F])
+        let yaml = b"tasks:\n  - id: \"1\"\n    name: \"Invalid \\uZZZZ\"\n    status: todo\n";
+        let (path, dir) = write_temp_yaml("ralph_test_invalid_unicode", yaml);
+
+        let result = TasksFile::load(&path);
+        assert!(result.is_err(), "Invalid unicode escape should fail");
+
+        match result.unwrap_err() {
+            RalphError::YamlParse(err) => {
+                let msg = err.to_string();
+                assert!(
+                    !msg.is_empty(),
+                    "YamlParse error should have a message, got: {msg}"
+                );
+            }
+            other => panic!("Expected RalphError::YamlParse, got: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_yaml_truncated_in_middle_of_task() {
+        // YAML obcięty w połowie — niezamknięty double-quoted string
+        let yaml = b"tasks:\n  - id: \"1\"\n    name: \"Complete\"\n    status: done\n  - id: \"2\"\n    name: \"Truncated here";
+        let (path, dir) = write_temp_yaml("ralph_test_truncated_yaml", yaml);
+
+        let result = TasksFile::load(&path);
+        assert!(result.is_err(), "Truncated YAML should fail");
+
+        match result.unwrap_err() {
+            RalphError::YamlParse(err) => {
+                let msg = err.to_string();
+                assert!(
+                    !msg.is_empty(),
+                    "YamlParse error should have a message, got: {msg}"
+                );
+            }
+            other => panic!("Expected RalphError::YamlParse, got: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_yaml_with_binary_content() {
+        // Plik z binarnymi danymi (invalid UTF-8) — read_to_string zwraca io::Error
+        let binary_data: Vec<u8> = vec![
+            0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0x00, 0x01, 0x80, 0x81, 0x82, 0x83,
+        ];
+        let (path, dir) = write_temp_yaml("ralph_test_binary_yaml", &binary_data);
+
+        let result = TasksFile::load(&path);
+        assert!(result.is_err(), "Binary content should fail to load");
+
+        // read_to_string fails z io::Error → mapowane na RalphError::MissingFile
+        match result.unwrap_err() {
+            RalphError::MissingFile(msg) => {
+                assert!(
+                    msg.contains("invalid") || msg.contains("UTF-8"),
+                    "Error should mention UTF-8 issue, got: {msg}"
+                );
+            }
+            other => panic!("Expected RalphError::MissingFile (UTF-8 error), got: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -9,15 +9,21 @@ use crate::templates;
 pub async fn execute(file_config: &FileConfig) -> Result<()> {
     let tasks_path = &file_config.task.tasks_file;
 
-    if !tasks_path.exists() {
-        return Err(RalphError::MissingFile(format!(
-            "{} not found. Run `ralph-wiggum task prd` first.",
-            tasks_path.display()
-        )));
-    }
+    // Auto-initialize if file doesn't exist (instead of returning error)
+    let tasks_file = TasksFile::load_or_init(tasks_path)?;
 
-    // Parse tasks.yml and find current task
-    let tasks_file = TasksFile::load(tasks_path)?;
+    // If file was just initialized (empty), show friendly message
+    if tasks_file.tasks.is_empty() {
+        println!("{}", "━".repeat(60).dark_grey());
+        println!("{} No tasks yet.", "ℹ".cyan().bold());
+        println!(
+            "  Run {} or {} to get started.",
+            "task add".cyan(),
+            "task plan".cyan()
+        );
+        println!("{}", "━".repeat(60).dark_grey());
+        return Ok(());
+    }
 
     let current = tasks_file
         .current_task()
@@ -62,6 +68,7 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
         config: std::path::PathBuf::from(".ralph.toml"),
         continue_session: false,
         no_nf: false,
+        debug: false,
         progress_file: Some(tasks_path.clone()),
     };
 
@@ -71,13 +78,18 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
-    fn test_execute_validates_tasks_file() {
+    fn test_execute_handles_empty_tasks_file() {
+        // Test that continue gracefully handles empty tasks file
+        let dir = std::env::temp_dir().join("ralph_test_continue_empty");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let tasks_path = dir.join("tasks.yml");
+
         let config = FileConfig {
             task: crate::shared::file_config::TaskConfig {
-                tasks_file: PathBuf::from("/nonexistent/tasks.yml"),
+                tasks_file: tasks_path,
                 ..Default::default()
             },
             ..Default::default()
@@ -86,12 +98,9 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(execute(&config));
 
-        assert!(result.is_err());
-        if let Err(RalphError::MissingFile(msg)) = result {
-            assert!(msg.contains("tasks.yml"));
-            assert!(msg.contains("not found"));
-        } else {
-            panic!("Expected MissingFile error");
-        }
+        // Should succeed with friendly message, not error
+        assert!(result.is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

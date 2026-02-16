@@ -430,3 +430,399 @@ impl Default for OutputFormatter {
         Self::new(true)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_output_formatter_zero_values() {
+        // Create OutputFormatter without any updates (0 tokens, 0 cost)
+        let formatter = OutputFormatter::new(true);
+
+        // Verify zero token counts
+        assert_eq!(formatter.display_input_tokens(), 0);
+        assert_eq!(formatter.display_output_tokens(), 0);
+
+        // Verify zero cost
+        assert_eq!(formatter.total_cost_usd, 0.0);
+
+        // Format token lines with zero values
+        let token_lines = formatter.format_token_lines();
+        // With zero tokens, should return empty vec (no lines)
+        assert_eq!(token_lines.len(), 0);
+
+        // Format cost lines with zero cost
+        let cost_lines = formatter.format_cost_lines();
+        // With zero cost, should return empty vec (no lines)
+        assert_eq!(cost_lines.len(), 0);
+
+        // Format speed lines with zero completed tasks
+        let speed_lines = formatter.format_speed_lines();
+        // With zero tasks completed, should return empty vec (no lines)
+        assert_eq!(speed_lines.len(), 0);
+
+        // Check iteration header formatting (should not contain NaN or Inf)
+        let header = formatter.format_iteration_header();
+        let header_text = header.join("\n");
+        assert!(!header_text.contains("NaN"));
+        assert!(!header_text.contains("Inf"));
+        assert!(!header_text.contains("inf"));
+
+        // Check stats formatting with zero values (should not contain NaN or Inf)
+        let stats = formatter.format_stats(0, false, "");
+        let stats_text = stats.join("\n");
+        assert!(!stats_text.contains("NaN"));
+        assert!(!stats_text.contains("Inf"));
+        assert!(!stats_text.contains("inf"));
+
+        // Check interrupted formatting with zero values (should not contain NaN or Inf)
+        let interrupted = formatter.format_interrupted(0);
+        let interrupted_text = interrupted.join("\n");
+        assert!(!interrupted_text.contains("NaN"));
+        assert!(!interrupted_text.contains("Inf"));
+        assert!(!interrupted_text.contains("inf"));
+    }
+
+    #[test]
+    fn test_output_formatter_zero_division_protection() {
+        let formatter = OutputFormatter::new(true);
+
+        // avg_iteration_secs should return None for empty duration list
+        assert_eq!(formatter.avg_iteration_secs(), None);
+
+        // compute_speed_text should return None for zero completed tasks
+        assert_eq!(formatter.compute_speed_text(), None);
+
+        // compute_eta_text should return None for zero completed tasks
+        assert_eq!(formatter.compute_eta_text(), None);
+
+        // Verify model_costs map is empty
+        assert!(formatter.model_costs.is_empty());
+    }
+
+    #[test]
+    fn test_output_formatter_zero_task_progress() {
+        let mut formatter = OutputFormatter::new(false); // use ASCII mode
+
+        // Set task progress with all zeros
+        let progress = TaskProgress {
+            total: 0,
+            done: 0,
+            in_progress: 0,
+            blocked: 0,
+            todo: 0,
+            current_task_id: None,
+            current_task_name: None,
+            current_task_component: None,
+        };
+
+        formatter.set_task_progress(Some(progress));
+        formatter.set_initial_done_count(0);
+
+        // Format stats with zero task progress
+        let stats = formatter.format_stats(0, false, "");
+        let stats_text = stats.join("\n");
+
+        // Verify no division by zero errors (no NaN or Inf)
+        assert!(!stats_text.contains("NaN"));
+        assert!(!stats_text.contains("Inf"));
+
+        // Verify iterations count is displayed correctly
+        assert!(stats_text.contains("Iterations") || stats_text.contains("Iteration"));
+    }
+
+    #[test]
+    fn test_format_tokens_zero_sanity() {
+        // Verify format_tokens handles zero correctly
+        let zero_tokens = format_tokens(0);
+        assert_eq!(zero_tokens, "0");
+        assert!(!zero_tokens.contains("NaN"));
+        assert!(!zero_tokens.contains("Inf"));
+    }
+
+    #[test]
+    fn test_format_duration_short_zero_sanity() {
+        // Verify format_duration_short handles zero correctly
+        let zero_duration = format_duration_short(0);
+        assert_eq!(zero_duration, "~0s");
+        assert!(!zero_duration.contains("NaN"));
+        assert!(!zero_duration.contains("Inf"));
+    }
+
+    /// Snapshot test: Format stats with zero tokens and zero cost
+    #[test]
+    fn snapshot_format_stats_zero_values() {
+        let formatter = OutputFormatter::new(false); // ASCII mode for consistent snapshots
+        let stats = formatter.format_stats(5, true, "done");
+
+        // Join lines, strip ANSI codes, and normalize elapsed time for deterministic snapshots
+        let output = strip_ansi_codes(&stats.join("\n"));
+        let output = normalize_elapsed_time(&output);
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format token lines with 999 tokens (boundary before 'k')
+    #[test]
+    fn snapshot_format_tokens_999() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.finalized_input_tokens = 999;
+        formatter.finalized_output_tokens = 999;
+
+        let lines = formatter.format_token_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format token lines with 1000 tokens (exactly 1.0k)
+    #[test]
+    fn snapshot_format_tokens_1000() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.finalized_input_tokens = 1000;
+        formatter.finalized_output_tokens = 1000;
+
+        let lines = formatter.format_token_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format token lines with 999999 tokens (boundary before 'M')
+    #[test]
+    fn snapshot_format_tokens_999999() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.finalized_input_tokens = 999_999;
+        formatter.finalized_output_tokens = 999_999;
+
+        let lines = formatter.format_token_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format token lines with 1000000 tokens (exactly 1.0M)
+    #[test]
+    fn snapshot_format_tokens_1000000() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.finalized_input_tokens = 1_000_000;
+        formatter.finalized_output_tokens = 1_000_000;
+
+        let lines = formatter.format_token_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format cost lines with various amounts
+    #[test]
+    fn snapshot_format_cost_small() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.total_cost_usd = 0.0001;
+        formatter
+            .model_costs
+            .insert("claude-sonnet-4-5".to_string(), 0.0001);
+
+        let lines = formatter.format_cost_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format cost lines with medium amount
+    #[test]
+    fn snapshot_format_cost_medium() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.total_cost_usd = 1.23;
+        formatter
+            .model_costs
+            .insert("claude-sonnet-4-5".to_string(), 0.85);
+        formatter
+            .model_costs
+            .insert("claude-haiku-4-5".to_string(), 0.38);
+
+        let lines = formatter.format_cost_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format cost lines with large amount
+    #[test]
+    fn snapshot_format_cost_large() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.total_cost_usd = 99.99;
+        formatter
+            .model_costs
+            .insert("claude-opus-4-6".to_string(), 99.99);
+
+        let lines = formatter.format_cost_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format cost lines with very small amount (rounding boundary).
+    /// Tests edge case: $0.00005 should round to $0.0001 with .4f precision.
+    #[test]
+    fn snapshot_format_cost_rounding_boundary() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.total_cost_usd = 0.00005;
+        formatter
+            .model_costs
+            .insert("claude-haiku-4-5".to_string(), 0.00005);
+
+        let lines = formatter.format_cost_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format cost lines with 3-digit dollar amount.
+    /// Tests boundary: Cost display with $100+ (3-digit whole number).
+    #[test]
+    fn snapshot_format_cost_three_digit() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.total_cost_usd = 100.00;
+        formatter
+            .model_costs
+            .insert("claude-opus-4-6".to_string(), 100.00);
+
+        let lines = formatter.format_cost_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format cost lines with very large amount.
+    /// Tests extreme boundary: $999.9999 with .4f precision.
+    #[test]
+    fn snapshot_format_cost_very_large() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.total_cost_usd = 999.9999;
+        formatter
+            .model_costs
+            .insert("claude-opus-4-6".to_string(), 999.9999);
+
+        let lines = formatter.format_cost_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Format complete stats with mixed token counts
+    #[test]
+    fn snapshot_format_stats_mixed_tokens() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.finalized_input_tokens = 12_345;
+        formatter.finalized_output_tokens = 6_789;
+        formatter.total_cost_usd = 0.5432;
+        formatter
+            .model_costs
+            .insert("claude-sonnet-4-5".to_string(), 0.5432);
+
+        let stats = formatter.format_stats(3, true, "done");
+        let output = strip_ansi_codes(&stats.join("\n"));
+        let output = normalize_elapsed_time(&output);
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Duration boundary - iteration header with avg close to 60s (below).
+    /// Tests display of iteration average just below the minute boundary (59s).
+    /// Average should display as "59s/iter", not switch to minute format yet.
+    #[test]
+    fn snapshot_iteration_header_duration_59s() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.set_iteration(3);
+        // Simulate 3 iterations with avg ~59s (58+59+60)/3 = 59
+        formatter.iteration_durations = vec![58.0, 59.0, 60.0];
+
+        let header = formatter.format_iteration_header();
+        let output = strip_ansi_codes(&header.join("\n"));
+        let output = normalize_elapsed_time(&output);
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Duration boundary - iteration header with avg close to 60s (above).
+    /// Tests display of iteration average just above the minute boundary (61s).
+    /// Average should display as "61s/iter" (integer rounded).
+    #[test]
+    fn snapshot_iteration_header_duration_61s() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.set_iteration(5);
+        // Simulate 5 iterations with avg ~61s (60+61+62+60.5+61.5)/5 = 61
+        formatter.iteration_durations = vec![60.0, 61.0, 62.0, 60.5, 61.5];
+
+        let header = formatter.format_iteration_header();
+        let output = strip_ansi_codes(&header.join("\n"));
+        let output = normalize_elapsed_time(&output);
+        insta::assert_snapshot!(output);
+    }
+
+    /// Snapshot test: Speed lines with completed tasks and duration boundary.
+    /// Tests that avg iteration duration is properly formatted when crossing 60s boundary.
+    /// Expected display: "Avg iter: 60s" (rounded to nearest second).
+    #[test]
+    fn snapshot_speed_lines_duration_boundary() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.set_initial_done_count(0);
+
+        let progress = TaskProgress {
+            total: 5,
+            done: 3,
+            in_progress: 1,
+            blocked: 0,
+            todo: 1,
+            current_task_id: Some("1.2".to_string()),
+            current_task_name: Some("Test task".to_string()),
+            current_task_component: Some("tests".to_string()),
+        };
+        formatter.set_task_progress(Some(progress));
+
+        // Simulate iterations with avg near 60s boundary (59.5+60.2+59.8)/3 = 59.83
+        formatter.iteration_durations = vec![59.5, 60.2, 59.8];
+
+        let lines = formatter.format_speed_lines();
+        let output = strip_ansi_codes(&lines.join("\n"));
+        insta::assert_snapshot!(output);
+    }
+
+    /// Normalize elapsed time values in stats output for deterministic snapshots.
+    /// Replaces "Time: Xs" and "Elapsed: Xs" with fixed values.
+    fn normalize_elapsed_time(s: &str) -> String {
+        s.lines()
+            .map(|line| {
+                if let Some(pos) = line.find("Time:") {
+                    let prefix = &line[..pos];
+                    return format!("{}Time:      0.00s", prefix);
+                }
+                if let Some(pos) = line.find("Elapsed:") {
+                    let before = &line[..pos];
+                    let after = &line[pos + "Elapsed:".len()..];
+                    let rest = after.trim_start();
+                    // Skip the time value (e.g., "0.0s")
+                    let time_end = rest
+                        .find(|c: char| !c.is_ascii_digit() && c != '.' && c != 's')
+                        .unwrap_or(rest.len());
+                    let suffix = &rest[time_end..];
+                    return format!("{}Elapsed: 0.0s{}", before, suffix);
+                }
+                line.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Helper function to strip ANSI color codes for snapshot testing
+    fn strip_ansi_codes(s: &str) -> String {
+        // Simple regex-free ANSI stripper for tests
+        let mut result = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Skip ESC sequence
+                if chars.next() == Some('[') {
+                    // Skip until 'm' (end of color code)
+                    for ch in chars.by_ref() {
+                        if ch == 'm' {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+}

@@ -15,7 +15,12 @@ use std::io;
 mod choice_select;
 mod confirm_select;
 mod multi_select;
-mod text_input;
+pub mod text_input;
+
+// Re-export publicznych funkcji dla łatwiejszego dostępu
+// Allow unused: te importy są eksportowane dla użytku zewnętrznego
+#[allow(unused_imports)]
+pub use text_input::{standalone_text_input, text_input};
 
 /// Kolapsuje viewport: przesuwa kursor na absolutną pozycję Y viewportu
 /// i czyści wszystko poniżej. Wywoływać po drop(terminal).

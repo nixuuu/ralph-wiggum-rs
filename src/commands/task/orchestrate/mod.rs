@@ -17,6 +17,7 @@ mod orchestrator_merge;
 mod orchestrator_tui;
 pub mod output;
 pub mod panels;
+pub mod profile_matcher;
 pub mod ring_buffer;
 mod run_loop;
 pub mod scheduler;
@@ -25,6 +26,9 @@ pub mod shutdown_types;
 pub mod state;
 pub mod summary;
 pub mod task_preview;
+#[cfg(test)]
+mod tests_backward_compat;
+pub mod text_input_overlay;
 pub mod verify;
 pub mod worker;
 pub mod worker_runner;

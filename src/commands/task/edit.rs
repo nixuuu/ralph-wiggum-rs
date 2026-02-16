@@ -3,29 +3,36 @@ use crossterm::style::Stylize;
 use super::args::EditArgs;
 use super::input::resolve_input;
 use crate::commands::run::{DANGEROUS_TOOLS, RunOnceOptions, run_once};
-use crate::shared::error::{RalphError, Result};
-use crate::shared::file_config::FileConfig;
+use crate::shared::error::Result;
+use crate::shared::file_config::{FileConfig, format_profiles_info};
 use crate::shared::tasks::TasksFile;
 use crate::templates;
 
 pub async fn execute(args: EditArgs, file_config: &FileConfig) -> Result<()> {
     let tasks_path = &file_config.task.tasks_file;
-    if !tasks_path.exists() {
-        return Err(RalphError::MissingFile(format!(
-            "{} not found. Run `ralph-wiggum task prd` first.",
-            tasks_path.display()
-        )));
-    }
 
-    // Get before state
-    let before = TasksFile::load(tasks_path)?;
+    // Auto-initialize if file doesn't exist (instead of returning error)
+    let before = TasksFile::load_or_init(tasks_path)?;
     let before_summary = before.to_summary();
 
     // Resolve input
-    let input = resolve_input(args.file.as_ref(), args.prompt.as_deref())?;
+    let input = resolve_input(
+        args.file.as_ref(),
+        args.prompt.as_deref(),
+        Some("Opisz zmiany w istniejących zadaniach..."),
+    )?;
+
+    // Generate profiles_info from FileConfig
+    let profiles_info = if file_config.task.orchestrate.profiles.is_empty() {
+        "No verification profiles configured.".to_string()
+    } else {
+        format_profiles_info(&file_config.task.orchestrate.profiles)
+    };
 
     // Build prompt (YAML template)
-    let prompt = templates::EDIT_PROMPT_YAML.replace("{instructions}", &input);
+    let prompt = templates::EDIT_PROMPT_YAML
+        .replace("{instructions}", &input)
+        .replace("{profiles_info}", &profiles_info);
 
     // Determine model
     let model = args

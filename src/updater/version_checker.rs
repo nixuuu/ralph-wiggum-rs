@@ -80,6 +80,12 @@ pub struct VersionChecker {
     update_state: Arc<AtomicU8>,
 }
 
+impl Default for VersionChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VersionChecker {
     pub fn new() -> Self {
         Self {
@@ -115,7 +121,7 @@ impl VersionChecker {
                         Ordering::SeqCst,
                     );
                 }
-                *info.lock().unwrap() = Some(result);
+                *info.lock().expect("version_checker: mutex poisoned") = Some(result);
             }
 
             // Periodic checks
@@ -133,7 +139,7 @@ impl VersionChecker {
                             Ordering::SeqCst,
                         );
                     }
-                    *info.lock().unwrap() = Some(result);
+                    *info.lock().expect("version_checker: mutex poisoned") = Some(result);
                 }
             }
         });

@@ -19,7 +19,7 @@ use crate::commands::task::orchestrate::state::{Lockfile, OrchestrateState};
 use crate::commands::task::orchestrate::worktree::WorktreeManager;
 use crate::shared::dag::TaskDag;
 use crate::shared::error::{RalphError, Result};
-use crate::shared::file_config::{FileConfig, SetupCommand, VerifyCommand};
+use crate::shared::file_config::{FileConfig, SetupCommand, VerifyCommand, VerifyProfile};
 use crate::shared::tasks::TasksFile;
 use crate::templates;
 
@@ -42,6 +42,8 @@ pub struct Orchestrator {
     pub(super) use_nerd_font: bool,
     pub(super) prompt_prefix: Option<String>,
     pub(super) prompt_suffix: Option<String>,
+    /// Verification profiles from config — passed to workers for git-based profile matching.
+    pub(super) profiles: Vec<VerifyProfile>,
 }
 
 impl Orchestrator {
@@ -72,6 +74,7 @@ impl Orchestrator {
         let verify_commands = file_config.task.orchestrate.verify_commands.clone();
 
         let setup_commands = file_config.task.orchestrate.setup_commands.clone();
+        let profiles = file_config.task.orchestrate.profiles.clone();
 
         // Extract prompt prefix/suffix, filtering out empty strings
         let prompt_prefix = file_config
@@ -95,6 +98,7 @@ impl Orchestrator {
             use_nerd_font: file_config.ui.nerd_font,
             prompt_prefix,
             prompt_suffix,
+            profiles,
         })
     }
 
@@ -121,7 +125,7 @@ impl Orchestrator {
             let dag_output = dry_run::format_dag(&viz, self.config.workers);
             println!("{dag_output}");
             println!();
-            let dep_list = dry_run::format_dep_list(&dag, &progress);
+            let dep_list = dry_run::format_dep_list(&dag, &progress, &tasks_file, &self.profiles);
             println!("Task dependency list:\n{dep_list}");
             return Ok(());
         }
@@ -190,9 +194,14 @@ impl Orchestrator {
         // it through the server to register per-worker sessions later.
         let mcp_session_registry = mcp_server.session_registry();
 
-        // 10. Initialize TUI (fullscreen dashboard)
+        // 10a. Initialize shared overlay (Task 28.1)
+        // Shared between input thread (keyboard handling) and Dashboard (rendering)
+        // Must be created before Dashboard::new() to pass as constructor argument
+        let shared_overlay = Arc::new(std::sync::Mutex::new(None));
+
+        // 10b. Initialize TUI (fullscreen dashboard)
         let mut tui = TuiContext {
-            dashboard: Dashboard::new(worker_count)?,
+            dashboard: Dashboard::new(worker_count, Arc::clone(&shared_overlay))?,
             mux_output: MultiplexedOutput::new(),
             task_start_times: HashMap::new(),
             task_summaries: Vec::new(),
@@ -204,7 +213,13 @@ impl Orchestrator {
             (1..=worker_count).collect::<Vec<u32>>(),
         ));
 
+        // 11b. Initialize user message channel (Task 25.4.3)
+        // TUI overlay → run_loop communication for interactive worker messaging
+        let (user_message_tx, user_message_rx) = mpsc::channel::<(u32, String)>(16);
+
         // 12. Spawn input thread (dedicated OS thread for crossterm)
+        let overlay_active = Arc::new(AtomicBool::new(false));
+        let worker_phases = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let mut input_thread = DashboardInputThread::spawn(DashboardInputParams {
             shutdown: Arc::clone(&shutdown),
             graceful_shutdown: Arc::clone(&graceful_shutdown),
@@ -218,13 +233,13 @@ impl Orchestrator {
             restart_worker_id: Arc::clone(&restart_worker_id),
             restart_confirmed: Arc::clone(&restart_confirmed),
             active_worker_ids: Arc::clone(&active_worker_ids),
+            overlay_active: Arc::clone(&overlay_active),
+            worker_phases: Arc::clone(&worker_phases),
+            user_message_tx,
+            shared_overlay: Arc::clone(&shared_overlay),
         });
 
-        // 13. Build task lookup for merge
-        let task_lookup: HashMap<&str, &crate::shared::progress::ProgressTask> =
-            progress.tasks.iter().map(|t| (t.id.as_str(), t)).collect();
-
-        // 14. Build run loop context
+        // 13. Build run loop context
         let flags = InputFlags {
             shutdown,
             graceful_shutdown,
@@ -239,6 +254,7 @@ impl Orchestrator {
             restart_worker_id,
             restart_confirmed,
             active_worker_ids,
+            worker_phases: Arc::clone(&worker_phases),
         };
 
         // Cache TasksFile in Arc for efficient sharing with dashboard preview
@@ -254,9 +270,6 @@ impl Orchestrator {
             event_logger,
             worker_slots,
             join_handles: HashMap::new(),
-            tasks_file: cached_tasks_file.as_ref(),
-            progress: &progress,
-            task_lookup,
             lockfile: Some(lockfile),
             tui: &mut tui,
             merge_ctx: MergeContext::new(),
@@ -268,6 +281,7 @@ impl Orchestrator {
             mcp_session_registry,
             mcp_cancel_token: mcp_cancel_token.clone(),
             mcp_server_handle,
+            user_message_rx,
         };
 
         // 14. Run the main orchestration loop
@@ -313,6 +327,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                profiles: Vec::new(),
                 subtasks: Vec::new(),
             }],
         };
@@ -328,7 +343,6 @@ mod tests {
             no_merge: false,
             max_cost: None,
             timeout: None,
-            task_filter: None,
             conflict_resolution_model: "opus".to_string(),
             review_model: "opus".to_string(),
             watchdog_interval_secs: 10,
@@ -348,6 +362,7 @@ mod tests {
             use_nerd_font: false,
             prompt_prefix: None,
             prompt_suffix: None,
+            profiles: Vec::new(),
         };
 
         assert_eq!(
@@ -377,6 +392,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                profiles: Vec::new(),
                 subtasks: Vec::new(),
             }],
         };
@@ -392,7 +408,6 @@ mod tests {
             no_merge: false,
             max_cost: None,
             timeout: None,
-            task_filter: None,
             conflict_resolution_model: "opus".to_string(),
             review_model: "opus".to_string(),
             watchdog_interval_secs: 10,
@@ -412,6 +427,7 @@ mod tests {
             use_nerd_font: false,
             prompt_prefix: None,
             prompt_suffix: None,
+            profiles: Vec::new(),
         };
 
         assert_eq!(
@@ -611,6 +627,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                profiles: Vec::new(),
                 subtasks: Vec::new(),
             }],
         };
@@ -636,6 +653,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
                 TaskNode {
@@ -648,6 +666,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
             ],
@@ -689,6 +708,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                profiles: Vec::new(),
                 subtasks: Vec::new(),
             }],
         };
@@ -826,6 +846,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
                 TaskNode {
@@ -838,6 +859,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
                 TaskNode {
@@ -850,6 +872,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
             ],
@@ -881,6 +904,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
                 TaskNode {
@@ -893,6 +917,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
                 TaskNode {
@@ -905,6 +930,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
                 TaskNode {
@@ -917,6 +943,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
             ],
@@ -993,6 +1020,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                profiles: Vec::new(),
                 subtasks: Vec::new(),
             }],
         };
@@ -1016,6 +1044,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
                 TaskNode {
@@ -1028,6 +1057,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
             ],
@@ -1069,7 +1099,7 @@ mod tests {
     fn test_prompt_config_propagation() {
         // Test: Verify that prompt.prefix, prompt.suffix, and prompt.system
         // from .ralph.toml are correctly propagated to Orchestrator struct
-        use crate::shared::file_config::{PromptConfig, TaskConfig, UiConfig};
+        use crate::shared::file_config::{LoggingConfig, PromptConfig, TaskConfig, UiConfig};
 
         let file_config = FileConfig {
             prompt: PromptConfig {
@@ -1079,6 +1109,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             task: TaskConfig::default(),
+            logging: LoggingConfig::default(),
         };
 
         let config = ResolvedConfig {
@@ -1092,7 +1123,6 @@ mod tests {
             no_merge: false,
             max_cost: None,
             timeout: None,
-            task_filter: None,
             conflict_resolution_model: "opus".to_string(),
             review_model: "opus".to_string(),
             watchdog_interval_secs: 30,
@@ -1131,7 +1161,7 @@ mod tests {
     #[test]
     fn test_prompt_config_empty_strings_filtered() {
         // Test: Verify that empty strings are filtered out and treated as None
-        use crate::shared::file_config::{PromptConfig, TaskConfig, UiConfig};
+        use crate::shared::file_config::{LoggingConfig, PromptConfig, TaskConfig, UiConfig};
 
         let file_config = FileConfig {
             prompt: PromptConfig {
@@ -1141,6 +1171,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             task: TaskConfig::default(),
+            logging: LoggingConfig::default(),
         };
 
         let config = ResolvedConfig {
@@ -1154,7 +1185,6 @@ mod tests {
             no_merge: false,
             max_cost: None,
             timeout: None,
-            task_filter: None,
             conflict_resolution_model: "opus".to_string(),
             review_model: "opus".to_string(),
             watchdog_interval_secs: 30,
@@ -1183,7 +1213,7 @@ mod tests {
     #[test]
     fn test_prompt_config_none_values() {
         // Test: Verify that None values in prompt config work correctly
-        use crate::shared::file_config::{PromptConfig, TaskConfig, UiConfig};
+        use crate::shared::file_config::{LoggingConfig, PromptConfig, TaskConfig, UiConfig};
 
         let file_config = FileConfig {
             prompt: PromptConfig {
@@ -1193,6 +1223,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             task: TaskConfig::default(),
+            logging: LoggingConfig::default(),
         };
 
         let config = ResolvedConfig {
@@ -1206,7 +1237,6 @@ mod tests {
             no_merge: false,
             max_cost: None,
             timeout: None,
-            task_filter: None,
             conflict_resolution_model: "opus".to_string(),
             review_model: "opus".to_string(),
             watchdog_interval_secs: 30,

@@ -59,26 +59,42 @@ pub fn update_self() -> Result<()> {
     let binary_data = client.get(&asset.browser_download_url).send()?.bytes()?;
 
     let current_exe = get_current_executable()?;
-    let backup_path = current_exe.with_extension("bak");
-
-    println!("Creating backup at {}...", backup_path.display());
-    std::fs::copy(&current_exe, &backup_path)?;
 
     println!("Installing update...");
-    let temp_exe = current_exe.with_extension("tmp");
-    std::fs::write(&temp_exe, &binary_data)?;
-    std::fs::rename(&temp_exe, &current_exe)?;
 
-    #[cfg(unix)]
+    // Windows: rename running exe to .old, write new exe to original path
+    // Unix: copy to .bak, write to .tmp, rename .tmp to current
+    #[cfg(windows)]
     {
+        let old_path = current_exe.with_extension("old");
+        println!("Moving current executable to {}...", old_path.display());
+        std::fs::rename(&current_exe, &old_path)?;
+
+        println!("Writing new executable to {}...", current_exe.display());
+        std::fs::write(&current_exe, &binary_data)?;
+
+        println!("Successfully updated to {}!", release.tag_name);
+        println!("Old version saved to: {}", old_path.display());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let backup_path = current_exe.with_extension("bak");
+        println!("Creating backup at {}...", backup_path.display());
+        std::fs::copy(&current_exe, &backup_path)?;
+
+        let temp_exe = current_exe.with_extension("tmp");
+        std::fs::write(&temp_exe, &binary_data)?;
+        std::fs::rename(&temp_exe, &current_exe)?;
+
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&current_exe)?.permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&current_exe, perms)?;
-    }
 
-    println!("Successfully updated to {}!", release.tag_name);
-    println!("Backup saved to: {}", backup_path.display());
+        println!("Successfully updated to {}!", release.tag_name);
+        println!("Backup saved to: {}", backup_path.display());
+    }
     Ok(())
 }
 
@@ -134,15 +150,25 @@ fn do_background_update() -> Result<()> {
     let binary_data = client.get(&asset.browser_download_url).send()?.bytes()?;
 
     let current_exe = get_current_executable()?;
-    let backup_path = current_exe.with_extension("bak");
-    std::fs::copy(&current_exe, &backup_path)?;
 
-    let temp_exe = current_exe.with_extension("tmp");
-    std::fs::write(&temp_exe, &binary_data)?;
-    std::fs::rename(&temp_exe, &current_exe)?;
-
-    #[cfg(unix)]
+    // Windows: rename running exe to .old, write new exe to original path
+    // Unix: copy to .bak, write to .tmp, rename .tmp to current
+    #[cfg(windows)]
     {
+        let old_path = current_exe.with_extension("old");
+        std::fs::rename(&current_exe, &old_path)?;
+        std::fs::write(&current_exe, &binary_data)?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        let backup_path = current_exe.with_extension("bak");
+        std::fs::copy(&current_exe, &backup_path)?;
+
+        let temp_exe = current_exe.with_extension("tmp");
+        std::fs::write(&temp_exe, &binary_data)?;
+        std::fs::rename(&temp_exe, &current_exe)?;
+
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&current_exe)?.permissions();
         perms.set_mode(0o755);

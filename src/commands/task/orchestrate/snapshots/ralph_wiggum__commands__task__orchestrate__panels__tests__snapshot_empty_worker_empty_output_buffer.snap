@@ -1,0 +1,12 @@
+---
+source: src/commands/task/orchestrate/panels.rs
+expression: snapshot
+---
+╭ W1 [5.2: core] ────────────────────────────────╮
+│● implement                                     │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+╰ $0.0000 │ ↓0 ↑0 ───────────────────────────────╯

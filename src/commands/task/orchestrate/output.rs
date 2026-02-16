@@ -25,6 +25,12 @@ pub struct MultiplexedOutput {
     worker_tasks: HashMap<u32, String>,
 }
 
+impl Default for MultiplexedOutput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultiplexedOutput {
     /// Create a new MultiplexedOutput.
     ///

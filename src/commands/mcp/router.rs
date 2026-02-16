@@ -46,7 +46,9 @@ async fn handle_post(
     headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> Response {
-    match req.method.as_str() {
+    crate::diag_debug!("MCP request: method={}, id={:?}", req.method, req.id);
+
+    let response = match req.method.as_str() {
         // Initialize — tworzy nową sesję, zwraca Mcp-Session-Id w headerze
         "initialize" => handle_initialize(&state, &req),
 
@@ -68,7 +70,15 @@ async fn handle_post(
             );
             Json(resp).into_response()
         }
-    }
+    };
+
+    crate::diag_debug!(
+        "MCP response: method={}, status={}",
+        req.method,
+        response.status()
+    );
+
+    response
 }
 
 /// Obsługuje `initialize` — tworzy sesję i zwraca capabilities
@@ -251,7 +261,23 @@ async fn handle_tools_call(
     }
 
     // Inne toole — synchroniczny JSON response
-    let resp = tools::handle_tool_call(req.id.clone(), req.params.as_ref(), tasks_path);
+    // Oblicz ścieżkę do .ralph.toml na podstawie tasks_path
+    let config_path = if tasks_path.ends_with(".ralph/tasks.yml") {
+        tasks_path
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(".ralph.toml")
+    } else {
+        // Fallback: .ralph.toml w bieżącym katalogu
+        std::path::PathBuf::from(".ralph.toml")
+    };
+    let resp = tools::handle_tool_call(
+        req.id.clone(),
+        req.params.as_ref(),
+        tasks_path,
+        &config_path,
+    );
     Json(resp).into_response()
 }
 
@@ -580,7 +606,7 @@ mod tests {
         assert_eq!(body["id"], 2);
 
         let tools = body["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
     }
 
     #[tokio::test]
@@ -679,7 +705,7 @@ mod tests {
 
         // Sprawdź że zwrócono tylko read-only tools (5 zamiast 12)
         let tools = body["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
 
         // Sprawdź że to są właściwe tools
         let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -727,7 +753,7 @@ mod tests {
 
         // Sprawdź że zwrócono wszystkie 12 tools
         let tools = body["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
     }
 
     // ── POST /mcp: tools/call ────────────────────────────────────
@@ -1111,7 +1137,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = response_json(response).await;
-        assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 12);
+        assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 13);
 
         // 4. DELETE — terminacja sesji
         let router = build_router(state.clone());

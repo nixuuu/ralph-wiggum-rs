@@ -1,0 +1,14 @@
+---
+source: src/commands/task/orchestrate/panels.rs
+expression: snapshot
+---
+╭ W1 [9.1: core] ─────────────────────────────────────╮
+│● implement                                          │
+│Compiling ralph-wiggum v0.1.0                        │
+│  Running `target/debug/ralph`                       │
+│warning: unused variable `x`                         │
+│  --> src/main.rs:42:9                               │
+│Build completed successfully                         │
+│                                                     │
+│                                                     │
+╰ $0.0000 │ ↓0 ↑0 ────────────────────────────────────╯

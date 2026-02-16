@@ -1,0 +1,5 @@
+---
+source: src/commands/run/output.rs
+expression: output
+---
+  Tokens:    1.0M in / 1.0M out

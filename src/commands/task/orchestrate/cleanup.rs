@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::commands::task::orchestrate::orchestrator::Orchestrator;
 use crate::commands::task::orchestrate::run_loop::RunLoopContext;
+use crate::diag_warn;
 use crate::shared::error::Result;
 
 use super::assignment::WorkerSlot;
@@ -42,14 +43,14 @@ impl Orchestrator {
         if let Err(e) = ctx.state.save(ctx.state_path)
             && self.config.verbose
         {
-            eprintln!("Warning: Failed to save orchestrator state: {e}");
+            diag_warn!("Failed to save orchestrator state: {e}");
         }
 
         if let Some(lf) = ctx.lockfile.take()
             && let Err(e) = lf.release()
             && self.config.verbose
         {
-            eprintln!("Warning: Failed to release lockfile: {e}");
+            diag_warn!("Failed to release lockfile: {e}");
         }
 
         // Shut down shared MCP server via cancellation token

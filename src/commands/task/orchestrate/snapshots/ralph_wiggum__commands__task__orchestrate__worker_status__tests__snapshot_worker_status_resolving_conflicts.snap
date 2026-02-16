@@ -1,0 +1,15 @@
+---
+source: src/commands/task/orchestrate/worker_status.rs
+expression: format_worker_status(&status)
+---
+WorkerStatus {
+│ state: ResolvingConflicts
+│ task_id: Some("99.9")
+│ component: Some("api")
+│ phase: None
+│ model: Some("claude-opus-4-6")
+│ cost_usd: $0.9999
+│ input_tokens: 25000
+│ output_tokens: 15000
+│ verify_profiles: []
+}

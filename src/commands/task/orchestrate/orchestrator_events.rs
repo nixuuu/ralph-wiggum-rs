@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::commands::task::orchestrate::events::{WorkerEventKind, WorkerPhase};
+use crate::commands::task::orchestrate::events::{ProfileStatus, WorkerEventKind, WorkerPhase};
 use crate::commands::task::orchestrate::summary::TaskSummaryEntry;
 use crate::commands::task::orchestrate::worker_status::{WorkerState, WorkerStatus};
 use crate::shared::error::Result;
@@ -18,6 +18,29 @@ use super::run_loop::RunLoopContext;
 /// Uses double line (═══) to distinguish from phase separators (───).
 fn task_start_separator(task_id: &str) -> String {
     format!("\x1b[1;32m══════ Task {task_id} ══════\x1b[0m")
+}
+
+// ── Helper functions ────────────────────────────────────────────────
+
+/// Set worker to idle state and clear worker_phases entry (task 25.3.3).
+///
+/// Consolidates the pattern of setting worker to idle in orchestrator events.
+/// Also clears the worker_phases entry to prevent stale phase data.
+fn set_worker_idle(ctx: &mut RunLoopContext, worker_id: u32) {
+    // Clear phase from worker_phases (task 25.3.3)
+    ctx.flags
+        .worker_phases
+        .lock()
+        .unwrap()
+        .insert(worker_id, None);
+
+    // Update dashboard status to idle
+    ctx.tui
+        .dashboard
+        .update_worker_status(worker_id, WorkerStatus::idle(worker_id));
+
+    // Clear multiplexed output
+    ctx.tui.mux_output.clear_worker(worker_id);
 }
 
 /// Generate a colored separator line for phase start.
@@ -79,140 +102,224 @@ pub(super) fn verify_end_separator(success: bool) -> String {
     format!("{color_code}─── {icon} Verify [{status}] ───\x1b[0m")
 }
 
-// ── Event handling ──────────────────────────────────────────────────
+// ── Shared helpers for event handlers ───────────────────────────────
+
+/// Parameters for building a `WorkerStatus`.
+struct WorkerStatusParams<'a> {
+    state: WorkerState,
+    task_id: &'a str,
+    component: Option<String>,
+    phase: Option<WorkerPhase>,
+    model: Option<&'a String>,
+    cost_usd: f64,
+    input_tokens: u64,
+    output_tokens: u64,
+    verify_profiles: Vec<(String, Option<bool>)>,
+}
+
+/// Build a `WorkerStatus` from grouped parameters.
+/// Reduces repeated struct construction across multiple handlers.
+fn build_worker_status(p: WorkerStatusParams) -> WorkerStatus {
+    WorkerStatus {
+        state: p.state,
+        task_id: Some(p.task_id.to_string()),
+        component: p.component,
+        phase: p.phase,
+        model: p
+            .model
+            .map(|m| crate::shared::tasks::reverse_model_alias(m)),
+        cost_usd: p.cost_usd,
+        input_tokens: p.input_tokens,
+        output_tokens: p.output_tokens,
+        verify_profiles: p.verify_profiles,
+    }
+}
+
+/// Update `cached_tasks_file` with new task status and sync `progress_mtime`.
+/// Returns true if the update was applied (tasks_file write succeeded).
+fn sync_task_status(
+    orchestrator: &Orchestrator,
+    ctx: &mut RunLoopContext,
+    task_id: &str,
+    status: TaskStatus,
+) {
+    if let Some(mt) = orchestrator.update_tasks_file(task_id, status.clone(), ctx.tui) {
+        ctx.progress_mtime = Some(mt);
+        let mut updated = (*ctx.cached_tasks_file).clone();
+        let _ = updated.update_status(task_id, status);
+        ctx.cached_tasks_file = Arc::new(updated);
+    }
+}
+
+/// Look up a task's component from the cached_tasks_file.
+fn lookup_component(ctx: &RunLoopContext, task_id: &str) -> Option<String> {
+    ctx.cached_tasks_file
+        .as_ref()
+        .find_leaf(task_id)
+        .map(|leaf| leaf.component.clone())
+}
+
+// ── Event handling (dispatcher) ─────────────────────────────────────
 
 impl Orchestrator {
     /// Handle a worker event from the mpsc channel.
+    ///
+    /// Dispatches each `WorkerEventKind` variant to a dedicated handler method.
     pub(super) async fn handle_event(
         &self,
         event: &crate::commands::task::orchestrate::events::WorkerEvent,
         ctx: &mut RunLoopContext<'_>,
     ) -> Result<()> {
-        match &event.kind {
+        // Log event dispatch for debugging
+        let event_kind = match &event.kind {
             WorkerEventKind::TaskStarted { worker_id, task_id } => {
-                // Clear worker output buffer for a fresh start
-                ctx.tui.dashboard.clear_worker_output(*worker_id);
-
-                // Add task start separator
-                let separator = task_start_separator(task_id);
-                ctx.tui
-                    .dashboard
-                    .push_worker_output(*worker_id, &[separator]);
-
-                // Initialize heartbeat timestamp for this worker
-                ctx.last_heartbeat
-                    .insert(*worker_id, std::time::Instant::now());
-
-                // Resolve model for this task
-                let model = self.resolve_model(task_id, ctx.tasks_file);
-                let ws = WorkerStatus {
-                    state: WorkerState::Implementing,
-                    task_id: Some(task_id.clone()),
-                    component: ctx
-                        .task_lookup
-                        .get(task_id.as_str())
-                        .map(|t| t.component.clone()),
-                    phase: Some(WorkerPhase::Implement),
-                    model: model
-                        .as_ref()
-                        .map(|m| crate::shared::tasks::reverse_model_alias(m)),
-                    cost_usd: 0.0,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                };
-                ctx.tui.dashboard.update_worker_status(*worker_id, ws);
-                let msg = ctx
-                    .tui
-                    .mux_output
-                    .format_worker_line(*worker_id, &format!("Started: {task_id}"));
-                ctx.tui.dashboard.push_log_line(&msg);
+                format!("TaskStarted(worker={}, task={})", worker_id, task_id)
             }
-
             WorkerEventKind::PhaseStarted {
                 worker_id,
                 task_id,
                 phase,
+                profiles,
             } => {
-                let new_state = match phase {
-                    WorkerPhase::Setup => WorkerState::SettingUp,
-                    WorkerPhase::Implement => WorkerState::Implementing,
-                    WorkerPhase::ReviewFix => WorkerState::Reviewing,
-                    WorkerPhase::Verify => WorkerState::Verifying,
-                };
-                let (cost, input, output) = ctx.tui.mux_output.worker_cost(*worker_id);
-                // Use review_model for ReviewFix phase, task's model for others
-                let model = if matches!(phase, WorkerPhase::ReviewFix) {
-                    Some(self.config.review_model.clone())
+                let profile_info = if let Some(p) = profiles {
+                    format!(" profiles=[{}]", p.join(", "))
                 } else {
-                    self.resolve_model(task_id, ctx.tasks_file)
+                    String::new()
                 };
-                let ws = WorkerStatus {
-                    state: new_state,
-                    task_id: Some(task_id.clone()),
-                    component: ctx
-                        .task_lookup
-                        .get(task_id.as_str())
-                        .map(|t| t.component.clone()),
-                    phase: Some(phase.clone()),
-                    model: model
-                        .as_ref()
-                        .map(|m| crate::shared::tasks::reverse_model_alias(m)),
-                    cost_usd: cost,
-                    input_tokens: input,
-                    output_tokens: output,
-                };
-                ctx.tui.dashboard.update_worker_status(*worker_id, ws);
-                let msg = ctx
-                    .tui
-                    .mux_output
-                    .format_worker_line(*worker_id, &format!("{task_id} → phase: {phase}"));
-                ctx.tui.dashboard.push_log_line(&msg);
-
-                // Add phase separator to worker output
-                let separator = phase_start_separator(phase);
-                ctx.tui
-                    .dashboard
-                    .push_worker_output(*worker_id, &[separator]);
+                format!(
+                    "PhaseStarted(worker={}, task={}, phase={:?}{})",
+                    worker_id, task_id, phase, profile_info
+                )
             }
+            WorkerEventKind::PhaseCompleted {
+                worker_id,
+                phase,
+                success,
+                profile_results,
+                ..
+            } => {
+                let profile_info = if let Some(results) = profile_results {
+                    let summary: Vec<String> = results
+                        .iter()
+                        .map(|r| {
+                            let status = match r.success {
+                                Some(true) => "✓",
+                                Some(false) => "✗",
+                                None => "⏳",
+                            };
+                            format!("{} {}", r.name, status)
+                        })
+                        .collect();
+                    format!(" profiles=[{}]", summary.join(", "))
+                } else {
+                    String::new()
+                };
 
+                format!(
+                    "PhaseCompleted(worker={}, phase={:?}, success={}{})",
+                    worker_id, phase, success, profile_info
+                )
+            }
+            WorkerEventKind::CostUpdate {
+                worker_id,
+                cost_usd,
+                ..
+            } => {
+                format!("CostUpdate(worker={}, cost=${:.4})", worker_id, cost_usd)
+            }
+            WorkerEventKind::TaskCompleted {
+                worker_id,
+                task_id,
+                success,
+                ..
+            } => {
+                format!(
+                    "TaskCompleted(worker={}, task={}, success={})",
+                    worker_id, task_id, success
+                )
+            }
+            WorkerEventKind::TaskFailed {
+                worker_id, task_id, ..
+            } => {
+                format!("TaskFailed(worker={}, task={})", worker_id, task_id)
+            }
+            WorkerEventKind::OutputLines { worker_id, lines } => {
+                format!("OutputLines(worker={}, lines={})", worker_id, lines.len())
+            }
+            WorkerEventKind::MergeStepOutput { worker_id, lines } => {
+                format!(
+                    "MergeStepOutput(worker={}, lines={})",
+                    worker_id,
+                    lines.len()
+                )
+            }
+            WorkerEventKind::Heartbeat { worker_id, phase } => {
+                format!("Heartbeat(worker={}, phase={:?})", worker_id, phase)
+            }
+            WorkerEventKind::MergeStarted { worker_id, task_id } => {
+                format!("MergeStarted(worker={}, task={})", worker_id, task_id)
+            }
+            WorkerEventKind::MergeCompleted {
+                worker_id,
+                task_id,
+                success,
+                ..
+            } => {
+                format!(
+                    "MergeCompleted(worker={}, task={}, success={})",
+                    worker_id, task_id, success
+                )
+            }
+            WorkerEventKind::MergeConflict {
+                worker_id, task_id, ..
+            } => {
+                format!("MergeConflict(worker={}, task={})", worker_id, task_id)
+            }
+            WorkerEventKind::UserMessageSent { worker_id, .. } => {
+                format!("UserMessageSent(worker={})", worker_id)
+            }
+            WorkerEventKind::UserMessageReceived { worker_id, .. } => {
+                format!("UserMessageReceived(worker={})", worker_id)
+            }
+        };
+        crate::diag_debug!("Orchestrator event: {}", event_kind);
+
+        match &event.kind {
+            WorkerEventKind::TaskStarted { worker_id, task_id } => {
+                self.handle_task_started(*worker_id, task_id, ctx);
+            }
+            WorkerEventKind::PhaseStarted {
+                worker_id,
+                task_id,
+                phase,
+                profiles,
+            } => {
+                self.handle_phase_started(*worker_id, task_id, phase, profiles.clone(), ctx);
+            }
             WorkerEventKind::PhaseCompleted {
                 worker_id,
                 task_id,
                 phase,
                 success,
+                profile_results,
             } => {
-                let status_text = if *success { "ok" } else { "FAILED" };
-                let msg = ctx.tui.mux_output.format_worker_line(
+                Self::handle_phase_completed(
                     *worker_id,
-                    &format!("{task_id} ← phase: {phase} [{status_text}]"),
+                    task_id,
+                    phase,
+                    *success,
+                    profile_results.clone(),
+                    ctx,
                 );
-                ctx.tui.dashboard.push_log_line(&msg);
-
-                // Add phase completion separator to worker output
-                let separator = phase_end_separator(phase, *success);
-                ctx.tui
-                    .dashboard
-                    .push_worker_output(*worker_id, &[separator]);
             }
-
             WorkerEventKind::CostUpdate {
                 worker_id,
                 cost_usd,
                 input_tokens,
                 output_tokens,
             } => {
-                ctx.tui.mux_output.update_cost(
-                    *worker_id,
-                    *cost_usd,
-                    *input_tokens,
-                    *output_tokens,
-                );
-                let (total_cost, total_in, total_out) = ctx.tui.mux_output.worker_cost(*worker_id);
-                ctx.tui
-                    .dashboard
-                    .update_worker_cost(*worker_id, total_cost, total_in, total_out);
+                Self::handle_cost_update(*worker_id, *cost_usd, *input_tokens, *output_tokens, ctx);
             }
-
             WorkerEventKind::TaskCompleted {
                 worker_id,
                 task_id,
@@ -220,400 +327,644 @@ impl Orchestrator {
                 cost_usd,
                 ..
             } => {
-                // Wait for the worker's join handle to complete
-                if let Some(handle) = ctx.join_handles.remove(worker_id) {
-                    let _ = handle.await;
-                }
-
-                let duration = ctx
-                    .tui
-                    .task_start_times
-                    .remove(task_id)
-                    .map(|s| s.elapsed())
-                    .unwrap_or_default();
-
-                if *success && !self.config.no_merge {
-                    // Enqueue merge (async — runs in separate tokio task)
-                    if let Some(WorkerSlot::Busy { worktree, .. }) = ctx.worker_slots.get(worker_id)
-                        && let Some(task) = ctx.task_lookup.get(task_id.as_str())
-                    {
-                        let (cost, input, output) = ctx.tui.mux_output.worker_cost(*worker_id);
-                        // Preserve model from task implementation
-                        let model = self.resolve_model(task_id, ctx.tasks_file);
-                        let ws = WorkerStatus {
-                            state: WorkerState::Merging,
-                            task_id: Some(task_id.clone()),
-                            component: Some(task.component.clone()),
-                            phase: None,
-                            model: model
-                                .as_ref()
-                                .map(|m| crate::shared::tasks::reverse_model_alias(m)),
-                            cost_usd: cost,
-                            input_tokens: input,
-                            output_tokens: output,
-                        };
-                        ctx.tui.dashboard.update_worker_status(*worker_id, ws);
-
-                        let pending = PendingMerge {
-                            worker_id: *worker_id,
-                            task_id: task_id.clone(),
-                            task_name: task.name.clone(),
-                            branch: worktree.branch.clone(),
-                        };
-
-                        if ctx.merge_ctx.merge_in_progress {
-                            let msg = ctx.tui.mux_output.format_worker_line(
-                                *worker_id,
-                                &format!("Queued merge: {task_id} (another merge in progress)"),
-                            );
-                            ctx.tui.dashboard.push_log_line(&msg);
-                            ctx.merge_ctx.pending_merges.push_back(pending);
-                        } else {
-                            Self::spawn_merge_task(
-                                &mut ctx.merge_ctx,
-                                pending,
-                                &self.project_root,
-                                ctx.event_tx.clone(),
-                                Arc::clone(&ctx.flags.shutdown),
-                                &self.config.conflict_resolution_model,
-                                self.config.merge_timeout,
-                                self.config.phase_timeout,
-                            );
-                        }
-                    } else {
-                        // Silent drop guard: worker slot not Busy or task not in lookup.
-                        // Without this else branch, the worker would hang forever.
-                        let reason = if !matches!(
-                            ctx.worker_slots.get(worker_id),
-                            Some(WorkerSlot::Busy { .. })
-                        ) {
-                            "worker slot not Busy"
-                        } else {
-                            "task not in lookup"
-                        };
-                        let msg = ctx.tui.mux_output.format_worker_line(
-                            *worker_id,
-                            &format!("Cannot merge {task_id}: {reason} — releasing worker"),
-                        );
-                        ctx.tui.dashboard.push_log_line(&msg);
-
-                        ctx.scheduler.mark_blocked(task_id);
-                        if let Some(mt) =
-                            self.update_tasks_file(task_id, TaskStatus::Blocked, ctx.tui)
-                        {
-                            ctx.progress_mtime = Some(mt);
-                            let mut updated = (*ctx.cached_tasks_file).clone();
-                            let _ = updated.update_status(task_id, TaskStatus::Blocked);
-                            ctx.cached_tasks_file = Arc::new(updated);
-                        }
-
-                        ctx.tui.task_summaries.push(TaskSummaryEntry {
-                            task_id: task_id.clone(),
-                            status: "Blocked".to_string(),
-                            cost_usd: *cost_usd,
-                            duration,
-                            retries: ctx.scheduler.retry_count(task_id),
-                        });
-
-                        // Free the worker slot, clear MCP session, and reset TUI
-                        ctx.release_worker(*worker_id);
-                        ctx.tui
-                            .dashboard
-                            .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
-                        ctx.tui.mux_output.clear_worker(*worker_id);
-                    }
-                } else if *success {
-                    // --no-merge mode
-                    ctx.scheduler.mark_done(task_id);
-                    if let Some(mt) = self.update_tasks_file(task_id, TaskStatus::Done, ctx.tui) {
-                        ctx.progress_mtime = Some(mt);
-                        // Sync cached TasksFile
-                        let mut updated = (*ctx.cached_tasks_file).clone();
-                        let _ = updated.update_status(task_id, TaskStatus::Done);
-                        ctx.cached_tasks_file = Arc::new(updated);
-                    }
-                    let msg = ctx
-                        .tui
-                        .mux_output
-                        .format_worker_line(*worker_id, &format!("Done (no merge): {task_id}"));
-                    ctx.tui.dashboard.push_log_line(&msg);
-
-                    ctx.tui.task_summaries.push(TaskSummaryEntry {
-                        task_id: task_id.clone(),
-                        status: "Done".to_string(),
-                        cost_usd: *cost_usd,
-                        duration,
-                        retries: ctx.scheduler.retry_count(task_id),
-                    });
-
-                    // Free the worker slot, clear MCP session, and reset TUI
-                    ctx.release_worker(*worker_id);
-                    ctx.tui
-                        .dashboard
-                        .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
-                    ctx.tui.mux_output.clear_worker(*worker_id);
-                } else {
-                    // Task failed
-                    let requeued = ctx.scheduler.mark_failed(task_id);
-                    if requeued {
-                        let msg = ctx.tui.mux_output.format_worker_line(
-                            *worker_id,
-                            &format!("Task {task_id} failed, re-queued for retry"),
-                        );
-                        ctx.tui.dashboard.push_log_line(&msg);
-                    } else {
-                        let msg = ctx.tui.mux_output.format_worker_line(
-                            *worker_id,
-                            &format!("Task {task_id} blocked after max retries"),
-                        );
-                        ctx.tui.dashboard.push_log_line(&msg);
-                        if let Some(mt) =
-                            self.update_tasks_file(task_id, TaskStatus::Blocked, ctx.tui)
-                        {
-                            ctx.progress_mtime = Some(mt);
-                            // Sync cached TasksFile
-                            let mut updated = (*ctx.cached_tasks_file).clone();
-                            let _ = updated.update_status(task_id, TaskStatus::Blocked);
-                            ctx.cached_tasks_file = Arc::new(updated);
-                        }
-
-                        ctx.tui.task_summaries.push(TaskSummaryEntry {
-                            task_id: task_id.clone(),
-                            status: "Blocked".to_string(),
-                            cost_usd: *cost_usd,
-                            duration,
-                            retries: ctx.scheduler.retry_count(task_id),
-                        });
-                    }
-
-                    // Free the worker slot, clear MCP session, and reset TUI
-                    ctx.release_worker(*worker_id);
-                    ctx.tui
-                        .dashboard
-                        .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
-                    ctx.tui.mux_output.clear_worker(*worker_id);
-                }
+                self.handle_task_completed(*worker_id, task_id, *success, *cost_usd, ctx)
+                    .await;
             }
-
             WorkerEventKind::TaskFailed {
                 worker_id,
                 task_id,
                 error,
                 retries_left,
             } => {
-                let msg = if *retries_left == 0 {
-                    ctx.tui.mux_output.format_worker_line(
-                        *worker_id,
-                        &format!("Task {task_id} failed permanently: {error}"),
-                    )
-                } else {
-                    ctx.tui.mux_output.format_worker_line(
-                        *worker_id,
-                        &format!("Task {task_id} failed ({retries_left} retries left): {error}"),
-                    )
-                };
-                ctx.tui.dashboard.push_log_line(&msg);
+                Self::handle_task_failed(*worker_id, task_id, error, *retries_left, ctx);
             }
-
             WorkerEventKind::MergeStarted { worker_id, task_id } => {
-                let (cost, input, output) = ctx.tui.mux_output.worker_cost(*worker_id);
-                // Preserve model from task implementation
-                let model = self.resolve_model(task_id, ctx.tasks_file);
-                let ws = WorkerStatus {
-                    state: WorkerState::Merging,
-                    task_id: Some(task_id.clone()),
-                    component: ctx
-                        .task_lookup
-                        .get(task_id.as_str())
-                        .map(|t| t.component.clone()),
-                    phase: None,
-                    model: model
-                        .as_ref()
-                        .map(|m| crate::shared::tasks::reverse_model_alias(m)),
-                    cost_usd: cost,
-                    input_tokens: input,
-                    output_tokens: output,
-                };
-                ctx.tui.dashboard.update_worker_status(*worker_id, ws);
-                let msg = ctx
-                    .tui
-                    .mux_output
-                    .format_worker_line(*worker_id, &format!("Merging: {task_id}"));
-                ctx.tui.dashboard.push_log_line(&msg);
+                self.handle_merge_started(*worker_id, task_id, ctx);
             }
-
             WorkerEventKind::MergeCompleted {
                 worker_id,
                 task_id,
                 success,
                 commit_hash,
             } => {
-                // Wait for merge join handle
-                if let Some(handle) = ctx.merge_ctx.merge_join_handle.take() {
-                    let _ = handle.await;
-                }
-
-                let hash = commit_hash.as_deref().unwrap_or("???");
-                let status_text = if *success { "ok" } else { "FAILED" };
-                let msg = ctx.tui.mux_output.format_worker_line(
+                self.handle_merge_completed(
                     *worker_id,
-                    &format!("Merge {task_id}: {status_text} ({hash})"),
-                );
-                ctx.tui.dashboard.push_log_line(&msg);
-
-                if *success {
-                    ctx.scheduler.mark_done(task_id);
-                    if let Some(mt) = self.update_tasks_file(task_id, TaskStatus::Done, ctx.tui) {
-                        ctx.progress_mtime = Some(mt);
-                        // Sync cached TasksFile
-                        let mut updated = (*ctx.cached_tasks_file).clone();
-                        let _ = updated.update_status(task_id, TaskStatus::Done);
-                        ctx.cached_tasks_file = Arc::new(updated);
-                    }
-
-                    // Worktree cleanup
-                    if let Some(WorkerSlot::Busy { worktree, .. }) = ctx.worker_slots.get(worker_id)
-                    {
-                        ctx.worktree_manager
-                            .remove_worktree(&worktree.path)
-                            .await
-                            .ok();
-                        ctx.worktree_manager
-                            .remove_branch(&worktree.branch)
-                            .await
-                            .ok();
-                    }
-
-                    // Update state
-                    let cost_usd = ctx.tui.mux_output.worker_cost(*worker_id).0;
-                    ctx.state.tasks.insert(
-                        task_id.clone(),
-                        crate::commands::task::orchestrate::state::TaskState {
-                            status: "done".to_string(),
-                            worker: Some(*worker_id),
-                            retries: ctx.scheduler.retry_count(task_id),
-                            cost: cost_usd,
-                        },
-                    );
-
-                    ctx.tui.task_summaries.push(TaskSummaryEntry {
-                        task_id: task_id.clone(),
-                        status: "Done".to_string(),
-                        cost_usd,
-                        duration: Duration::ZERO,
-                        retries: ctx.scheduler.retry_count(task_id),
-                    });
-                } else {
-                    ctx.scheduler.mark_blocked(task_id);
-                    if let Some(mt) = self.update_tasks_file(task_id, TaskStatus::Blocked, ctx.tui)
-                    {
-                        ctx.progress_mtime = Some(mt);
-                        // Sync cached TasksFile
-                        let mut updated = (*ctx.cached_tasks_file).clone();
-                        let _ = updated.update_status(task_id, TaskStatus::Blocked);
-                        ctx.cached_tasks_file = Arc::new(updated);
-                    }
-
-                    let cost_usd = ctx.tui.mux_output.worker_cost(*worker_id).0;
-                    ctx.state.tasks.insert(
-                        task_id.clone(),
-                        crate::commands::task::orchestrate::state::TaskState {
-                            status: "blocked".to_string(),
-                            worker: Some(*worker_id),
-                            retries: ctx.scheduler.retry_count(task_id),
-                            cost: cost_usd,
-                        },
-                    );
-
-                    ctx.tui.task_summaries.push(TaskSummaryEntry {
-                        task_id: task_id.clone(),
-                        status: "Blocked".to_string(),
-                        cost_usd,
-                        duration: Duration::ZERO,
-                        retries: ctx.scheduler.retry_count(task_id),
-                    });
-                }
-
-                // Free the worker slot, clear MCP session, and reset TUI
-                ctx.release_worker(*worker_id);
-                ctx.tui
-                    .dashboard
-                    .update_worker_status(*worker_id, WorkerStatus::idle(*worker_id));
-                ctx.tui.mux_output.clear_worker(*worker_id);
-
-                // Start next queued merge if any
-                ctx.merge_ctx.merge_in_progress = false;
-                ctx.merge_ctx.current_merge_worker_id = None;
-                if let Some(next) = ctx.merge_ctx.pending_merges.pop_front() {
-                    Self::spawn_merge_task(
-                        &mut ctx.merge_ctx,
-                        next,
-                        &self.project_root,
-                        ctx.event_tx.clone(),
-                        Arc::clone(&ctx.flags.shutdown),
-                        &self.config.conflict_resolution_model,
-                        self.config.merge_timeout,
-                        self.config.phase_timeout,
-                    );
-                }
+                    task_id,
+                    *success,
+                    commit_hash.as_deref(),
+                    ctx,
+                )
+                .await;
             }
-
             WorkerEventKind::MergeConflict {
                 worker_id,
                 task_id,
                 conflicting_files,
             } => {
-                let msg = ctx.tui.mux_output.format_worker_line(
-                    *worker_id,
-                    &format!("Merge conflict in {task_id}: {conflicting_files:?}"),
-                );
-                ctx.tui.dashboard.push_log_line(&msg);
-
-                // Update worker state to show conflict resolution
-                let (cost, input, output) = ctx.tui.mux_output.worker_cost(*worker_id);
-                // Use conflict resolution model (not the task model)
-                let conflict_model = &self.config.conflict_resolution_model;
-                let ws = WorkerStatus {
-                    state: WorkerState::ResolvingConflicts,
-                    task_id: Some(task_id.clone()),
-                    component: ctx
-                        .task_lookup
-                        .get(task_id.as_str())
-                        .map(|t| t.component.clone()),
-                    phase: None,
-                    model: Some(crate::shared::tasks::reverse_model_alias(conflict_model)),
-                    cost_usd: cost,
-                    input_tokens: input,
-                    output_tokens: output,
-                };
-                ctx.tui.dashboard.update_worker_status(*worker_id, ws);
-
-                // Add conflict resolution start separator
-                let separator = conflict_resolution_start_separator();
-                ctx.tui
-                    .dashboard
-                    .push_worker_output(*worker_id, &[separator]);
+                self.handle_merge_conflict(*worker_id, task_id, conflicting_files, ctx);
             }
-
             WorkerEventKind::OutputLines { worker_id, lines } => {
                 ctx.tui.dashboard.push_worker_output(*worker_id, lines);
             }
-
             WorkerEventKind::MergeStepOutput { worker_id, lines } => {
                 ctx.tui.dashboard.push_worker_output(*worker_id, lines);
             }
-
-            WorkerEventKind::Heartbeat {
-                worker_id,
-                phase: _,
-            } => {
-                // Update last heartbeat timestamp for this worker
+            WorkerEventKind::Heartbeat { worker_id, .. } => {
                 ctx.last_heartbeat
                     .insert(*worker_id, std::time::Instant::now());
+            }
+            WorkerEventKind::UserMessageSent { worker_id, message } => {
+                Self::handle_user_message_sent(*worker_id, message, ctx);
+            }
+            WorkerEventKind::UserMessageReceived { worker_id, message } => {
+                Self::handle_user_message_received(*worker_id, message, ctx);
             }
         }
 
         Ok(())
+    }
+
+    // ── Per-event handler methods ───────────────────────────────────
+
+    /// Worker started processing a new task — initialize TUI and heartbeat.
+    fn handle_task_started(&self, worker_id: u32, task_id: &str, ctx: &mut RunLoopContext) {
+        ctx.tui.dashboard.clear_worker_output(worker_id);
+
+        let separator = task_start_separator(task_id);
+        ctx.tui
+            .dashboard
+            .push_worker_output(worker_id, &[separator]);
+
+        ctx.last_heartbeat
+            .insert(worker_id, std::time::Instant::now());
+
+        let model = self.resolve_model(task_id, ctx.cached_tasks_file.as_ref());
+        let ws = build_worker_status(WorkerStatusParams {
+            state: WorkerState::Implementing,
+            task_id,
+            component: lookup_component(ctx, task_id),
+            phase: Some(WorkerPhase::Implement),
+            model: model.as_ref(),
+            cost_usd: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+            verify_profiles: Vec::new(),
+        });
+        ctx.tui.dashboard.update_worker_status(worker_id, ws);
+
+        let msg = ctx
+            .tui
+            .mux_output
+            .format_worker_line(worker_id, &format!("Started: {task_id}"));
+        ctx.tui.dashboard.push_log_line(&msg);
+    }
+
+    /// Worker entered a new execution phase — update dashboard and log.
+    fn handle_phase_started(
+        &self,
+        worker_id: u32,
+        task_id: &str,
+        phase: &WorkerPhase,
+        profiles: Option<Vec<String>>,
+        ctx: &mut RunLoopContext,
+    ) {
+        // Task 25.3.3: Update worker_phases for input thread validation
+        ctx.flags
+            .worker_phases
+            .lock()
+            .unwrap()
+            .insert(worker_id, Some(phase.clone()));
+
+        let new_state = match phase {
+            WorkerPhase::Setup => WorkerState::SettingUp,
+            WorkerPhase::Implement => WorkerState::Implementing,
+            WorkerPhase::ReviewFix => WorkerState::Reviewing,
+            WorkerPhase::Verify => WorkerState::Verifying,
+        };
+        let (cost, input, output) = ctx.tui.mux_output.worker_cost(worker_id);
+
+        // Use review_model for ReviewFix phase, task's model for others
+        let model = if matches!(phase, WorkerPhase::ReviewFix) {
+            Some(self.config.review_model.clone())
+        } else {
+            self.resolve_model(task_id, ctx.cached_tasks_file.as_ref())
+        };
+
+        // For Verify phase, initialize profiles with in-progress status (None)
+        let verify_profiles = if matches!(phase, WorkerPhase::Verify) {
+            profiles
+                .unwrap_or_default()
+                .into_iter()
+                .map(|name| (name, None))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let ws = build_worker_status(WorkerStatusParams {
+            state: new_state,
+            task_id,
+            component: lookup_component(ctx, task_id),
+            phase: Some(phase.clone()),
+            model: model.as_ref(),
+            cost_usd: cost,
+            input_tokens: input,
+            output_tokens: output,
+            verify_profiles,
+        });
+        ctx.tui.dashboard.update_worker_status(worker_id, ws);
+
+        let msg = ctx
+            .tui
+            .mux_output
+            .format_worker_line(worker_id, &format!("{task_id} → phase: {phase}"));
+        ctx.tui.dashboard.push_log_line(&msg);
+
+        let separator = phase_start_separator(phase);
+        ctx.tui
+            .dashboard
+            .push_worker_output(worker_id, &[separator]);
+    }
+
+    /// Worker finished an execution phase — log result, update profile statuses, add separator.
+    fn handle_phase_completed(
+        worker_id: u32,
+        task_id: &str,
+        phase: &WorkerPhase,
+        success: bool,
+        profile_results: Option<Vec<ProfileStatus>>,
+        ctx: &mut RunLoopContext,
+    ) {
+        // Update verify_profiles on dashboard with final results
+        if let Some(results) = &profile_results {
+            let profiles = results
+                .iter()
+                .map(|r| (r.name.clone(), r.success))
+                .collect();
+            ctx.tui
+                .dashboard
+                .update_verify_profiles(worker_id, profiles);
+        }
+
+        let status_text = if success { "ok" } else { "FAILED" };
+        let msg = ctx.tui.mux_output.format_worker_line(
+            worker_id,
+            &format!("{task_id} ← phase: {phase} [{status_text}]"),
+        );
+        ctx.tui.dashboard.push_log_line(&msg);
+
+        let separator = phase_end_separator(phase, success);
+        ctx.tui
+            .dashboard
+            .push_worker_output(worker_id, &[separator]);
+    }
+
+    /// Incremental cost update from a worker — propagate to mux_output and dashboard.
+    fn handle_cost_update(
+        worker_id: u32,
+        cost_usd: f64,
+        input_tokens: u64,
+        output_tokens: u64,
+        ctx: &mut RunLoopContext,
+    ) {
+        ctx.tui
+            .mux_output
+            .update_cost(worker_id, cost_usd, input_tokens, output_tokens);
+        let (total_cost, total_in, total_out) = ctx.tui.mux_output.worker_cost(worker_id);
+        ctx.tui
+            .dashboard
+            .update_worker_cost(worker_id, total_cost, total_in, total_out);
+    }
+
+    /// Task completed (success or failure) — handle merge, retry, or finalization.
+    async fn handle_task_completed(
+        &self,
+        worker_id: u32,
+        task_id: &str,
+        success: bool,
+        cost_usd: f64,
+        ctx: &mut RunLoopContext<'_>,
+    ) {
+        // Wait for the worker's join handle to complete
+        if let Some(handle) = ctx.join_handles.remove(&worker_id) {
+            let _ = handle.await;
+        }
+
+        let duration = ctx
+            .tui
+            .task_start_times
+            .remove(task_id)
+            .map(|s| s.elapsed())
+            .unwrap_or_default();
+
+        if success && !self.config.no_merge {
+            self.handle_task_success_with_merge(worker_id, task_id, cost_usd, duration, ctx);
+        } else if success {
+            self.handle_task_success_no_merge(worker_id, task_id, cost_usd, duration, ctx);
+        } else {
+            self.handle_task_failure(worker_id, task_id, cost_usd, duration, ctx)
+                .await;
+        }
+    }
+
+    /// Task succeeded and merge is enabled — enqueue merge or handle edge cases.
+    fn handle_task_success_with_merge(
+        &self,
+        worker_id: u32,
+        task_id: &str,
+        cost_usd: f64,
+        duration: Duration,
+        ctx: &mut RunLoopContext,
+    ) {
+        if let Some(WorkerSlot::Busy { worktree, .. }) = ctx.worker_slots.get(&worker_id) {
+            let component = lookup_component(ctx, task_id);
+            let (cost, input, output) = ctx.tui.mux_output.worker_cost(worker_id);
+            let model = self.resolve_model(task_id, ctx.cached_tasks_file.as_ref());
+            let ws = build_worker_status(WorkerStatusParams {
+                state: WorkerState::Merging,
+                task_id,
+                component,
+                phase: None,
+                model: model.as_ref(),
+                cost_usd: cost,
+                input_tokens: input,
+                output_tokens: output,
+                verify_profiles: Vec::new(),
+            });
+            ctx.tui.dashboard.update_worker_status(worker_id, ws);
+
+            // Get task name from cached_tasks_file
+            let task_name = ctx
+                .cached_tasks_file
+                .as_ref()
+                .find_leaf(task_id)
+                .map(|leaf| leaf.name.clone())
+                .unwrap_or_else(|| task_id.to_string());
+
+            let pending = PendingMerge {
+                worker_id,
+                task_id: task_id.to_string(),
+                task_name,
+                branch: worktree.branch.clone(),
+            };
+
+            if ctx.merge_ctx.merge_in_progress {
+                let msg = ctx.tui.mux_output.format_worker_line(
+                    worker_id,
+                    &format!("Queued merge: {task_id} (another merge in progress)"),
+                );
+                ctx.tui.dashboard.push_log_line(&msg);
+                ctx.merge_ctx.pending_merges.push_back(pending);
+            } else {
+                Self::spawn_merge_task(
+                    &mut ctx.merge_ctx,
+                    pending,
+                    &self.project_root,
+                    ctx.event_tx.clone(),
+                    Arc::clone(&ctx.flags.shutdown),
+                    &self.config.conflict_resolution_model,
+                    self.config.merge_timeout,
+                    self.config.phase_timeout,
+                );
+            }
+        } else {
+            // Worker slot not Busy or task not in lookup — release worker
+            let reason = if !matches!(
+                ctx.worker_slots.get(&worker_id),
+                Some(WorkerSlot::Busy { .. })
+            ) {
+                "worker slot not Busy"
+            } else {
+                "task not in lookup"
+            };
+            let msg = ctx.tui.mux_output.format_worker_line(
+                worker_id,
+                &format!("Cannot merge {task_id}: {reason} — releasing worker"),
+            );
+            ctx.tui.dashboard.push_log_line(&msg);
+
+            ctx.scheduler.mark_blocked(task_id);
+            sync_task_status(self, ctx, task_id, TaskStatus::Blocked);
+
+            ctx.tui.task_summaries.push(TaskSummaryEntry {
+                task_id: task_id.to_string(),
+                status: "Blocked".to_string(),
+                cost_usd,
+                duration,
+                retries: ctx.scheduler.retry_count(task_id),
+            });
+
+            ctx.release_worker(worker_id);
+            set_worker_idle(ctx, worker_id);
+        }
+    }
+
+    /// Task succeeded in --no-merge mode — mark done and release worker.
+    fn handle_task_success_no_merge(
+        &self,
+        worker_id: u32,
+        task_id: &str,
+        cost_usd: f64,
+        duration: Duration,
+        ctx: &mut RunLoopContext,
+    ) {
+        ctx.scheduler.mark_done(task_id);
+        sync_task_status(self, ctx, task_id, TaskStatus::Done);
+
+        let msg = ctx
+            .tui
+            .mux_output
+            .format_worker_line(worker_id, &format!("Done (no merge): {task_id}"));
+        ctx.tui.dashboard.push_log_line(&msg);
+
+        ctx.tui.task_summaries.push(TaskSummaryEntry {
+            task_id: task_id.to_string(),
+            status: "Done".to_string(),
+            cost_usd,
+            duration,
+            retries: ctx.scheduler.retry_count(task_id),
+        });
+
+        ctx.release_worker(worker_id);
+        set_worker_idle(ctx, worker_id);
+    }
+
+    /// Task failed — retry or block, cleanup worktree, then release worker.
+    ///
+    /// IMPORTANT: Cleanup worktree before releasing worker to avoid orphaned worktrees
+    /// when worker fails. This ensures proper cleanup even after panic/error.
+    async fn handle_task_failure(
+        &self,
+        worker_id: u32,
+        task_id: &str,
+        cost_usd: f64,
+        duration: Duration,
+        ctx: &mut RunLoopContext<'_>,
+    ) {
+        // Cleanup worktree before marking task failed/blocked (task 54.4)
+        if let Some(WorkerSlot::Busy { worktree, .. }) = ctx.worker_slots.get(&worker_id) {
+            ctx.worktree_manager
+                .remove_worktree(&worktree.path)
+                .await
+                .ok();
+            ctx.worktree_manager
+                .remove_branch(&worktree.branch)
+                .await
+                .ok();
+        }
+
+        let requeued = ctx.scheduler.mark_failed(task_id);
+        if requeued {
+            let msg = ctx.tui.mux_output.format_worker_line(
+                worker_id,
+                &format!("Task {task_id} failed, re-queued for retry"),
+            );
+            ctx.tui.dashboard.push_log_line(&msg);
+        } else {
+            let msg = ctx.tui.mux_output.format_worker_line(
+                worker_id,
+                &format!("Task {task_id} blocked after max retries"),
+            );
+            ctx.tui.dashboard.push_log_line(&msg);
+            sync_task_status(self, ctx, task_id, TaskStatus::Blocked);
+
+            ctx.tui.task_summaries.push(TaskSummaryEntry {
+                task_id: task_id.to_string(),
+                status: "Blocked".to_string(),
+                cost_usd,
+                duration,
+                retries: ctx.scheduler.retry_count(task_id),
+            });
+        }
+
+        ctx.release_worker(worker_id);
+        set_worker_idle(ctx, worker_id);
+    }
+
+    /// Task failed with an explicit error message — log it.
+    fn handle_task_failed(
+        worker_id: u32,
+        task_id: &str,
+        error: &str,
+        retries_left: u32,
+        ctx: &mut RunLoopContext,
+    ) {
+        let msg = if retries_left == 0 {
+            ctx.tui.mux_output.format_worker_line(
+                worker_id,
+                &format!("Task {task_id} failed permanently: {error}"),
+            )
+        } else {
+            ctx.tui.mux_output.format_worker_line(
+                worker_id,
+                &format!("Task {task_id} failed ({retries_left} retries left): {error}"),
+            )
+        };
+        ctx.tui.dashboard.push_log_line(&msg);
+    }
+
+    /// Merge process started for a completed task — update TUI.
+    fn handle_merge_started(&self, worker_id: u32, task_id: &str, ctx: &mut RunLoopContext) {
+        let (cost, input, output) = ctx.tui.mux_output.worker_cost(worker_id);
+        let model = self.resolve_model(task_id, ctx.cached_tasks_file.as_ref());
+        let ws = build_worker_status(WorkerStatusParams {
+            state: WorkerState::Merging,
+            task_id,
+            component: lookup_component(ctx, task_id),
+            phase: None,
+            model: model.as_ref(),
+            cost_usd: cost,
+            input_tokens: input,
+            output_tokens: output,
+            verify_profiles: Vec::new(),
+        });
+        ctx.tui.dashboard.update_worker_status(worker_id, ws);
+
+        let msg = ctx
+            .tui
+            .mux_output
+            .format_worker_line(worker_id, &format!("Merging: {task_id}"));
+        ctx.tui.dashboard.push_log_line(&msg);
+    }
+
+    /// Merge completed (success or failure) — finalize task, cleanup worktree, start next merge.
+    async fn handle_merge_completed(
+        &self,
+        worker_id: u32,
+        task_id: &str,
+        success: bool,
+        commit_hash: Option<&str>,
+        ctx: &mut RunLoopContext<'_>,
+    ) {
+        // Wait for merge join handle
+        if let Some(handle) = ctx.merge_ctx.merge_join_handle.take() {
+            let _ = handle.await;
+        }
+
+        let hash = commit_hash.unwrap_or("???");
+        let status_text = if success { "ok" } else { "FAILED" };
+        let msg = ctx.tui.mux_output.format_worker_line(
+            worker_id,
+            &format!("Merge {task_id}: {status_text} ({hash})"),
+        );
+        ctx.tui.dashboard.push_log_line(&msg);
+
+        if success {
+            self.handle_merge_success(worker_id, task_id, ctx).await;
+        } else {
+            self.handle_merge_failure(worker_id, task_id, ctx);
+        }
+
+        // Free the worker slot, clear MCP session, and reset TUI
+        ctx.release_worker(worker_id);
+        set_worker_idle(ctx, worker_id);
+
+        // Start next queued merge if any
+        ctx.merge_ctx.merge_in_progress = false;
+        ctx.merge_ctx.current_merge_worker_id = None;
+        if let Some(next) = ctx.merge_ctx.pending_merges.pop_front() {
+            Self::spawn_merge_task(
+                &mut ctx.merge_ctx,
+                next,
+                &self.project_root,
+                ctx.event_tx.clone(),
+                Arc::clone(&ctx.flags.shutdown),
+                &self.config.conflict_resolution_model,
+                self.config.merge_timeout,
+                self.config.phase_timeout,
+            );
+        }
+    }
+
+    /// Merge succeeded — mark done, cleanup worktree/branch, update state.
+    async fn handle_merge_success(
+        &self,
+        worker_id: u32,
+        task_id: &str,
+        ctx: &mut RunLoopContext<'_>,
+    ) {
+        ctx.scheduler.mark_done(task_id);
+        sync_task_status(self, ctx, task_id, TaskStatus::Done);
+
+        // Worktree cleanup
+        if let Some(WorkerSlot::Busy { worktree, .. }) = ctx.worker_slots.get(&worker_id) {
+            ctx.worktree_manager
+                .remove_worktree(&worktree.path)
+                .await
+                .ok();
+            ctx.worktree_manager
+                .remove_branch(&worktree.branch)
+                .await
+                .ok();
+        }
+
+        // Update orchestrate state
+        let cost_usd = ctx.tui.mux_output.worker_cost(worker_id).0;
+        ctx.state.tasks.insert(
+            task_id.to_string(),
+            crate::commands::task::orchestrate::state::TaskState {
+                status: "done".to_string(),
+                worker: Some(worker_id),
+                retries: ctx.scheduler.retry_count(task_id),
+                cost: cost_usd,
+            },
+        );
+
+        ctx.tui.task_summaries.push(TaskSummaryEntry {
+            task_id: task_id.to_string(),
+            status: "Done".to_string(),
+            cost_usd,
+            duration: Duration::ZERO,
+            retries: ctx.scheduler.retry_count(task_id),
+        });
+    }
+
+    /// Merge failed — mark blocked, update state.
+    fn handle_merge_failure(&self, worker_id: u32, task_id: &str, ctx: &mut RunLoopContext) {
+        ctx.scheduler.mark_blocked(task_id);
+        sync_task_status(self, ctx, task_id, TaskStatus::Blocked);
+
+        let cost_usd = ctx.tui.mux_output.worker_cost(worker_id).0;
+        ctx.state.tasks.insert(
+            task_id.to_string(),
+            crate::commands::task::orchestrate::state::TaskState {
+                status: "blocked".to_string(),
+                worker: Some(worker_id),
+                retries: ctx.scheduler.retry_count(task_id),
+                cost: cost_usd,
+            },
+        );
+
+        ctx.tui.task_summaries.push(TaskSummaryEntry {
+            task_id: task_id.to_string(),
+            status: "Blocked".to_string(),
+            cost_usd,
+            duration: Duration::ZERO,
+            retries: ctx.scheduler.retry_count(task_id),
+        });
+    }
+
+    /// Merge conflict detected — update TUI to show conflict resolution state.
+    fn handle_merge_conflict(
+        &self,
+        worker_id: u32,
+        task_id: &str,
+        conflicting_files: &[String],
+        ctx: &mut RunLoopContext,
+    ) {
+        let msg = ctx.tui.mux_output.format_worker_line(
+            worker_id,
+            &format!("Merge conflict in {task_id}: {conflicting_files:?}"),
+        );
+        ctx.tui.dashboard.push_log_line(&msg);
+
+        let (cost, input, output) = ctx.tui.mux_output.worker_cost(worker_id);
+        let conflict_model = &self.config.conflict_resolution_model;
+        let ws = build_worker_status(WorkerStatusParams {
+            state: WorkerState::ResolvingConflicts,
+            task_id,
+            component: lookup_component(ctx, task_id),
+            phase: None,
+            model: Some(conflict_model),
+            cost_usd: cost,
+            input_tokens: input,
+            output_tokens: output,
+            verify_profiles: Vec::new(),
+        });
+        ctx.tui.dashboard.update_worker_status(worker_id, ws);
+
+        let separator = conflict_resolution_start_separator();
+        ctx.tui
+            .dashboard
+            .push_worker_output(worker_id, &[separator]);
+    }
+
+    /// User message sent to a worker — display in worker panel.
+    fn handle_user_message_sent(worker_id: u32, message: &str, ctx: &mut RunLoopContext) {
+        let formatted_msg = format!("▶ USER: {message}");
+        ctx.tui
+            .dashboard
+            .push_worker_output(worker_id, &[formatted_msg]);
+
+        let log_msg = ctx
+            .tui
+            .mux_output
+            .format_worker_line(worker_id, "Message sent");
+        ctx.tui.dashboard.push_log_line(&log_msg);
+    }
+
+    /// User message received by a worker — display in worker panel.
+    fn handle_user_message_received(worker_id: u32, message: &str, ctx: &mut RunLoopContext) {
+        let formatted_msg = format!("◀ RECEIVED: {message}");
+        ctx.tui
+            .dashboard
+            .push_worker_output(worker_id, &[formatted_msg]);
+
+        let log_msg = ctx
+            .tui
+            .mux_output
+            .format_worker_line(worker_id, "Message received");
+        ctx.tui.dashboard.push_log_line(&log_msg);
     }
 }
 
@@ -644,6 +995,7 @@ mod tests {
                     description: None,
                     related_files: vec![],
                     implementation_steps: vec![],
+                    profiles: vec![],
                     subtasks: vec![],
                 },
                 TaskNode {
@@ -656,6 +1008,7 @@ mod tests {
                     description: None,
                     related_files: vec![],
                     implementation_steps: vec![],
+                    profiles: vec![],
                     subtasks: vec![],
                 },
             ],
@@ -674,7 +1027,7 @@ mod tests {
             .expect("Task 1.1 should exist");
         assert_eq!(leaf.status, TaskStatus::Todo);
 
-        // Simulate manual status update (as done in orchestrator_events.rs:191-193)
+        // Simulate manual status update (as done in orchestrator_events.rs)
         let mut updated = (*cached_tasks_file).clone();
         let updated_ok = updated.update_status("1.1", TaskStatus::Done);
         assert!(updated_ok, "update_status should succeed for existing task");
@@ -699,7 +1052,7 @@ mod tests {
             .expect("Task 1.2 should exist");
         assert_eq!(leaf.status, TaskStatus::Todo);
 
-        // Simulate manual status update (as done in orchestrator_events.rs:235-237)
+        // Simulate manual status update (as done in orchestrator_events.rs)
         let mut updated = (*cached_tasks_file).clone();
         let updated_ok = updated.update_status("1.2", TaskStatus::Blocked);
         assert!(updated_ok, "update_status should succeed for existing task");
@@ -756,7 +1109,6 @@ mod tests {
         scheduler.mark_done("1.1");
 
         // Simulate hot-reload: load fresh TasksFile and apply scheduler state
-        // (as done in orchestrator.rs:644-645)
         let fresh_tasks_file = sample_tasks_file();
         let mut updated = fresh_tasks_file.clone();
 
@@ -794,7 +1146,6 @@ mod tests {
         assert_eq!(leaf.status, TaskStatus::Done);
 
         // Test all status mappings to ensure data structure is correct for rendering
-        // Note: We don't duplicate rendering logic here, just verify data structure
         let statuses = [
             TaskStatus::Done,
             TaskStatus::InProgress,

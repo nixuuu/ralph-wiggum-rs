@@ -82,6 +82,7 @@ Generate a hierarchical task plan following the ralph-wiggum tasks.yml schema.
 - `related_files` — list of files the implementer should read before starting.
 - `implementation_steps` — ordered list of concrete steps to implement the task.
 - `model` — **required on every leaf task**. See model selection guide below.
+- `profiles` — **optional on leaf tasks**: array of verification profile names to run when this task completes. Profiles define targeted checks for specific path patterns. See "Available verification profiles" below.
 
 ### Model selection
 
@@ -108,6 +109,15 @@ Quick reference:
 | Framework migration / major upgrade | opus |
 
 Set `default_model: sonnet`. Every leaf task MUST have a `model` field.
+
+### Available verification profiles
+
+{profiles_info}
+
+When assigning `profiles` to a leaf task, consider:
+- Which file paths the task modifies (match against profile `paths`)
+- What type of verification makes sense for the component (e.g., "rust" profile for Rust code, "frontend" for UI changes)
+- Profiles are optional — only assign if the task clearly benefits from targeted verification
 
 ### Plan quality checklist
 

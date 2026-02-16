@@ -34,6 +34,15 @@ pub struct WorkerEvent {
     pub kind: WorkerEventKind,
 }
 
+/// Profile verification status — name + optional success status.
+/// Used during Verify phase to track individual profile execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileStatus {
+    pub name: String,
+    /// None = in progress, Some(true) = success, Some(false) = failed
+    pub success: Option<bool>,
+}
+
 /// Specific event types for worker→orchestrator communication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
@@ -46,12 +55,18 @@ pub enum WorkerEventKind {
         worker_id: u32,
         task_id: String,
         phase: WorkerPhase,
+        /// Optional profile information for Verify phase
+        #[serde(skip_serializing_if = "Option::is_none")]
+        profiles: Option<Vec<String>>,
     },
     PhaseCompleted {
         worker_id: u32,
         task_id: String,
         phase: WorkerPhase,
         success: bool,
+        /// Optional profile results for Verify phase
+        #[serde(skip_serializing_if = "Option::is_none")]
+        profile_results: Option<Vec<ProfileStatus>>,
     },
     TaskCompleted {
         worker_id: u32,
@@ -104,6 +119,17 @@ pub enum WorkerEventKind {
     Heartbeat {
         worker_id: u32,
         phase: WorkerPhase,
+    },
+    /// User message sent to the worker's Claude session via stdin.
+    UserMessageSent {
+        worker_id: u32,
+        message: String,
+    },
+    /// User message received by the worker and forwarded to Claude stdin.
+    /// Used for logging incoming messages in the worker's output panel.
+    UserMessageReceived {
+        worker_id: u32,
+        message: String,
     },
 }
 
@@ -204,9 +230,50 @@ mod tests {
             worker_id: 2,
             task_id: "T03".to_string(),
             phase: WorkerPhase::Implement,
+            profiles: None,
         });
         let json = event.to_jsonl().unwrap();
         assert!(json.contains("\"phase\":\"Implement\""));
+    }
+
+    #[test]
+    fn test_worker_event_serialize_phase_started_with_profiles() {
+        let event = WorkerEvent::new(WorkerEventKind::PhaseStarted {
+            worker_id: 2,
+            task_id: "T03".to_string(),
+            phase: WorkerPhase::Verify,
+            profiles: Some(vec!["frontend".to_string(), "backend".to_string()]),
+        });
+        let json = event.to_jsonl().unwrap();
+        assert!(json.contains("\"phase\":\"Verify\""));
+        assert!(json.contains("\"profiles\""));
+        assert!(json.contains("frontend"));
+        assert!(json.contains("backend"));
+    }
+
+    #[test]
+    fn test_worker_event_serialize_phase_completed_with_profile_results() {
+        let event = WorkerEvent::new(WorkerEventKind::PhaseCompleted {
+            worker_id: 2,
+            task_id: "T03".to_string(),
+            phase: WorkerPhase::Verify,
+            success: true,
+            profile_results: Some(vec![
+                ProfileStatus {
+                    name: "frontend".to_string(),
+                    success: Some(true),
+                },
+                ProfileStatus {
+                    name: "backend".to_string(),
+                    success: Some(false),
+                },
+            ]),
+        });
+        let json = event.to_jsonl().unwrap();
+        assert!(json.contains("\"phase\":\"Verify\""));
+        assert!(json.contains("\"profile_results\""));
+        assert!(json.contains("frontend"));
+        assert!(json.contains("backend"));
     }
 
     #[test]
@@ -284,12 +351,14 @@ mod tests {
                 worker_id: 1,
                 task_id: "T01".to_string(),
                 phase: WorkerPhase::Implement,
+                profiles: None,
             },
             WorkerEventKind::PhaseCompleted {
                 worker_id: 1,
                 task_id: "T01".to_string(),
                 phase: WorkerPhase::ReviewFix,
                 success: true,
+                profile_results: None,
             },
             WorkerEventKind::TaskFailed {
                 worker_id: 1,
@@ -329,6 +398,30 @@ mod tests {
             WorkerEventKind::Heartbeat {
                 worker_id: 1,
                 phase: WorkerPhase::Implement,
+            },
+            WorkerEventKind::PhaseStarted {
+                worker_id: 1,
+                task_id: "T01".to_string(),
+                phase: WorkerPhase::Verify,
+                profiles: Some(vec!["frontend".to_string()]),
+            },
+            WorkerEventKind::PhaseCompleted {
+                worker_id: 1,
+                task_id: "T01".to_string(),
+                phase: WorkerPhase::Verify,
+                success: true,
+                profile_results: Some(vec![ProfileStatus {
+                    name: "frontend".to_string(),
+                    success: Some(true),
+                }]),
+            },
+            WorkerEventKind::UserMessageSent {
+                worker_id: 1,
+                message: "Hello from user".to_string(),
+            },
+            WorkerEventKind::UserMessageReceived {
+                worker_id: 1,
+                message: "Message received".to_string(),
             },
         ];
 
@@ -396,6 +489,70 @@ mod tests {
         if let WorkerEventKind::Heartbeat { worker_id, phase } = &deserialized.kind {
             assert_eq!(*worker_id, 5);
             assert_eq!(*phase, WorkerPhase::Verify);
+        } else {
+            panic!("Wrong event type after roundtrip");
+        }
+    }
+
+    #[test]
+    fn test_worker_event_serialize_user_message_sent() {
+        let event = WorkerEvent::new(WorkerEventKind::UserMessageSent {
+            worker_id: 2,
+            message: "Test message from user".to_string(),
+        });
+        let json = event.to_jsonl().unwrap();
+        assert!(json.contains("\"event\":\"UserMessageSent\""));
+        assert!(json.contains("\"worker_id\":2"));
+        assert!(json.contains("\"message\":\"Test message from user\""));
+        assert!(json.contains("\"timestamp\""));
+        // Must be single line
+        assert!(!json.contains('\n'));
+    }
+
+    #[test]
+    fn test_user_message_sent_event_roundtrip() {
+        let original = WorkerEvent::new(WorkerEventKind::UserMessageSent {
+            worker_id: 7,
+            message: "Roundtrip test message".to_string(),
+        });
+        let json = original.to_jsonl().unwrap();
+        let deserialized: WorkerEvent = serde_json::from_str(&json).unwrap();
+        // Verify key fields survived roundtrip
+        if let WorkerEventKind::UserMessageSent { worker_id, message } = &deserialized.kind {
+            assert_eq!(*worker_id, 7);
+            assert_eq!(message, "Roundtrip test message");
+        } else {
+            panic!("Wrong event type after roundtrip");
+        }
+    }
+
+    #[test]
+    fn test_worker_event_serialize_user_message_received() {
+        let event = WorkerEvent::new(WorkerEventKind::UserMessageReceived {
+            worker_id: 3,
+            message: "Received from orchestrator".to_string(),
+        });
+        let json = event.to_jsonl().unwrap();
+        assert!(json.contains("\"event\":\"UserMessageReceived\""));
+        assert!(json.contains("\"worker_id\":3"));
+        assert!(json.contains("\"message\":\"Received from orchestrator\""));
+        assert!(json.contains("\"timestamp\""));
+        // Must be single line
+        assert!(!json.contains('\n'));
+    }
+
+    #[test]
+    fn test_user_message_received_event_roundtrip() {
+        let original = WorkerEvent::new(WorkerEventKind::UserMessageReceived {
+            worker_id: 8,
+            message: "Test roundtrip received".to_string(),
+        });
+        let json = original.to_jsonl().unwrap();
+        let deserialized: WorkerEvent = serde_json::from_str(&json).unwrap();
+        // Verify key fields survived roundtrip
+        if let WorkerEventKind::UserMessageReceived { worker_id, message } = &deserialized.kind {
+            assert_eq!(*worker_id, 8);
+            assert_eq!(message, "Test roundtrip received");
         } else {
             panic!("Wrong event type after roundtrip");
         }

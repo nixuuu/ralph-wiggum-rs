@@ -1,0 +1,15 @@
+---
+source: src/commands/task/orchestrate/worker_status.rs
+expression: format_worker_status(&status)
+---
+WorkerStatus {
+│ state: Merging
+│ task_id: Some("30.3")
+│ component: Some("db")
+│ phase: None
+│ model: Some("claude-haiku-4-5-20251001")
+│ cost_usd: $0.0250
+│ input_tokens: 1200
+│ output_tokens: 900
+│ verify_profiles: [("unit-tests", Some(true)), ("integration-tests", Some(true))]
+}

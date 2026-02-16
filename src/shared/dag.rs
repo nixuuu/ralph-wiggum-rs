@@ -12,7 +12,7 @@ pub struct TaskDag {
     deps: HashMap<String, Vec<String>>,
     /// task_id → list of tasks that depend on it (successors)
     /// Used by `dependents()` in test suite for reverse dependency traversal.
-    #[allow(dead_code)]
+    #[cfg(test)]
     reverse: HashMap<String, Vec<String>>,
     /// All known task IDs in the DAG
     all_tasks: HashSet<String>,
@@ -47,6 +47,7 @@ impl TaskDag {
     /// favors API simplicity over micro-optimization.
     pub fn from_deps_map(deps_input: &HashMap<String, Vec<String>>) -> Self {
         let mut deps: HashMap<String, Vec<String>> = HashMap::new();
+        #[cfg(test)]
         let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
         let mut all_tasks = HashSet::new();
 
@@ -54,6 +55,7 @@ impl TaskDag {
             all_tasks.insert(task_id.clone());
             deps.insert(task_id.clone(), task_deps.clone());
 
+            #[cfg(test)]
             for dep in task_deps {
                 all_tasks.insert(dep.clone());
                 reverse
@@ -61,10 +63,16 @@ impl TaskDag {
                     .or_default()
                     .push(task_id.clone());
             }
+
+            #[cfg(not(test))]
+            for dep in task_deps {
+                all_tasks.insert(dep.clone());
+            }
         }
 
         Self {
             deps,
+            #[cfg(test)]
             reverse,
             all_tasks,
         }
@@ -297,6 +305,33 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_dag_ready_tasks() {
+        let dag = TaskDag::empty();
+        let done = HashSet::new();
+        let in_progress = HashSet::new();
+        let ready = dag.ready_tasks(&done, &in_progress);
+        assert!(
+            ready.is_empty(),
+            "ready_tasks na pustym DAG powinno zwrócić pustą listę"
+        );
+    }
+
+    #[test]
+    fn test_empty_dag_topological_sort() {
+        let dag = TaskDag::empty();
+        let sorted = dag.topological_sort();
+        assert!(
+            sorted.is_ok(),
+            "topological_sort na pustym DAG powinno zwrócić Ok"
+        );
+        assert_eq!(
+            sorted.unwrap(),
+            Vec::<String>::new(),
+            "topological_sort na pustym DAG powinno zwrócić pustą listę"
+        );
+    }
+
+    #[test]
     fn test_from_frontmatter_basic() {
         let fm = make_frontmatter(vec![
             ("T02", vec!["T01"]),
@@ -366,11 +401,16 @@ mod tests {
 
     #[test]
     fn test_self_cycle() {
-        // T01 depends on itself
+        // T01 depends on itself — single-element cycle
         let fm = make_frontmatter(vec![("T01", vec!["T01"])]);
         let dag = TaskDag::from_frontmatter(&fm);
         let cycle = dag.detect_cycles();
         assert!(cycle.is_some());
+        let cycle = cycle.unwrap();
+        // Cycle should be [T01, T01] (node → self → close cycle)
+        assert_eq!(cycle.len(), 2);
+        assert_eq!(cycle[0], "T01");
+        assert_eq!(cycle[1], "T01");
     }
 
     // --- 1.2.3: topological_sort ---
@@ -503,5 +543,168 @@ mod tests {
     fn test_compare_task_ids_depth() {
         assert!(compare_task_ids("1.1", "1.1.1") == std::cmp::Ordering::Less);
         assert!(compare_task_ids("1.1.1", "1.1") == std::cmp::Ordering::Greater);
+    }
+
+    /// Test: ready_tasks z taskiem obecnym w obu setach (done i in_progress).
+    /// To niespójny stan - sprawdzamy że:
+    /// 1. Nie powoduje paniki
+    /// 2. Task NIE jest zwracany jako ready (done ma priorytet)
+    #[test]
+    fn test_ready_tasks_overlapping_done_in_progress() {
+        // DAG: T01 bez dependencies
+        let fm = make_frontmatter(vec![("T01", vec![])]);
+        let dag = TaskDag::from_frontmatter(&fm);
+
+        // Niespójny stan: T01 jest jednocześnie w done I in_progress
+        let done: HashSet<String> = ["T01"].iter().map(|s| s.to_string()).collect();
+        let in_progress: HashSet<String> = ["T01"].iter().map(|s| s.to_string()).collect();
+
+        let ready = dag.ready_tasks(&done, &in_progress);
+
+        // T01 NIE powinien być zwrócony jako ready (done ma priorytet)
+        assert!(ready.is_empty(), "Task w obu setach nie powinien być ready");
+    }
+
+    /// Test: DAG z dużym cyklem (50+ nodes).
+    /// Weryfikuje że rekurencyjny DFS nie powoduje stack overflow dla dużych grafów.
+    /// Tworzy łańcuch: T01→T02→...→T50→T01 (cykl zamykający się).
+    #[test]
+    fn test_large_cycle_no_stack_overflow() {
+        const N: usize = 50;
+
+        // Budujemy łańcuch N tasków: T01→T02→...→T50→T01
+        let mut deps_map: HashMap<String, Vec<String>> = HashMap::new();
+        for i in 1..=N {
+            let task = format!("T{i:02}");
+            let next = format!("T{:02}", i % N + 1); // T50 → T01 zamyka cykl
+            deps_map.insert(task, vec![next]);
+        }
+        let dag = TaskDag::from_deps_map(&deps_map);
+
+        // 1. Sprawdź że detect_cycles() wykrywa cykl
+        let cycle = dag.detect_cycles();
+        assert!(cycle.is_some(), "Powinien wykryć cykl w łańcuchu {N} nodów");
+
+        // Cykl powinien zawierać wszystkie N tasków + 1 powtórzenie (zamknięcie)
+        let cycle = cycle.unwrap();
+        assert!(
+            cycle.len() >= N,
+            "Cykl powinien zawierać co najmniej {N} elementów, ma {}",
+            cycle.len()
+        );
+
+        // 2. Sprawdź że topological_sort() zwraca błąd (cykl)
+        let sort_result = dag.topological_sort();
+        assert!(
+            sort_result.is_err(),
+            "topological_sort() powinien zwrócić Err dla cyklu"
+        );
+
+        // Błąd powinien zawierać ścieżkę cyklu
+        let err_cycle = sort_result.unwrap_err();
+        assert!(
+            !err_cycle.is_empty(),
+            "Błąd topological_sort() powinien zawierać ścieżkę cyklu"
+        );
+    }
+
+    /// Test: DAG z task ID zawierającymi myślniki (np. "1.1-beta", "2.0-rc1")
+    /// Sprawdza że DAG poprawnie obsługuje dependencies między taskami ze special chars
+    #[test]
+    fn test_dag_with_hyphenated_task_ids() {
+        let fm = make_frontmatter(vec![
+            ("1.1-beta", vec![]),
+            ("2.0-rc1", vec!["1.1-beta"]),
+            ("3.0-final", vec!["2.0-rc1"]),
+        ]);
+        let dag = TaskDag::from_frontmatter(&fm);
+
+        // Sprawdź strukturę DAG
+        assert_eq!(dag.tasks().len(), 3);
+        assert!(dag.task_deps("1.1-beta").is_empty());
+        assert_eq!(dag.task_deps("2.0-rc1"), &["1.1-beta"]);
+        assert_eq!(dag.task_deps("3.0-final"), &["2.0-rc1"]);
+
+        // Sprawdź detekcję cykli
+        assert!(dag.detect_cycles().is_none());
+
+        // Sprawdź topological sort
+        let sorted = dag.topological_sort().unwrap();
+        assert_eq!(sorted, vec!["1.1-beta", "2.0-rc1", "3.0-final"]);
+
+        // Sprawdź ready_tasks
+        let done = HashSet::new();
+        let in_progress = HashSet::new();
+        let ready = dag.ready_tasks(&done, &in_progress);
+        assert_eq!(ready, vec!["1.1-beta"]);
+
+        // Sprawdź ready po wykonaniu pierwszego taska
+        let done: HashSet<String> = ["1.1-beta"].iter().map(|s| s.to_string()).collect();
+        let ready = dag.ready_tasks(&done, &in_progress);
+        assert_eq!(ready, vec!["2.0-rc1"]);
+    }
+
+    /// Test: DAG z task ID zawierającymi podkreślenia (np. "T01_draft", "T01_v2")
+    /// Sprawdza że DAG poprawnie obsługuje underscores w ID
+    #[test]
+    fn test_dag_with_underscored_task_ids() {
+        let fm = make_frontmatter(vec![
+            ("T01_draft", vec![]),
+            ("T01_v2", vec!["T01_draft"]),
+            ("TASK_001_FINAL", vec!["T01_v2"]),
+        ]);
+        let dag = TaskDag::from_frontmatter(&fm);
+
+        assert_eq!(dag.tasks().len(), 3);
+        assert!(dag.task_deps("T01_draft").is_empty());
+        assert_eq!(dag.task_deps("T01_v2"), &["T01_draft"]);
+        assert_eq!(dag.task_deps("TASK_001_FINAL"), &["T01_v2"]);
+
+        // Brak cykli
+        assert!(dag.detect_cycles().is_none());
+
+        // Topological sort
+        let sorted = dag.topological_sort().unwrap();
+        assert_eq!(sorted, vec!["T01_draft", "T01_v2", "TASK_001_FINAL"]);
+    }
+
+    /// Test: DAG z mieszanymi ID (myślniki + podkreślenia + kropki)
+    /// Sprawdza że DAG działa z różnorodnymi formatami ID
+    #[test]
+    fn test_dag_with_mixed_special_chars_task_ids() {
+        let fm = make_frontmatter(vec![
+            ("alpha-1_beta", vec![]),
+            ("v1.2.3-beta_1", vec!["alpha-1_beta"]),
+            ("T2_1-RC", vec!["alpha-1_beta"]),
+            ("final-version", vec!["v1.2.3-beta_1", "T2_1-RC"]),
+        ]);
+        let dag = TaskDag::from_frontmatter(&fm);
+
+        assert_eq!(dag.tasks().len(), 4);
+
+        // Sprawdź dependencies
+        assert!(dag.task_deps("alpha-1_beta").is_empty());
+        assert_eq!(dag.task_deps("v1.2.3-beta_1"), &["alpha-1_beta"]);
+        assert_eq!(dag.task_deps("T2_1-RC"), &["alpha-1_beta"]);
+
+        // final-version zależy od dwóch tasków
+        let final_deps = dag.task_deps("final-version");
+        assert_eq!(final_deps.len(), 2);
+        assert!(final_deps.contains(&"v1.2.3-beta_1".to_string()));
+        assert!(final_deps.contains(&"T2_1-RC".to_string()));
+
+        // Brak cykli
+        assert!(dag.detect_cycles().is_none());
+
+        // Ready tasks - tylko alpha-1_beta na start
+        let ready = dag.ready_tasks(&HashSet::new(), &HashSet::new());
+        assert_eq!(ready, vec!["alpha-1_beta"]);
+
+        // Po wykonaniu alpha-1_beta -> ready: T2_1-RC i v1.2.3-beta_1
+        let done: HashSet<String> = ["alpha-1_beta"].iter().map(|s| s.to_string()).collect();
+        let ready = dag.ready_tasks(&done, &HashSet::new());
+        assert_eq!(ready.len(), 2);
+        assert!(ready.contains(&"T2_1-RC".to_string()));
+        assert!(ready.contains(&"v1.2.3-beta_1".to_string()));
     }
 }

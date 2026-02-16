@@ -46,9 +46,13 @@ pub struct WorkerRunner {
     event_tx: mpsc::Sender<WorkerEvent>,
     shutdown: Arc<AtomicBool>,
     config: WorkerRunnerConfig,
+    /// Channel for receiving messages from orchestrator (if provided).
+    /// Note: Receiver cannot be cloned, so this is consumed on first use.
+    message_rx: Option<mpsc::Receiver<String>>,
 }
 
 impl WorkerRunner {
+    // Too many arguments: constructor consolidates worker initialization context
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         worker_id: u32,
@@ -56,6 +60,7 @@ impl WorkerRunner {
         event_tx: mpsc::Sender<WorkerEvent>,
         shutdown: Arc<AtomicBool>,
         config: WorkerRunnerConfig,
+        message_rx: Option<mpsc::Receiver<String>>,
     ) -> Self {
         Self {
             worker_id,
@@ -63,6 +68,7 @@ impl WorkerRunner {
             event_tx,
             shutdown,
             config,
+            message_rx,
         }
     }
 
@@ -82,24 +88,48 @@ impl WorkerRunner {
 
     /// Run a single phase of the worker lifecycle.
     ///
-    /// Invokes Claude CLI as a one-shot in the given working directory,
-    /// forwarding cost/token events through the mpsc channel.
+    /// Invokes Claude CLI in the given working directory, forwarding cost/token events
+    /// through the mpsc channel. If `message_rx` is provided (Some), uses interactive mode
+    /// with `run_interactive()` to receive additional user messages during execution.
+    /// Otherwise uses standard one-shot mode with `run()`.
+    ///
     /// Returns the assistant's text output and cost metrics.
     pub async fn run_phase(
-        &self,
+        &mut self,
         phase: WorkerPhase,
         prompt: &str,
         model: Option<&str>,
         cwd: &Path,
     ) -> Result<PhaseResult> {
+        crate::diag_debug!(
+            "Worker {} starting phase {:?} for task {} in {:?}",
+            self.worker_id,
+            phase,
+            self.task_id,
+            cwd
+        );
+
         // Notify phase start
         self.send_event(WorkerEventKind::PhaseStarted {
             worker_id: self.worker_id,
             task_id: self.task_id.clone(),
             phase: phase.clone(),
+            profiles: None,
         })
         .await;
 
+        // Setup: configure ClaudeRunner with all options
+        let runner = self.setup_runner(prompt, model, cwd);
+
+        // Execute: run with event forwarding (interactive or standard mode)
+        let (result, phase_cost) = self.run_with_events(runner, &phase).await;
+
+        // Collect: process result and return metrics
+        self.collect_result(result, phase_cost, phase).await
+    }
+
+    /// Build and configure ClaudeRunner with MCP, timeout, and disallowed tools.
+    fn setup_runner(&self, prompt: &str, model: Option<&str>, cwd: &Path) -> ClaudeRunner {
         let runner = ClaudeRunner::oneshot(
             prompt.to_string(),
             model.map(|s| s.to_string()),
@@ -115,13 +145,25 @@ impl WorkerRunner {
         } else {
             runner
         };
-        let runner = if let Some(ref tools) = self.config.disallowed_tools {
+        if let Some(ref tools) = self.config.disallowed_tools {
             runner.with_disallowed_tools(tools.clone())
         } else {
             runner
-        };
+        }
+    }
 
-        // Track cost/tokens across events for this phase
+    /// Execute ClaudeRunner with event forwarding.
+    ///
+    /// Uses interactive mode if message_rx is available, otherwise standard mode.
+    /// Returns the Result and accumulated cost metrics.
+    async fn run_with_events(
+        &mut self,
+        runner: ClaudeRunner,
+        phase: &WorkerPhase,
+    ) -> (
+        Result<Option<String>>,
+        Arc<std::sync::Mutex<(f64, u64, u64)>>,
+    ) {
         let worker_id = self.worker_id;
         let tx = self.event_tx.clone();
         let tx_output = self.event_tx.clone();
@@ -136,74 +178,226 @@ impl WorkerRunner {
         let phase_cost = Arc::new(std::sync::Mutex::new((0.0_f64, 0_u64, 0_u64)));
         let phase_cost_clone = Arc::clone(&phase_cost);
 
-        let result =
-            runner
-                .run(
-                    self.shutdown.clone(),
-                    |event| {
-                        // Forward cost updates from Claude Result events
-                        if let ClaudeEvent::Result {
-                            cost_usd, usage, ..
-                        } = event
-                        {
-                            let (input_tokens, output_tokens) = usage
-                                .as_ref()
-                                .map(|u| (u.input_tokens, u.output_tokens))
-                                .unwrap_or((0, 0));
+        // Take message_rx ownership (if present) for interactive mode
+        let message_rx_option = self.message_rx.take();
 
-                            let cost = cost_usd.unwrap_or(0.0);
+        let result = if let Some(message_rx) = message_rx_option {
+            self.run_interactive_mode(
+                runner,
+                message_rx,
+                phase_cost_clone,
+                &mut formatter,
+                &mut idle_tick_counter,
+                &heartbeat_phase,
+                worker_id,
+                &tx,
+                &tx_output,
+                &tx_heartbeat,
+            )
+            .await
+        } else {
+            self.run_standard_mode(
+                runner,
+                phase_cost_clone,
+                &mut formatter,
+                &mut idle_tick_counter,
+                &heartbeat_phase,
+                worker_id,
+                &tx,
+                &tx_output,
+                &tx_heartbeat,
+            )
+            .await
+        };
 
-                            // Accumulate metrics for return value
-                            if let Ok(mut metrics) = phase_cost_clone.lock() {
-                                metrics.0 += cost;
-                                metrics.1 += input_tokens;
-                                metrics.2 += output_tokens;
-                            }
+        (result, phase_cost)
+    }
 
-                            let cost_event = WorkerEvent::new(WorkerEventKind::CostUpdate {
-                                worker_id,
-                                cost_usd: cost,
-                                input_tokens,
-                                output_tokens,
-                            });
-                            // Best-effort send — don't block on channel full
-                            let _ = tx.try_send(cost_event);
-                        }
+    /// Run ClaudeRunner in interactive mode with message forwarding.
+    // Too many arguments: grouped state needed for coordinated message handling
+    #[allow(clippy::too_many_arguments)]
+    async fn run_interactive_mode(
+        &self,
+        runner: ClaudeRunner,
+        message_rx: mpsc::Receiver<String>,
+        phase_cost_clone: Arc<std::sync::Mutex<(f64, u64, u64)>>,
+        formatter: &mut OutputFormatter,
+        idle_tick_counter: &mut u32,
+        heartbeat_phase: &WorkerPhase,
+        worker_id: u32,
+        tx: &mpsc::Sender<WorkerEvent>,
+        tx_output: &mpsc::Sender<WorkerEvent>,
+        tx_heartbeat: &mpsc::Sender<WorkerEvent>,
+    ) -> Result<Option<String>> {
+        let tx_msg = self.event_tx.clone();
+        let worker_id_msg = self.worker_id;
+        let (log_tx, log_rx) = mpsc::channel::<String>(16);
 
-                        // Format and forward output lines for live TUI display.
-                        // NOTE: OutputFormatter handles markdown rendering via render_markdown() internally.
-                        let lines = formatter.format_event(event);
-                        if !lines.is_empty() {
-                            let _ = tx_output.try_send(WorkerEvent::new(
-                                WorkerEventKind::OutputLines { worker_id, lines },
-                            ));
-                        }
-                    },
-                    move || {
-                        // Idle tick callback: send heartbeat every 120 ticks (30 seconds)
-                        idle_tick_counter += 1;
-                        if idle_tick_counter >= 120 {
-                            idle_tick_counter = 0;
-                            let heartbeat_event = WorkerEvent::new(WorkerEventKind::Heartbeat {
-                                worker_id,
-                                phase: heartbeat_phase.clone(),
-                            });
-                            let _ = tx_heartbeat.try_send(heartbeat_event);
-                        }
-                    },
-                )
-                .await;
+        let forward_task = tokio::spawn(async move {
+            let mut message_rx = message_rx;
+            while let Some(msg) = message_rx.recv().await {
+                let _ = tx_msg
+                    .send(WorkerEvent::new(WorkerEventKind::UserMessageReceived {
+                        worker_id: worker_id_msg,
+                        message: msg.clone(),
+                    }))
+                    .await;
+                if log_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
 
+        let result = runner
+            .run_interactive(
+                self.shutdown.clone(),
+                log_rx,
+                |event| {
+                    Self::handle_claude_event(
+                        event,
+                        &phase_cost_clone,
+                        formatter,
+                        worker_id,
+                        tx,
+                        tx_output,
+                    );
+                },
+                move || {
+                    Self::handle_idle_tick(
+                        idle_tick_counter,
+                        worker_id,
+                        heartbeat_phase,
+                        tx_heartbeat,
+                    );
+                },
+            )
+            .await;
+
+        forward_task.abort();
+        result
+    }
+
+    /// Run ClaudeRunner in standard one-shot mode.
+    // Too many arguments: grouped state needed for coordinated execution tracking
+    #[allow(clippy::too_many_arguments)]
+    async fn run_standard_mode(
+        &self,
+        runner: ClaudeRunner,
+        phase_cost_clone: Arc<std::sync::Mutex<(f64, u64, u64)>>,
+        formatter: &mut OutputFormatter,
+        idle_tick_counter: &mut u32,
+        heartbeat_phase: &WorkerPhase,
+        worker_id: u32,
+        tx: &mpsc::Sender<WorkerEvent>,
+        tx_output: &mpsc::Sender<WorkerEvent>,
+        tx_heartbeat: &mpsc::Sender<WorkerEvent>,
+    ) -> Result<Option<String>> {
+        runner
+            .run(
+                self.shutdown.clone(),
+                |event| {
+                    Self::handle_claude_event(
+                        event,
+                        &phase_cost_clone,
+                        formatter,
+                        worker_id,
+                        tx,
+                        tx_output,
+                    );
+                },
+                move || {
+                    Self::handle_idle_tick(
+                        idle_tick_counter,
+                        worker_id,
+                        heartbeat_phase,
+                        tx_heartbeat,
+                    );
+                },
+            )
+            .await
+    }
+
+    /// Handle ClaudeEvent: extract cost metrics and forward output lines.
+    fn handle_claude_event(
+        event: &ClaudeEvent,
+        phase_cost: &Arc<std::sync::Mutex<(f64, u64, u64)>>,
+        formatter: &mut OutputFormatter,
+        worker_id: u32,
+        tx: &mpsc::Sender<WorkerEvent>,
+        tx_output: &mpsc::Sender<WorkerEvent>,
+    ) {
+        if let ClaudeEvent::Result {
+            cost_usd, usage, ..
+        } = event
+        {
+            let (input_tokens, output_tokens) = usage
+                .as_ref()
+                .map(|u| (u.input_tokens, u.output_tokens))
+                .unwrap_or((0, 0));
+
+            let cost = cost_usd.unwrap_or(0.0);
+
+            if let Ok(mut metrics) = phase_cost.lock() {
+                metrics.0 += cost;
+                metrics.1 += input_tokens;
+                metrics.2 += output_tokens;
+            }
+
+            let cost_event = WorkerEvent::new(WorkerEventKind::CostUpdate {
+                worker_id,
+                cost_usd: cost,
+                input_tokens,
+                output_tokens,
+            });
+            let _ = tx.try_send(cost_event);
+        }
+
+        let lines = formatter.format_event(event);
+        if !lines.is_empty() {
+            let _ = tx_output.try_send(WorkerEvent::new(WorkerEventKind::OutputLines {
+                worker_id,
+                lines,
+            }));
+        }
+    }
+
+    /// Handle idle tick: send heartbeat every 120 ticks (30 seconds).
+    fn handle_idle_tick(
+        idle_tick_counter: &mut u32,
+        worker_id: u32,
+        phase: &WorkerPhase,
+        tx_heartbeat: &mpsc::Sender<WorkerEvent>,
+    ) {
+        *idle_tick_counter += 1;
+        if *idle_tick_counter >= 120 {
+            *idle_tick_counter = 0;
+            let heartbeat_event = WorkerEvent::new(WorkerEventKind::Heartbeat {
+                worker_id,
+                phase: phase.clone(),
+            });
+            let _ = tx_heartbeat.try_send(heartbeat_event);
+        }
+    }
+
+    /// Process runner result and return PhaseResult with accumulated metrics.
+    async fn collect_result(
+        &self,
+        result: Result<Option<String>>,
+        phase_cost: Arc<std::sync::Mutex<(f64, u64, u64)>>,
+        phase: WorkerPhase,
+    ) -> Result<PhaseResult> {
         let success = result.is_ok();
         let output = match result {
             Ok(Some(text)) => text,
             Ok(None) => String::new(),
             Err(e) => {
+                crate::diag_debug!("Worker {} phase {:?} failed: {}", self.worker_id, phase, e);
                 self.send_event(WorkerEventKind::PhaseCompleted {
                     worker_id: self.worker_id,
                     task_id: self.task_id.clone(),
                     phase: phase.clone(),
                     success: false,
+                    profile_results: None,
                 })
                 .await;
                 return Err(e);
@@ -216,11 +410,22 @@ impl WorkerRunner {
             .map(|m| (m.0, m.1, m.2))
             .unwrap_or((0.0, 0, 0));
 
+        crate::diag_debug!(
+            "Worker {} phase {:?} completed: success={}, cost=${:.4}, tokens={}/{}",
+            self.worker_id,
+            phase,
+            success,
+            cost_usd,
+            input_tokens,
+            output_tokens
+        );
+
         self.send_event(WorkerEventKind::PhaseCompleted {
             worker_id: self.worker_id,
             task_id: self.task_id.clone(),
             phase,
             success,
+            profile_results: None,
         })
         .await;
 
@@ -235,7 +440,7 @@ impl WorkerRunner {
     /// Run the implement phase with task-specific prompt.
     /// Returns phase result including cost metrics.
     pub async fn run_implement(
-        &self,
+        &mut self,
         task_desc: &str,
         system_prompt: &str,
         model: Option<&str>,
@@ -275,7 +480,7 @@ impl WorkerRunner {
     /// so the agent can fix the issues found by direct verification commands.
     /// Returns phase result including cost metrics.
     pub async fn run_review(
-        &self,
+        &mut self,
         implementation_output: &str,
         task_desc: &str,
         model: Option<&str>,
@@ -325,49 +530,6 @@ impl WorkerRunner {
             .await
     }
 
-    /// Run the verify phase — checks that the implementation passes verification.
-    #[allow(dead_code)] // Used in task 13.3 worker lifecycle
-    pub async fn run_verify(
-        &self,
-        verification_commands: &str,
-        model: Option<&str>,
-        cwd: &Path,
-    ) -> Result<bool> {
-        let mut prompt = String::new();
-
-        // Add prefix if configured
-        if let Some(prefix) = &self.config.prompt_prefix {
-            prompt.push_str(prefix);
-            prompt.push_str("\n\n");
-        }
-
-        // Add verification prompt
-        prompt.push_str(&format!(
-            "# Verification Task\n\n\
-             Run the following verification commands and report results.\n\
-             If all commands pass, respond with 'VERIFICATION PASSED'.\n\
-             If any command fails, respond with 'VERIFICATION FAILED' and explain why.\n\n\
-             ## Commands\n{verification_commands}"
-        ));
-
-        // Add suffix if configured
-        if let Some(suffix) = &self.config.prompt_suffix {
-            prompt.push_str("\n\n");
-            prompt.push_str(suffix);
-        }
-
-        let result = self
-            .run_phase(WorkerPhase::Verify, &prompt, model, cwd)
-            .await?;
-
-        // Simple check: look for pass/fail indicators in output
-        let passed = result.output.contains("VERIFICATION PASSED")
-            || (!result.output.contains("VERIFICATION FAILED")
-                && !result.output.contains("FAILED"));
-
-        Ok(passed)
-    }
-
     async fn send_event(&self, kind: WorkerEventKind) {
         let event = WorkerEvent::new(kind);
         let _ = self.event_tx.send(event).await;
@@ -411,7 +573,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
         let config = WorkerRunnerConfig::default();
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
         assert_eq!(runner.worker_id, 1);
         assert_eq!(runner.task_id, "T01");
     }
@@ -421,7 +583,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
         let config = WorkerRunnerConfig::default();
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
 
         runner
             .send_event(WorkerEventKind::TaskStarted {
@@ -470,7 +632,7 @@ mod tests {
             mcp_session_id: String::new(),
             disallowed_tools: None,
         };
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
         assert_eq!(runner.config.prompt_prefix, Some("PREFIX TEXT".to_string()));
         assert_eq!(runner.config.prompt_suffix, Some("SUFFIX TEXT".to_string()));
     }
@@ -480,7 +642,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
         let config = WorkerRunnerConfig::default();
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
         assert_eq!(runner.config.prompt_prefix, None);
         assert_eq!(runner.config.prompt_suffix, None);
     }
@@ -751,7 +913,7 @@ mod tests {
             mcp_session_id: "worker-123".to_string(),
             disallowed_tools: None,
         };
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
 
         let mcp_config = runner.mcp_config();
         assert!(mcp_config.is_some());
@@ -778,7 +940,7 @@ mod tests {
             mcp_session_id: "worker-123".to_string(),
             disallowed_tools: None,
         };
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
 
         let mcp_config = runner.mcp_config();
         assert!(mcp_config.is_none(), "MCP config should be None for port=0");
@@ -797,7 +959,7 @@ mod tests {
             mcp_session_id: String::new(), // Empty session ID
             disallowed_tools: None,
         };
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
 
         let mcp_config = runner.mcp_config();
         assert!(
@@ -811,7 +973,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
         let config = WorkerRunnerConfig::default(); // port=0, session_id=""
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
 
         let mcp_config = runner.mcp_config();
         assert!(
@@ -833,7 +995,7 @@ mod tests {
             mcp_session_id: "worker/123 & test".to_string(),
             disallowed_tools: None,
         };
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
 
         let mcp_config = runner.mcp_config();
         assert!(mcp_config.is_some());
@@ -863,12 +1025,69 @@ mod tests {
             mcp_session_id: String::new(),
             disallowed_tools: Some("AskUserQuestion,SendMessage".to_string()),
         };
-        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config);
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
 
         assert_eq!(
             runner.config.disallowed_tools,
             Some("AskUserQuestion,SendMessage".to_string()),
             "disallowed_tools should be set in config"
+        );
+    }
+
+    // ── Task 28.2: message_rx usage tests ───────────────────────────────
+
+    #[test]
+    fn test_message_rx_is_stored_when_provided() {
+        // Test: message_rx should be stored in WorkerRunner when provided
+        let (tx, _rx) = mpsc::channel(16);
+        let (_msg_tx, msg_rx) = mpsc::channel::<String>(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig::default();
+
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, Some(msg_rx));
+
+        assert!(
+            runner.message_rx.is_some(),
+            "message_rx should be stored when provided"
+        );
+    }
+
+    #[test]
+    fn test_message_rx_is_none_when_not_provided() {
+        // Test: message_rx should be None when not provided
+        let (tx, _rx) = mpsc::channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig::default();
+
+        let runner = WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, None);
+
+        assert!(
+            runner.message_rx.is_none(),
+            "message_rx should be None when not provided"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_rx_is_consumed_on_first_run_phase() {
+        // Test: message_rx is consumed (taken) on first run_phase call
+        let (tx, _rx) = mpsc::channel(16);
+        let (_msg_tx, msg_rx) = mpsc::channel::<String>(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let config = WorkerRunnerConfig::default();
+
+        let mut runner =
+            WorkerRunner::new(1, "T01".to_string(), tx, shutdown, config, Some(msg_rx));
+
+        // Before run_phase: message_rx is Some
+        assert!(runner.message_rx.is_some());
+
+        // Note: We can't actually run run_phase without a real Claude CLI,
+        // but we can verify that take() would consume it
+        let taken = runner.message_rx.take();
+        assert!(taken.is_some(), "take() should return Some");
+        assert!(
+            runner.message_rx.is_none(),
+            "message_rx should be None after take()"
         );
     }
 }

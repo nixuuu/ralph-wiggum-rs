@@ -1,0 +1,8 @@
+---
+source: src/commands/task/orchestrate/ring_buffer.rs
+expression: snapshot
+---
+Red text
+Green text
+Bold text
+Red and bold

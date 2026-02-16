@@ -40,6 +40,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub no_nf: bool,
 
+    /// Enable debug logging to .ralph/logs/ diagnostic file
+    #[arg(long)]
+    pub debug: bool,
+
     /// Path to PROGRESS.md for adaptive iterations (set programmatically by task continue)
     #[arg(skip)]
     pub progress_file: Option<std::path::PathBuf>,

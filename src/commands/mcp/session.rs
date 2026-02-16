@@ -78,7 +78,7 @@ impl SessionRegistry {
             read_only,
         };
 
-        let mut sessions = self.sessions.lock().expect("Mutex poisoned");
+        let mut sessions = self.sessions.lock().expect("session: mutex poisoned");
         sessions.insert(session_id.clone(), state);
 
         session_id
@@ -108,7 +108,7 @@ impl SessionRegistry {
     /// }
     /// ```
     pub fn validate_session(&self, id: &str) -> Option<SessionState> {
-        let sessions = self.sessions.lock().expect("Mutex poisoned");
+        let sessions = self.sessions.lock().expect("session: mutex poisoned");
         sessions.get(id).cloned()
     }
 
@@ -140,7 +140,7 @@ impl SessionRegistry {
     /// registry.mark_initialized(&session_id).expect("Session should exist");
     /// ```
     pub fn mark_initialized(&self, id: &str) -> Result<()> {
-        let mut sessions = self.sessions.lock().expect("Mutex poisoned");
+        let mut sessions = self.sessions.lock().expect("session: mutex poisoned");
         let state = sessions
             .get_mut(id)
             .ok_or_else(|| RalphError::Mcp(format!("Session not found: {id}")))?;
@@ -174,7 +174,7 @@ impl SessionRegistry {
     /// ```
     #[allow(dead_code)] // Public API: getter for session tasks_path, used in orchestrator diagnostics
     pub fn get_tasks_path(&self, id: &str) -> Option<PathBuf> {
-        let sessions = self.sessions.lock().expect("Mutex poisoned");
+        let sessions = self.sessions.lock().expect("session: mutex poisoned");
         sessions.get(id).map(|state| state.tasks_path.clone())
     }
 
@@ -204,7 +204,7 @@ impl SessionRegistry {
     /// }
     /// ```
     pub fn remove_session(&self, id: &str) -> Option<SessionState> {
-        let mut sessions = self.sessions.lock().expect("Mutex poisoned");
+        let mut sessions = self.sessions.lock().expect("session: mutex poisoned");
         sessions.remove(id)
     }
 
@@ -229,7 +229,7 @@ impl SessionRegistry {
     /// ```
     #[allow(dead_code)] // Public API: getter for session count, used for monitoring and tests
     pub fn session_count(&self) -> usize {
-        let sessions = self.sessions.lock().expect("Mutex poisoned");
+        let sessions = self.sessions.lock().expect("session: mutex poisoned");
         sessions.len()
     }
 
@@ -256,7 +256,7 @@ impl SessionRegistry {
     /// ```
     #[allow(dead_code)] // Public API: getter for read-only status, used for MCP tool authorization
     pub fn is_read_only(&self, id: &str) -> Option<bool> {
-        let sessions = self.sessions.lock().expect("Mutex poisoned");
+        let sessions = self.sessions.lock().expect("session: mutex poisoned");
         sessions.get(id).map(|state| state.read_only)
     }
 }

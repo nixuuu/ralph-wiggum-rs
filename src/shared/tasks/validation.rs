@@ -284,4 +284,128 @@ mod tests {
         let err = validate(&tasks).unwrap_err();
         assert!(err.to_string().contains("cycle"));
     }
+
+    #[test]
+    fn test_validate_deps_on_parent_node() {
+        // Leaf 1.1 ma deps=[2], ale 2 jest parentem z subtaskami 2.1 i 2.2
+        // validate_deps powinno zwrócić błąd bo parent nie jest w all_leaf_ids
+        let tasks: Vec<TaskNode> = serde_yaml::from_str(
+            r#"
+- id: "1"
+  name: "Epic 1"
+  component: api
+  subtasks:
+    - id: "1.1"
+      name: "Task with dependency on parent"
+      status: todo
+      deps: ["2"]
+- id: "2"
+  name: "Epic 2"
+  component: tests
+  subtasks:
+    - id: "2.1"
+      name: "Child task"
+      status: todo
+    - id: "2.2"
+      name: "Another child task"
+      status: todo
+"#,
+        )
+        .unwrap();
+
+        let err = validate(&tasks).unwrap_err();
+        let err_msg = err.to_string();
+
+        // Sprawdź pełny komunikat błędu — format: "Task {id} depends on non-existent leaf: {dep}"
+        assert!(
+            err_msg.contains("Task 1.1 depends on non-existent leaf: 2"),
+            "Expected exact dep validation error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_duplicate_id_at_different_levels() {
+        // Dwa root nody, każdy ma subtask o tym samym ID "1.1"
+        // validate() powinno wykryć duplikat ID nawet gdy są na różnych poziomach
+        let tasks: Vec<TaskNode> = serde_yaml::from_str(
+            r#"
+- id: "1"
+  name: "Root 1"
+  component: api
+  subtasks:
+    - id: "1.1"
+      name: "Child of Root 1"
+      status: todo
+- id: "2"
+  name: "Root 2"
+  component: tests
+  subtasks:
+    - id: "1.1"
+      name: "Child of Root 2"
+      status: todo
+"#,
+        )
+        .unwrap();
+
+        let err = validate(&tasks).unwrap_err();
+        let err_msg = err.to_string();
+
+        // Sprawdź że błąd dotyczy duplikatu ID 1.1
+        assert!(
+            err_msg.contains("Duplicate task ID: 1.1"),
+            "Expected duplicate ID error for 1.1, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_parent_with_status_and_subtasks() {
+        // Parent node z jednocześnie status i niepustymi subtasks powinien być odrzucony
+        use crate::shared::progress::TaskStatus;
+
+        let child = TaskNode {
+            id: "1.1".to_string(),
+            name: "Child task".to_string(),
+            component: None,
+            status: Some(TaskStatus::Todo),
+            deps: vec![],
+            model: None,
+            description: None,
+            related_files: vec![],
+            implementation_steps: vec![],
+            profiles: vec![],
+            subtasks: vec![],
+        };
+
+        let parent = TaskNode {
+            id: "1".to_string(),
+            name: "Parent with status".to_string(),
+            component: Some("tests".to_string()),
+            status: Some(TaskStatus::Todo), // Parent ma status
+            deps: vec![],
+            model: None,
+            description: None,
+            related_files: vec![],
+            implementation_steps: vec![],
+            profiles: vec![],
+            subtasks: vec![child], // Parent ma niepuste subtasks
+        };
+
+        let tasks = vec![parent];
+        let err = validate(&tasks).unwrap_err();
+        let err_msg = err.to_string();
+
+        // Sprawdź komunikat błędu: "Task 1 has both status and subtasks — status is only for leaves"
+        assert!(
+            err_msg.contains("Task 1 has both status and subtasks"),
+            "Expected status validation error for parent node, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("status is only for leaves"),
+            "Expected 'status is only for leaves' in error message, got: {}",
+            err_msg
+        );
+    }
 }

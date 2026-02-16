@@ -1,0 +1,9 @@
+---
+source: src/commands/task/orchestrate/ring_buffer.rs
+expression: snapshot
+---
+Line 1: Hello world
+Line 2: Plain text
+Line 3: No colors
+Line 4: Just text
+Line 5: End of buffer

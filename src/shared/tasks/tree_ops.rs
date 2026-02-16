@@ -133,6 +133,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                profiles: Vec::new(),
                 subtasks: vec![
                     TaskNode {
                         id: "1.1".to_string(),
@@ -144,6 +145,7 @@ mod tests {
                         description: None,
                         related_files: Vec::new(),
                         implementation_steps: Vec::new(),
+                        profiles: Vec::new(),
                         subtasks: Vec::new(),
                     },
                     TaskNode {
@@ -156,6 +158,7 @@ mod tests {
                         description: None,
                         related_files: Vec::new(),
                         implementation_steps: Vec::new(),
+                        profiles: Vec::new(),
                         subtasks: Vec::new(),
                     },
                 ],
@@ -170,6 +173,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                profiles: Vec::new(),
                 subtasks: vec![TaskNode {
                     id: "2.1".to_string(),
                     name: "Task 2.1".to_string(),
@@ -180,6 +184,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
                     subtasks: Vec::new(),
                 }],
             },
@@ -215,6 +220,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            profiles: Vec::new(),
             subtasks: Vec::new(),
         };
         add_task(&mut tree, None, new_task, None).unwrap();
@@ -235,6 +241,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            profiles: Vec::new(),
             subtasks: Vec::new(),
         };
         add_task(&mut tree, Some("1"), new_task, None).unwrap();
@@ -256,6 +263,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            profiles: Vec::new(),
             subtasks: Vec::new(),
         };
         add_task(&mut tree, Some("1"), new_task, Some(0)).unwrap();
@@ -300,5 +308,350 @@ mod tests {
         assert!(ids.contains("1.2"));
         assert!(ids.contains("2"));
         assert!(ids.contains("2.1"));
+    }
+
+    #[test]
+    fn test_add_task_to_leaf_creates_validation_error() {
+        use crate::shared::tasks::validation::validate;
+
+        // Krok 1: Stwórz drzewo z leafem 1.1 (ma status: todo)
+        let mut tree = vec![TaskNode {
+            id: "1".to_string(),
+            name: "Epic 1".to_string(),
+            component: Some("api".to_string()),
+            status: None,
+            deps: Vec::new(),
+            model: None,
+            description: None,
+            related_files: Vec::new(),
+            implementation_steps: Vec::new(),
+            profiles: Vec::new(),
+            subtasks: vec![TaskNode {
+                id: "1.1".to_string(),
+                name: "Original leaf task".to_string(),
+                component: None,
+                status: Some(TaskStatus::Todo), // To jest leaf ze statusem
+                deps: Vec::new(),
+                model: None,
+                description: None,
+                related_files: Vec::new(),
+                implementation_steps: Vec::new(),
+                profiles: Vec::new(),
+                subtasks: Vec::new(), // Pusty wektor — jest leafem
+            }],
+        }];
+
+        // Krok 2: Dodaj child do 1.1 (leaf staje się parentem)
+        let new_child = TaskNode {
+            id: "1.1.1".to_string(),
+            name: "New child task".to_string(),
+            component: None,
+            status: Some(TaskStatus::Todo),
+            deps: Vec::new(),
+            model: None,
+            description: None,
+            related_files: Vec::new(),
+            implementation_steps: Vec::new(),
+            profiles: Vec::new(),
+            subtasks: Vec::new(),
+        };
+
+        add_task(&mut tree, Some("1.1"), new_child, None).unwrap();
+
+        // Krok 3: Sprawdź że 1.1 ma teraz subtasks
+        let node_1_1 = find_node(&tree, "1.1").unwrap();
+        assert_eq!(node_1_1.subtasks.len(), 1);
+        assert_eq!(node_1_1.subtasks[0].id, "1.1.1");
+
+        // Krok 4: Sprawdź że 1.1 nadal ma status (to jest problem)
+        assert!(
+            node_1_1.status.is_some(),
+            "Node 1.1 powinien nadal mieć status po dodaniu subtasks"
+        );
+
+        // Krok 5: Uruchom validate() i sprawdź błąd walidacji
+        let validation_result = validate(&tree);
+        assert!(
+            validation_result.is_err(),
+            "Walidacja powinna wykryć że parent ma status"
+        );
+
+        let err_msg = validation_result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Task 1.1 has both status and subtasks"),
+            "Oczekiwany błąd walidacji o status na parent node, otrzymano: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_add_task_with_position_clamping() {
+        let mut tree = sample_tree();
+        let new_task = TaskNode {
+            id: "1.99".to_string(),
+            name: "Task 1.99".to_string(),
+            component: None,
+            status: Some(TaskStatus::Todo),
+            deps: Vec::new(),
+            model: None,
+            description: None,
+            related_files: Vec::new(),
+            implementation_steps: Vec::new(),
+            profiles: Vec::new(),
+            subtasks: Vec::new(),
+        };
+        // Parent "1" has 2 children (1.1 and 1.2).
+        // Request position=100 should clamp to end (position 2).
+        add_task(&mut tree, Some("1"), new_task, Some(100)).unwrap();
+        let parent = find_node(&tree, "1").unwrap();
+        assert_eq!(parent.subtasks.len(), 3);
+        // Existing children remain in original positions
+        assert_eq!(parent.subtasks[0].id, "1.1");
+        assert_eq!(parent.subtasks[1].id, "1.2");
+        // Clamped node appended at end
+        assert_eq!(parent.subtasks[2].id, "1.99");
+    }
+
+    #[test]
+    fn test_remove_task_last_task_empty_tree() {
+        // Stwórz drzewo z jednym root task
+        let mut tree = vec![TaskNode {
+            id: "1".to_string(),
+            name: "Single task".to_string(),
+            component: Some("test".to_string()),
+            status: Some(TaskStatus::Todo),
+            deps: Vec::new(),
+            model: None,
+            description: None,
+            related_files: Vec::new(),
+            implementation_steps: Vec::new(),
+            profiles: Vec::new(),
+            subtasks: Vec::new(),
+        }];
+
+        // Usuń jedyny task
+        let removed = remove_task(&mut tree, "1");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().id, "1");
+
+        // Sprawdź że drzewo jest puste
+        assert!(tree.is_empty());
+
+        // Sprawdź all_ids() == pustą kolekcję
+        let ids = all_ids(&tree);
+        assert!(ids.is_empty());
+
+        // Sprawdź że flatten_leaves z modułu TasksFile też zwraca pustą listę
+        use crate::shared::tasks::TasksFile;
+        let tasks_file = TasksFile {
+            default_model: Some("claude-sonnet-4-5-20250929".to_string()),
+            tasks: tree,
+        };
+        let leaves = tasks_file.flatten_leaves();
+        assert!(leaves.is_empty());
+    }
+
+    #[test]
+    fn test_remove_parent_cleans_subtask_deps() {
+        // Krok 1: Stwórz tree: parent 2 z subtasks 2.1, 2.2; leaf 3.1 z deps=[2.1, 2.2]
+        let mut tree = vec![
+            TaskNode {
+                id: "2".to_string(),
+                name: "Parent 2".to_string(),
+                component: Some("api".to_string()),
+                status: None,
+                deps: Vec::new(),
+                model: None,
+                description: None,
+                related_files: Vec::new(),
+                implementation_steps: Vec::new(),
+                profiles: Vec::new(),
+                subtasks: vec![
+                    TaskNode {
+                        id: "2.1".to_string(),
+                        name: "Task 2.1".to_string(),
+                        component: None,
+                        status: Some(TaskStatus::Done),
+                        deps: Vec::new(),
+                        model: None,
+                        description: None,
+                        related_files: Vec::new(),
+                        implementation_steps: Vec::new(),
+                        profiles: Vec::new(),
+                        subtasks: Vec::new(),
+                    },
+                    TaskNode {
+                        id: "2.2".to_string(),
+                        name: "Task 2.2".to_string(),
+                        component: None,
+                        status: Some(TaskStatus::Done),
+                        deps: Vec::new(),
+                        model: None,
+                        description: None,
+                        related_files: Vec::new(),
+                        implementation_steps: Vec::new(),
+                        profiles: Vec::new(),
+                        subtasks: Vec::new(),
+                    },
+                ],
+            },
+            TaskNode {
+                id: "3".to_string(),
+                name: "Epic 3".to_string(),
+                component: Some("ui".to_string()),
+                status: None,
+                deps: Vec::new(),
+                model: None,
+                description: None,
+                related_files: Vec::new(),
+                implementation_steps: Vec::new(),
+                profiles: Vec::new(),
+                subtasks: vec![TaskNode {
+                    id: "3.1".to_string(),
+                    name: "Task 3.1".to_string(),
+                    component: None,
+                    status: Some(TaskStatus::Todo),
+                    deps: vec!["2.1".to_string(), "2.2".to_string()], // Zależności od subtasków 2
+                    model: None,
+                    description: None,
+                    related_files: Vec::new(),
+                    implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
+                    subtasks: Vec::new(),
+                }],
+            },
+        ];
+
+        // Krok 2: Wywołaj remove_task(2)
+        let removed = remove_task(&mut tree, "2");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().id, "2");
+
+        // Krok 3: Sprawdź że parent 2 i subtaski zniknęły z drzewa
+        assert!(
+            find_node(&tree, "2").is_none(),
+            "Node 2 powinien być usunięty"
+        );
+        assert!(
+            find_node(&tree, "2.1").is_none(),
+            "Node 2.1 powinien być usunięty"
+        );
+        assert!(
+            find_node(&tree, "2.2").is_none(),
+            "Node 2.2 powinien być usunięty"
+        );
+
+        // Krok 4: Sprawdź że 3.1.deps nie zawiera 2.1 ani 2.2
+        let task_3_1 = find_node(&tree, "3.1").unwrap();
+        assert!(
+            task_3_1.deps.is_empty(),
+            "Task 3.1 powinien mieć puste deps po usunięciu parenta 2, ale ma: {:?}",
+            task_3_1.deps
+        );
+    }
+
+    #[test]
+    fn test_remove_task_nonexistent_id() {
+        let mut tree = sample_tree();
+        let initial_ids = all_ids(&tree);
+
+        // Try to remove a non-existent task with ID "999"
+        let result = remove_task(&mut tree, "999");
+
+        // Should return None
+        assert!(result.is_none());
+
+        // Tree should remain unchanged — all nodes at every depth preserved
+        assert_eq!(all_ids(&tree), initial_ids);
+    }
+
+    #[test]
+    fn test_move_parent_under_own_child_fails() {
+        // Scenariusz: Tree: 1 → [1.1, 1.2]
+        // Move 1 pod 1.1 = remove(1) + add(1.1, node=1, ...)
+        // Po remove(1) subtree 1.1 znika, więc add_task(1.1, ...) zwraca error
+
+        // Krok 1: Stwórz tree: parent 1 z subtasks 1.1, 1.2
+        let mut tree = vec![TaskNode {
+            id: "1".to_string(),
+            name: "Parent 1".to_string(),
+            component: Some("api".to_string()),
+            status: None,
+            deps: Vec::new(),
+            model: None,
+            description: None,
+            related_files: Vec::new(),
+            implementation_steps: Vec::new(),
+            profiles: Vec::new(),
+            subtasks: vec![
+                TaskNode {
+                    id: "1.1".to_string(),
+                    name: "Task 1.1".to_string(),
+                    component: None,
+                    status: Some(TaskStatus::Todo),
+                    deps: Vec::new(),
+                    model: None,
+                    description: None,
+                    related_files: Vec::new(),
+                    implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
+                    subtasks: Vec::new(),
+                },
+                TaskNode {
+                    id: "1.2".to_string(),
+                    name: "Task 1.2".to_string(),
+                    component: None,
+                    status: Some(TaskStatus::Todo),
+                    deps: Vec::new(),
+                    model: None,
+                    description: None,
+                    related_files: Vec::new(),
+                    implementation_steps: Vec::new(),
+                    profiles: Vec::new(),
+                    subtasks: Vec::new(),
+                },
+            ],
+        }];
+
+        // Krok 2: Symuluj operację move: usuń node 1
+        let removed_node = remove_task(&mut tree, "1");
+        assert!(
+            removed_node.is_some(),
+            "Remove powinien zwrócić usunięty node"
+        );
+        let removed = removed_node.unwrap();
+        assert_eq!(removed.id, "1");
+
+        // Krok 3: Sprawdź że node 1.1 też został usunięty (subtree cleanup)
+        assert!(
+            find_node(&tree, "1.1").is_none(),
+            "Node 1.1 powinien być usunięty razem z parentem 1"
+        );
+        assert!(
+            find_node(&tree, "1.2").is_none(),
+            "Node 1.2 powinien być usunięty razem z parentem 1"
+        );
+
+        // Krok 4: Próba dodania usuniętego node pod nieistniejący parent 1.1
+        let result = add_task(&mut tree, Some("1.1"), removed, None);
+        assert!(
+            result.is_err(),
+            "Add_task powinien zwrócić error gdy parent nie istnieje"
+        );
+
+        // Krok 5: Sprawdź komunikat błędu
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Parent task not found: 1.1"),
+            "Error powinien zawierać 'Parent task not found: 1.1', otrzymano: {}",
+            err_msg
+        );
+
+        // Krok 6: Sprawdź że drzewo jest puste (nie uszkodzone)
+        assert!(
+            tree.is_empty(),
+            "Drzewo powinno być puste po nieudanej operacji move"
+        );
     }
 }

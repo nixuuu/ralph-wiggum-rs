@@ -1,0 +1,6 @@
+---
+source: src/commands/mcp/tui/choice_select.rs
+expression: snapshot
+---
+> Only Choice  This is the only option
+  Other  type your answer

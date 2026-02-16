@@ -8,6 +8,8 @@ pub(crate) mod output;
 mod promise;
 mod prompt;
 pub(crate) mod runner;
+pub(crate) mod runner_reader;
+pub(crate) mod runner_types;
 pub(crate) mod state;
 mod tool_formatting;
 pub(crate) mod ui;
@@ -72,8 +74,16 @@ struct SharedState {
 impl SharedState {
     /// Build StatusData with update_info and update_state populated.
     fn build_status(&self) -> StatusData {
-        let mut status = self.formatter.lock().unwrap().get_status();
-        status.update_info = self.update_info.lock().unwrap().clone();
+        let mut status = self
+            .formatter
+            .lock()
+            .expect("formatter: mutex poisoned")
+            .get_status();
+        status.update_info = self
+            .update_info
+            .lock()
+            .expect("update_info: mutex poisoned")
+            .clone();
         status.update_state = UpdateState::from_u8(self.update_state.load(Ordering::SeqCst));
         status
     }
@@ -81,7 +91,10 @@ impl SharedState {
     /// Handle resize if flagged, then update status bar.
     fn update_status_bar(&self) -> Result<()> {
         let status = self.build_status();
-        let mut term = self.status_terminal.lock().unwrap();
+        let mut term = self
+            .status_terminal
+            .lock()
+            .expect("status_terminal: mutex poisoned");
         if self.resize_flag.swap(false, Ordering::SeqCst) {
             let _ = term.handle_resize(&status);
         }
@@ -117,7 +130,7 @@ fn setup_signals(shutdown: &Arc<AtomicBool>) {
 fn setup_formatter(config: &Config) -> Arc<Mutex<OutputFormatter>> {
     let formatter = Arc::new(Mutex::new(OutputFormatter::new(config.use_nerd_font)));
     {
-        let mut fmt = formatter.lock().unwrap();
+        let mut fmt = formatter.lock().expect("formatter: mutex poisoned");
         fmt.set_min_iterations(config.min_iterations);
         fmt.set_max_iterations(config.max_iterations);
     }
@@ -133,7 +146,7 @@ fn init_progress(
     let progress_file = config.progress_file.as_ref()?;
     let summary = load_progress_auto(progress_file).ok()?;
     let tp = build_task_progress(&summary);
-    let mut fmt = formatter.lock().unwrap();
+    let mut fmt = formatter.lock().expect("formatter: mutex poisoned");
     fmt.set_initial_done_count(summary.done);
     fmt.set_task_progress(Some(tp));
     std::fs::metadata(progress_file)
@@ -153,13 +166,16 @@ fn setup_terminal(config: &Config) -> Result<Arc<Mutex<StatusTerminal>>> {
 
 /// Show shutdown message, save state, cleanup terminal, print interrupted stats.
 fn cleanup_interrupted(shared: &SharedState, state_manager: &StateManager) -> Result<()> {
-    let mut term = shared.status_terminal.lock().unwrap();
+    let mut term = shared
+        .status_terminal
+        .lock()
+        .expect("status_terminal: mutex poisoned");
     term.show_shutting_down()?;
     term.cleanup()?;
     let lines = shared
         .formatter
         .lock()
-        .unwrap()
+        .expect("formatter: mutex poisoned")
         .format_interrupted(state_manager.iteration());
     term.print_lines(&lines)?;
     Ok(())
@@ -167,9 +183,16 @@ fn cleanup_interrupted(shared: &SharedState, state_manager: &StateManager) -> Re
 
 /// Print iteration header and update the status bar.
 fn print_iteration_header(shared: &SharedState) -> Result<()> {
-    let header_lines = shared.formatter.lock().unwrap().format_iteration_header();
+    let header_lines = shared
+        .formatter
+        .lock()
+        .expect("formatter: mutex poisoned")
+        .format_iteration_header();
     let status = shared.build_status();
-    let mut term = shared.status_terminal.lock().unwrap();
+    let mut term = shared
+        .status_terminal
+        .lock()
+        .expect("status_terminal: mutex poisoned");
     if shared.resize_flag.swap(false, Ordering::SeqCst) {
         let _ = term.handle_resize(&status);
     }
@@ -198,14 +221,21 @@ fn build_runner(config: &Config, state_manager: &StateManager) -> ClaudeRunner {
 /// Event callback body: format event → update terminal.
 fn handle_event(event: &ClaudeEvent, shared: &SharedState, shutdown: &Arc<AtomicBool>) {
     let (lines, mut status) = {
-        let mut fmt = shared.formatter.lock().unwrap();
+        let mut fmt = shared.formatter.lock().expect("formatter: mutex poisoned");
         let lines = fmt.format_event(event);
         let status = fmt.get_status();
         (lines, status)
     };
-    status.update_info = shared.update_info.lock().unwrap().clone();
+    status.update_info = shared
+        .update_info
+        .lock()
+        .expect("update_info: mutex poisoned")
+        .clone();
     status.update_state = UpdateState::from_u8(shared.update_state.load(Ordering::SeqCst));
-    let mut term = shared.status_terminal.lock().unwrap();
+    let mut term = shared
+        .status_terminal
+        .lock()
+        .expect("status_terminal: mutex poisoned");
     if shared.resize_flag.swap(false, Ordering::SeqCst) {
         let _ = term.handle_resize(&status);
     }
@@ -241,15 +271,22 @@ fn handle_idle(
     );
 
     let mut status = {
-        let mut fmt = shared.formatter.lock().unwrap();
+        let mut fmt = shared.formatter.lock().expect("formatter: mutex poisoned");
         if let Some(summary) = reload_result {
             fmt.set_task_progress(Some(build_task_progress(&summary)));
         }
         fmt.get_status()
     };
-    status.update_info = shared.update_info.lock().unwrap().clone();
+    status.update_info = shared
+        .update_info
+        .lock()
+        .expect("update_info: mutex poisoned")
+        .clone();
     status.update_state = UpdateState::from_u8(shared.update_state.load(Ordering::SeqCst));
-    let mut term = shared.status_terminal.lock().unwrap();
+    let mut term = shared
+        .status_terminal
+        .lock()
+        .expect("status_terminal: mutex poisoned");
     if shared.resize_flag.swap(false, Ordering::SeqCst) {
         let _ = term.handle_resize(&status);
     }
@@ -302,7 +339,7 @@ fn update_adaptive_iterations(
         state_manager.set_max_iterations(new_min + 5);
 
         let tp = build_task_progress(&summary);
-        let mut fmt = shared.formatter.lock().unwrap();
+        let mut fmt = shared.formatter.lock().expect("formatter: mutex poisoned");
         fmt.set_min_iterations(state_manager.min_iterations());
         fmt.set_max_iterations(new_min + 5);
         fmt.set_task_progress(Some(tp));
@@ -324,13 +361,20 @@ fn check_promise(
         return Ok(false);
     }
     if state_manager.can_accept_promise() {
-        let mut term = shared.status_terminal.lock().unwrap();
+        let mut term = shared
+            .status_terminal
+            .lock()
+            .expect("status_terminal: mutex poisoned");
         term.cleanup()?;
-        let lines = shared.formatter.lock().unwrap().format_stats(
-            state_manager.iteration(),
-            true,
-            state_manager.completion_promise(),
-        );
+        let lines = shared
+            .formatter
+            .lock()
+            .expect("formatter: mutex poisoned")
+            .format_stats(
+                state_manager.iteration(),
+                true,
+                state_manager.completion_promise(),
+            );
         term.print_lines(&lines)?;
         return Ok(true);
     }
@@ -340,19 +384,30 @@ fn check_promise(
         state_manager.min_iterations() - state_manager.iteration(),
         state_manager.min_iterations()
     );
-    shared.status_terminal.lock().unwrap().print_line(&msg)?;
+    shared
+        .status_terminal
+        .lock()
+        .expect("status_terminal: mutex poisoned")
+        .print_line(&msg)?;
     Ok(false)
 }
 
 /// Handle max iterations reached: cleanup and return error.
 fn handle_max_iterations(shared: &SharedState, state_manager: &StateManager) -> Result<()> {
-    let mut term = shared.status_terminal.lock().unwrap();
+    let mut term = shared
+        .status_terminal
+        .lock()
+        .expect("status_terminal: mutex poisoned");
     term.cleanup()?;
-    let lines = shared.formatter.lock().unwrap().format_stats(
-        state_manager.iteration(),
-        false,
-        state_manager.completion_promise(),
-    );
+    let lines = shared
+        .formatter
+        .lock()
+        .expect("formatter: mutex poisoned")
+        .format_stats(
+            state_manager.iteration(),
+            false,
+            state_manager.completion_promise(),
+        );
     term.print_lines(&lines)?;
     Ok(())
 }
@@ -448,7 +503,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
         state_manager.increment_iteration().await?;
         {
-            let mut fmt = shared.formatter.lock().unwrap();
+            let mut fmt = shared.formatter.lock().expect("formatter: mutex poisoned");
             fmt.set_iteration(state_manager.iteration());
             fmt.start_iteration();
         }
@@ -493,5 +548,183 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             drop(input_thread);
             return Err(RalphError::Interrupted);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: create a temporary YAML tasks file with minimal valid content
+    fn create_test_tasks_file(path: &std::path::Path) -> std::io::Result<()> {
+        let content = r#"default_model: haiku
+tasks:
+  - id: "1"
+    name: "Test task"
+    component: "test"
+    status: todo
+"#;
+        std::fs::write(path, content)
+    }
+
+    /// Helper: create a temporary PROGRESS.md file with minimal valid content
+    fn create_test_progress_file(path: &std::path::Path) -> std::io::Result<()> {
+        let content = "- [ ] 1 [test] Test task\n";
+        std::fs::write(path, content)
+    }
+
+    // Edge cases tests (task 59.3)
+
+    /// Test: plik .yml — ładuje jako tasks (YAML)
+    #[test]
+    fn test_load_progress_auto_yml_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("tasks.yml");
+        create_test_tasks_file(&path).unwrap();
+
+        let result = load_progress_auto(&path);
+        assert!(result.is_ok(), "Should load .yml file as tasks");
+        let summary = result.unwrap();
+        assert_eq!(summary.total(), 1, "Should have 1 task from YAML");
+    }
+
+    /// Test: plik .yaml — ładuje jako tasks (YAML)
+    #[test]
+    fn test_load_progress_auto_yaml_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("tasks.yaml");
+        create_test_tasks_file(&path).unwrap();
+
+        let result = load_progress_auto(&path);
+        assert!(result.is_ok(), "Should load .yaml file as tasks");
+        let summary = result.unwrap();
+        assert_eq!(summary.total(), 1, "Should have 1 task from YAML");
+    }
+
+    /// Test: plik .YML (uppercase) — case-sensitive, fallback do markdown parsera
+    #[test]
+    fn test_load_progress_auto_uppercase_yml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("tasks.YML");
+        create_test_tasks_file(&path).unwrap();
+
+        let result = load_progress_auto(&path);
+        assert!(
+            result.is_ok(),
+            "Should load .YML file (falls back to markdown)"
+        );
+        // Case-sensitive: .YML != "yml", so falls back to markdown parser
+        // YAML content has no markdown task lines → 0 tasks
+        let summary = result.unwrap();
+        assert_eq!(
+            summary.total(),
+            0,
+            ".YML should fallback to markdown (0 tasks from YAML content)"
+        );
+    }
+
+    /// Test: plik .YAML (uppercase) — case-sensitive, fallback do markdown parsera
+    #[test]
+    fn test_load_progress_auto_uppercase_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("tasks.YAML");
+        create_test_tasks_file(&path).unwrap();
+
+        let result = load_progress_auto(&path);
+        assert!(
+            result.is_ok(),
+            "Should load .YAML file (falls back to markdown)"
+        );
+        // Case-sensitive: .YAML != "yaml", so falls back to markdown parser
+        let summary = result.unwrap();
+        assert_eq!(
+            summary.total(),
+            0,
+            ".YAML should fallback to markdown (0 tasks from YAML content)"
+        );
+    }
+
+    /// Test: plik .md — ładuje jako progress (Markdown)
+    #[test]
+    fn test_load_progress_auto_md_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("PROGRESS.md");
+        create_test_progress_file(&path).unwrap();
+
+        let result = load_progress_auto(&path);
+        assert!(result.is_ok(), "Should load .md file as progress");
+        let summary = result.unwrap();
+        assert_eq!(summary.total(), 1, "Should have 1 task from markdown");
+    }
+
+    /// Test: plik bez rozszerzenia — fallback to markdown parser
+    #[test]
+    fn test_load_progress_auto_no_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("PROGRESS");
+        create_test_progress_file(&path).unwrap();
+
+        let result = load_progress_auto(&path);
+        assert!(
+            result.is_ok(),
+            "Should load file without extension (fallback to markdown)"
+        );
+        let summary = result.unwrap();
+        assert_eq!(summary.total(), 1, "Should parse as markdown");
+    }
+
+    /// Test: plik .txt — fallback to markdown parser
+    #[test]
+    fn test_load_progress_auto_txt_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("tasks.txt");
+        create_test_progress_file(&path).unwrap();
+
+        let result = load_progress_auto(&path);
+        assert!(
+            result.is_ok(),
+            "Should load .txt file (fallback to markdown)"
+        );
+        let summary = result.unwrap();
+        assert_eq!(summary.total(), 1, "Should parse as markdown");
+    }
+
+    /// Test: nieistniejący plik — zwraca błąd
+    #[test]
+    fn test_load_progress_auto_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nonexistent.yml");
+
+        let result = load_progress_auto(&path);
+        assert!(result.is_err(), "Should fail for missing file");
+        assert!(
+            matches!(result.unwrap_err(), RalphError::MissingFile(_)),
+            "Should return MissingFile error"
+        );
+    }
+
+    /// Test: nieistniejący plik .md — zwraca błąd MissingFile (markdown path)
+    #[test]
+    fn test_load_progress_auto_missing_md_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nonexistent.md");
+
+        let result = load_progress_auto(&path);
+        assert!(result.is_err(), "Should fail for missing .md file");
+        assert!(
+            matches!(result.unwrap_err(), RalphError::MissingFile(_)),
+            "Should return MissingFile error for missing .md"
+        );
+    }
+
+    /// Test: nieprawidłowy YAML w pliku .yml — zwraca błąd parsowania
+    #[test]
+    fn test_load_progress_auto_invalid_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("invalid.yml");
+        std::fs::write(&path, "invalid: yaml: content: {{{").unwrap();
+
+        let result = load_progress_auto(&path);
+        assert!(result.is_err(), "Should fail for invalid YAML");
     }
 }

@@ -200,6 +200,7 @@ fn trie_node_to_task_node(segment: &str, node: &TrieNode, parent_prefix: &str) -
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                profiles: Vec::new(),
                 subtasks: Vec::new(),
             };
         }
@@ -214,6 +215,7 @@ fn trie_node_to_task_node(segment: &str, node: &TrieNode, parent_prefix: &str) -
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            profiles: Vec::new(),
             subtasks: Vec::new(),
         };
     }
@@ -244,6 +246,7 @@ fn trie_node_to_task_node(segment: &str, node: &TrieNode, parent_prefix: &str) -
         description: None,
         related_files: Vec::new(),
         implementation_steps: Vec::new(),
+        profiles: Vec::new(),
         subtasks,
     }
 }
@@ -363,6 +366,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            profiles: Vec::new(),
             subtasks: Vec::new(),
         }];
 
@@ -397,5 +401,281 @@ mod tests {
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id, "H");
         assert_eq!(nodes[0].subtasks.len(), 2);
+    }
+
+    #[test]
+    fn test_flat_single_level_ids() {
+        // PROGRESS.md z ID: 1, 2, 3 (bez kropek)
+        let summary = make_summary(
+            vec![
+                ("1", "api", "First task", TaskStatus::Todo),
+                ("2", "api", "Second task", TaskStatus::InProgress),
+                ("3", "ui", "Third task", TaskStatus::Done),
+            ],
+            vec![("2", vec!["1"]), ("3", vec!["1", "2"])],
+        );
+
+        let mut trie = HashMap::new();
+        for task in &summary.tasks {
+            let segments: Vec<&str> = task.id.split('.').collect();
+            insert_trie(&mut trie, &segments, task);
+        }
+
+        let nodes = trie_to_nodes(&trie);
+
+        // Powinny być 3 root-level taski
+        assert_eq!(nodes.len(), 3, "Expected 3 root-level tasks");
+
+        // Sprawdź ID i brak subtasków
+        assert_eq!(nodes[0].id, "1");
+        assert_eq!(nodes[0].subtasks.len(), 0, "Task 1 should be a leaf");
+        assert_eq!(nodes[1].id, "2");
+        assert_eq!(nodes[1].subtasks.len(), 0, "Task 2 should be a leaf");
+        assert_eq!(nodes[2].id, "3");
+        assert_eq!(nodes[2].subtasks.len(), 0, "Task 3 should be a leaf");
+
+        // Sprawdź statusy
+        assert_eq!(
+            nodes[0].status,
+            Some(TaskStatus::Todo),
+            "Task 1 should be Todo"
+        );
+        assert_eq!(
+            nodes[1].status,
+            Some(TaskStatus::InProgress),
+            "Task 2 should be InProgress"
+        );
+        assert_eq!(
+            nodes[2].status,
+            Some(TaskStatus::Done),
+            "Task 3 should be Done"
+        );
+
+        // Sprawdź komponenty
+        assert_eq!(nodes[0].component.as_deref(), Some("api"));
+        assert_eq!(nodes[1].component.as_deref(), Some("api"));
+        assert_eq!(nodes[2].component.as_deref(), Some("ui"));
+
+        // Sprawdź nazwy
+        assert_eq!(nodes[0].name, "First task");
+        assert_eq!(nodes[1].name, "Second task");
+        assert_eq!(nodes[2].name, "Third task");
+
+        // Sprawdź deps po apply_deps_and_models
+        let deps_map = summary
+            .frontmatter
+            .as_ref()
+            .map(|fm| &fm.deps)
+            .cloned()
+            .unwrap_or_default();
+
+        let models_map = summary
+            .frontmatter
+            .as_ref()
+            .map(|fm| &fm.models)
+            .cloned()
+            .unwrap_or_default();
+
+        let nodes_with_deps = apply_deps_and_models(nodes, &deps_map, &models_map);
+
+        assert_eq!(nodes_with_deps[0].deps.len(), 0, "Task 1 has no deps");
+        assert_eq!(nodes_with_deps[1].deps, vec!["1"], "Task 2 depends on 1");
+        assert_eq!(
+            nodes_with_deps[2].deps,
+            vec!["1", "2"],
+            "Task 3 depends on 1 and 2"
+        );
+    }
+
+    #[test]
+    fn test_migrate_empty_progress() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // Tworzymy tymczasowy katalog
+        let temp = TempDir::new().unwrap();
+        let temp_path = temp.path();
+
+        // Tworzymy pusty PROGRESS.md
+        let progress_path = temp_path.join("PROGRESS.md");
+        fs::write(&progress_path, "").unwrap();
+
+        // Konfiguracja
+        let mut config = FileConfig::default();
+        config.task.progress_file = progress_path.clone();
+        config.task.tasks_file = temp_path.join(".ralph").join("tasks.yml");
+
+        // Wykonaj migrację
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(execute(&config));
+
+        // Migracja powinna przejść bez błędu
+        assert!(
+            result.is_ok(),
+            "Migracja pustego PROGRESS.md powinna przejść bez błędu"
+        );
+
+        // Sprawdź że tasks.yml istnieje
+        assert!(
+            config.task.tasks_file.exists(),
+            "tasks.yml powinien zostać utworzony"
+        );
+
+        // Wczytaj tasks.yml
+        let tasks_file = TasksFile::load(&config.task.tasks_file).unwrap();
+
+        // Sprawdź że lista tasków jest pusta
+        assert!(
+            tasks_file.tasks.is_empty(),
+            "tasks.yml powinien zawierać pustą listę tasków"
+        );
+
+        // Sprawdź że default_model jest None
+        assert!(
+            tasks_file.default_model.is_none(),
+            "default_model powinien być None"
+        );
+    }
+
+    #[test]
+    fn test_migrate_only_empty_frontmatter() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // Tworzymy tymczasowy katalog
+        let temp = TempDir::new().unwrap();
+        let temp_path = temp.path();
+
+        // PROGRESS.md z samym pustym frontmatterem
+        let progress_path = temp_path.join("PROGRESS.md");
+        fs::write(&progress_path, "---\n---\n").unwrap();
+
+        // Konfiguracja
+        let mut config = FileConfig::default();
+        config.task.progress_file = progress_path.clone();
+        config.task.tasks_file = temp_path.join(".ralph").join("tasks.yml");
+
+        // Wykonaj migrację
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(execute(&config));
+
+        // Migracja powinna przejść bez błędu
+        assert!(
+            result.is_ok(),
+            "Migracja PROGRESS.md z samym frontmatterem powinna przejść"
+        );
+
+        // Sprawdź że tasks.yml istnieje
+        assert!(config.task.tasks_file.exists());
+
+        // Wczytaj tasks.yml
+        let tasks_file = TasksFile::load(&config.task.tasks_file).unwrap();
+
+        // Sprawdź że lista tasków jest pusta
+        assert!(
+            tasks_file.tasks.is_empty(),
+            "tasks.yml powinien zawierać pustą listę tasków"
+        );
+
+        assert!(tasks_file.default_model.is_none());
+    }
+
+    #[test]
+    fn test_migrate_frontmatter_with_default_model_no_tasks() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let temp_path = temp.path();
+
+        // PROGRESS.md z frontmatterem zawierającym default_model, ale bez tasków
+        let content = "---\ndefault_model: claude-opus-4-6\n---\n\n# No tasks here";
+        let progress_path = temp_path.join("PROGRESS.md");
+        fs::write(&progress_path, content).unwrap();
+
+        let mut config = FileConfig::default();
+        config.task.progress_file = progress_path.clone();
+        config.task.tasks_file = temp_path.join(".ralph").join("tasks.yml");
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(execute(&config));
+
+        assert!(result.is_ok());
+        assert!(config.task.tasks_file.exists());
+
+        let tasks_file = TasksFile::load(&config.task.tasks_file).unwrap();
+
+        // Lista tasków pusta
+        assert!(tasks_file.tasks.is_empty());
+
+        // default_model powinien być zachowany
+        assert_eq!(
+            tasks_file.default_model.as_deref(),
+            Some("claude-opus-4-6"),
+            "default_model z frontmattera powinien być zachowany"
+        );
+    }
+
+    /// Test: ID '1' jest zarówno samodzielnym taskiem jak i prefixem dla '1.1'
+    /// Trie builder powinien stworzyć hierarchię: '1' parent z '1.1' jako subtask
+    #[test]
+    fn test_id_as_prefix_and_leaf() {
+        // Scenariusz: task '1' (done) i task '1.1' (todo)
+        let summary = make_summary(
+            vec![
+                ("1", "core", "Parent task", TaskStatus::Done),
+                ("1.1", "core", "Child task", TaskStatus::Todo),
+            ],
+            vec![],
+        );
+
+        let mut trie = HashMap::new();
+        for task in &summary.tasks {
+            let segments: Vec<&str> = task.id.split('.').collect();
+            insert_trie(&mut trie, &segments, task);
+        }
+
+        let nodes = trie_to_nodes(&trie);
+
+        // Powinien powstać jeden węzeł '1' z jednym subtaskiem '1.1'
+        assert_eq!(nodes.len(), 1, "Powinien być jeden root node (ID '1')");
+        assert_eq!(nodes[0].id, "1");
+        assert_eq!(
+            nodes[0].name, "Parent task",
+            "Nazwa powinna pochodzić z taska '1'"
+        );
+        assert_eq!(
+            nodes[0].component.as_deref(),
+            Some("core"),
+            "Komponent powinien pochodzić z taska '1'"
+        );
+
+        // '1' jest parentem, więc status powinien być None (computed)
+        assert_eq!(
+            nodes[0].status, None,
+            "Parent node nie powinien mieć statusu (computed)"
+        );
+
+        // '1' powinien mieć jeden subtask
+        assert_eq!(
+            nodes[0].subtasks.len(),
+            1,
+            "Node '1' powinien mieć jeden subtask"
+        );
+
+        // Sprawdź subtask '1.1'
+        let subtask = &nodes[0].subtasks[0];
+        assert_eq!(subtask.id, "1.1");
+        assert_eq!(subtask.name, "Child task");
+        assert_eq!(subtask.component.as_deref(), Some("core"));
+        assert_eq!(
+            subtask.status,
+            Some(TaskStatus::Todo),
+            "Leaf node powinien mieć status"
+        );
+        assert!(subtask.subtasks.is_empty(), "1.1 powinien być leaf node");
     }
 }

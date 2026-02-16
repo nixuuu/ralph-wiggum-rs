@@ -87,7 +87,7 @@ pub fn list_tools_readonly() -> Value {
     })
 }
 
-/// Return MCP tools/list response with all 12 tool definitions.
+/// Return MCP tools/list response with all 13 tool definitions.
 pub fn list_tools() -> Value {
     json!({
         "tools": [
@@ -156,7 +156,7 @@ pub fn list_tools() -> Value {
                         },
                         "tasks": {
                             "type": "string",
-                            "description": "YAML string with task list. Each task needs: id, name, status (for leaves). Example:\n- id: \"3.1\"\n  name: \"Implement feature\"\n  status: todo\n  component: api"
+                            "description": "YAML string with task list. Each task needs: id, name, status (for leaves). Optional fields: component, deps, model, description, related_files, implementation_steps, profiles. Example:\n- id: \"3.1\"\n  name: \"Implement feature\"\n  status: todo\n  component: api\n  profiles: [production, staging]"
                         }
                     },
                     "required": ["tasks"]
@@ -207,6 +207,11 @@ pub fn list_tools() -> Value {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Ordered implementation steps"
+                        },
+                        "profiles": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Profile tags for the task"
                         }
                     },
                     "required": ["id"]
@@ -328,6 +333,14 @@ pub fn list_tools() -> Value {
                     },
                     "required": ["question"]
                 }
+            },
+            {
+                "name": "list_profiles",
+                "description": "List verification profiles from .ralph.toml configuration. Returns profile names, descriptions, path patterns, and associated commands.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })
@@ -352,6 +365,7 @@ pub fn list_tools() -> Value {
 /// * `id` - JSON-RPC request ID
 /// * `params` - JSON-RPC params (zawiera `name` i opcjonalnie `arguments`)
 /// * `tasks_path` - Ścieżka do pliku tasks.yml (dla CRUD tools)
+/// * `config_path` - Ścieżka do pliku .ralph.toml (dla list_profiles)
 ///
 /// # Returns
 ///
@@ -360,6 +374,7 @@ pub fn handle_tool_call(
     id: Option<Value>,
     params: Option<&Value>,
     tasks_path: &Path,
+    config_path: &Path,
 ) -> super::protocol::JsonRpcResponse {
     // Step 1: Parse tool name and arguments from params
     let tool_name = params.and_then(|p| p.get("name")).and_then(|n| n.as_str());
@@ -371,7 +386,7 @@ pub fn handle_tool_call(
     match tool_name {
         Some(name) => {
             // Step 2: Dispatch to appropriate handler
-            let result = dispatch(name, &tool_args, tasks_path);
+            let result = dispatch(name, &tool_args, tasks_path, config_path);
 
             // Step 3: Format response based on result
             match result {
@@ -425,11 +440,15 @@ pub fn handle_tool_call(
 /// ## Interactive Tool (1 total)
 /// - `ask_user` - Zadaj pytanie użytkownikowi (placeholder, TODO: SSE stream w Phase 5)
 ///
+/// ## Configuration Tools (1 total)
+/// - `list_profiles` - Lista profili weryfikacji z .ralph.toml
+///
 /// # Arguments
 ///
 /// * `tool_name` - Nazwa narzędzia do wywołania
 /// * `params` - Parametry wywołania (JSON Value)
 /// * `tasks_path` - Ścieżka do pliku tasks.yml (używana przez CRUD tools)
+/// * `config_path` - Ścieżka do pliku .ralph.toml (używana przez list_profiles)
 ///
 /// # Returns
 ///
@@ -439,9 +458,14 @@ pub fn handle_tool_call(
 /// # Errors
 ///
 /// Zwraca błąd jeśli:
-/// - Tool name jest nieznany (nie pasuje do żadnego z 12 narzędzi)
+/// - Tool name jest nieznany (nie pasuje do żadnego z 13 narzędzi)
 /// - Handler zwróci błąd (np. brak parametru, walidacja nie powiodła się)
-pub fn dispatch(tool_name: &str, params: &Value, tasks_path: &Path) -> Result<Value, String> {
+pub fn dispatch(
+    tool_name: &str,
+    params: &Value,
+    tasks_path: &Path,
+    config_path: &Path,
+) -> Result<Value, String> {
     match tool_name {
         // CRUD Tools: Query operations
         "tasks_list" => handlers::tasks_list(tasks_path, params),
@@ -462,6 +486,9 @@ pub fn dispatch(tool_name: &str, params: &Value, tasks_path: &Path) -> Result<Va
         // TODO (Phase 5): Return SSE stream instead of JSON placeholder
         "ask_user" => handlers::ask_user(params),
 
+        // Configuration Tools: list_profiles
+        "list_profiles" => handlers::list_profiles(config_path, params),
+
         // Unknown tool
         _ => Err(format!("Unknown tool: {tool_name}")),
     }
@@ -475,7 +502,7 @@ mod tests {
     fn test_list_tools_count() {
         let tools = list_tools();
         let arr = tools["tools"].as_array().unwrap();
-        assert_eq!(arr.len(), 12);
+        assert_eq!(arr.len(), 13);
     }
 
     #[test]
@@ -492,12 +519,13 @@ mod tests {
         assert!(names.contains(&"tasks_delete"));
         assert!(names.contains(&"tasks_set_default_model"));
         assert!(names.contains(&"ask_user"));
+        assert!(names.contains(&"list_profiles"));
     }
 
     #[test]
     fn test_dispatch_unknown_tool() {
         let path = std::path::PathBuf::from("/nonexistent");
-        let err = dispatch("unknown_tool", &json!({}), &path).unwrap_err();
+        let err = dispatch("unknown_tool", &json!({}), &path, &path).unwrap_err();
         assert!(err.contains("Unknown tool"));
     }
 
@@ -572,7 +600,7 @@ mod tests {
     fn test_handle_tool_call_missing_name() {
         let path = std::path::PathBuf::from("/nonexistent");
         let params = json!({"arguments": {}});
-        let response = handle_tool_call(Some(json!(1)), Some(&params), &path);
+        let response = handle_tool_call(Some(json!(1)), Some(&params), &path, &path);
 
         // Should return JSON-RPC error for missing name
         assert!(response.error.is_some());
@@ -585,7 +613,7 @@ mod tests {
     fn test_handle_tool_call_unknown_tool() {
         let path = std::path::PathBuf::from("/nonexistent");
         let params = json!({"name": "unknown_tool", "arguments": {}});
-        let response = handle_tool_call(Some(json!(1)), Some(&params), &path);
+        let response = handle_tool_call(Some(json!(1)), Some(&params), &path, &path);
 
         // Should return success response with isError flag
         assert!(response.result.is_some());
@@ -617,7 +645,7 @@ tasks:
             "name": "tasks_summary",
             "arguments": {}
         });
-        let response = handle_tool_call(Some(json!(1)), Some(&params), &path);
+        let response = handle_tool_call(Some(json!(1)), Some(&params), &path, &path);
 
         // Should return success response
         assert!(response.result.is_some());
@@ -632,7 +660,7 @@ tasks:
         let path = std::path::PathBuf::from("/nonexistent");
         // Missing "arguments" field should default to {}
         let params = json!({"name": "unknown_tool"});
-        let response = handle_tool_call(Some(json!(1)), Some(&params), &path);
+        let response = handle_tool_call(Some(json!(1)), Some(&params), &path, &path);
 
         // Should still dispatch (even though tool is unknown)
         assert!(response.result.is_some());
@@ -657,7 +685,7 @@ tasks:
         ];
 
         for tool in crud_tools {
-            let result = dispatch(tool, &json!({}), &path);
+            let result = dispatch(tool, &json!({}), &path, &path);
             // All tools should be recognized (even if they fail with invalid params)
             // They should NOT return "Unknown tool" error
             if let Err(e) = result {
@@ -674,7 +702,7 @@ tasks:
     fn test_dispatch_ask_user_exists() {
         // Test that ask_user is registered in dispatch
         let path = std::path::PathBuf::from("/nonexistent");
-        let result = dispatch("ask_user", &json!({}), &path);
+        let result = dispatch("ask_user", &json!({}), &path, &path);
 
         // ask_user should be recognized (even if it fails with invalid params)
         if let Err(e) = result {
@@ -688,7 +716,7 @@ tasks:
     #[test]
     fn test_dispatch_returns_error_for_unknown_tool() {
         let path = std::path::PathBuf::from("/nonexistent");
-        let result = dispatch("totally_unknown_tool_xyz", &json!({}), &path);
+        let result = dispatch("totally_unknown_tool_xyz", &json!({}), &path, &path);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -710,7 +738,7 @@ tasks: []
             "name": "tasks_summary",
             "arguments": {}
         });
-        let response = handle_tool_call(Some(json!(1)), Some(&params), &path);
+        let response = handle_tool_call(Some(json!(1)), Some(&params), &path, &path);
 
         // Check MCP content format
         assert!(response.result.is_some());
@@ -733,7 +761,7 @@ tasks: []
             "name": "tasks_get",
             "arguments": {} // Missing required "id" param
         });
-        let response = handle_tool_call(Some(json!(1)), Some(&params), &path);
+        let response = handle_tool_call(Some(json!(1)), Some(&params), &path, &path);
 
         // Check error format
         assert!(response.result.is_some());
@@ -753,7 +781,7 @@ tasks: []
     fn test_handle_tool_call_with_null_arguments() {
         let path = std::path::PathBuf::from("/nonexistent");
         let params = json!({"name": "unknown_tool", "arguments": null});
-        let response = handle_tool_call(Some(json!(1)), Some(&params), &path);
+        let response = handle_tool_call(Some(json!(1)), Some(&params), &path, &path);
 
         // Should treat null arguments as empty object {}
         assert!(response.result.is_some());
@@ -769,7 +797,7 @@ tasks: []
                 "options": "not_an_array"
             }
         });
-        let response = handle_tool_call(Some(json!(1)), Some(&params), &path);
+        let response = handle_tool_call(Some(json!(1)), Some(&params), &path, &path);
 
         // Should return error with isError flag
         assert!(response.result.is_some());
@@ -792,15 +820,15 @@ tasks: []
             "garbage": "ignore_me",
             "random": 123
         });
-        let result = dispatch("ask_user", &params, &path);
+        let result = dispatch("ask_user", &params, &path, &path);
 
         // Should succeed and ignore extra params
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_all_12_tools_can_be_dispatched() {
-        // Comprehensive test: all 12 tools (11 CRUD + ask_user) are dispatchable
+    fn test_all_13_tools_can_be_dispatched() {
+        // Comprehensive test: all 13 tools (11 CRUD + ask_user + list_profiles) are dispatchable
         let path = std::path::PathBuf::from("/nonexistent");
         let all_tools = vec![
             "tasks_list",
@@ -815,10 +843,11 @@ tasks: []
             "tasks_set_deps",
             "tasks_set_default_model",
             "ask_user",
+            "list_profiles",
         ];
 
         for tool in all_tools {
-            let result = dispatch(tool, &json!({}), &path);
+            let result = dispatch(tool, &json!({}), &path, &path);
             // Tool should be recognized (not "Unknown tool")
             if let Err(e) = result {
                 assert!(
@@ -871,14 +900,17 @@ tasks: []
 
         // Sprawdź że ask_user JEST obecne (interactive tool)
         assert!(tool_names.contains(&"ask_user"));
+
+        // Sprawdź że list_profiles JEST obecne (config tool)
+        assert!(tool_names.contains(&"list_profiles"));
     }
 
     #[test]
-    fn test_list_tools_readonly_returns_exactly_5_tools() {
-        // 4 query tools + 1 interactive tool (ask_user) = 5 total
+    fn test_list_tools_readonly_returns_exactly_6_tools() {
+        // 4 query tools + 1 interactive tool (ask_user) + 1 config tool (list_profiles) = 6 total
         let tools = list_tools_readonly();
         let arr = tools["tools"].as_array().unwrap();
-        assert_eq!(arr.len(), 5);
+        assert_eq!(arr.len(), 6);
     }
 
     #[test]
@@ -906,6 +938,12 @@ tasks: []
     fn test_is_mutation_tool_returns_false_for_ask_user() {
         // ask_user nie jest mutation tool (interactive, ale read-only safe)
         assert!(!is_mutation_tool("ask_user"));
+    }
+
+    #[test]
+    fn test_is_mutation_tool_returns_false_for_list_profiles() {
+        // list_profiles nie jest mutation tool (config read-only tool)
+        assert!(!is_mutation_tool("list_profiles"));
     }
 
     #[test]

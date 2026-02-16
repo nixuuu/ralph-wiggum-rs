@@ -40,7 +40,6 @@ impl SetupCommand {
 /// Can be a simple string or an object with `command` and optional `name`/`description`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
-#[allow(dead_code)] // Used in task 13.3
 pub enum VerifyCommand {
     Simple(String),
     Detailed {
@@ -52,7 +51,6 @@ pub enum VerifyCommand {
     },
 }
 
-#[allow(dead_code)] // Used in task 13.3
 impl VerifyCommand {
     /// Returns the command string to execute.
     pub fn command(&self) -> &str {
@@ -97,6 +95,8 @@ pub struct FileConfig {
     pub ui: UiConfig,
     #[serde(default)]
     pub task: TaskConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 /// UI configuration
@@ -134,6 +134,26 @@ pub struct PromptConfig {
     pub system: Option<String>,
 }
 
+/// Logging configuration for diagnostic logs
+#[derive(Debug, Deserialize)]
+pub struct LoggingConfig {
+    /// Directory for diagnostic logs (default: .ralph/logs)
+    #[serde(default = "default_log_dir")]
+    pub log_dir: PathBuf,
+    /// Max number of log files to keep (default: 10, 0 = unlimited)
+    #[serde(default = "default_max_log_files")]
+    pub max_log_files: u32,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            log_dir: default_log_dir(),
+            max_log_files: default_max_log_files(),
+        }
+    }
+}
+
 /// Task management configuration
 #[derive(Debug, Deserialize)]
 pub struct TaskConfig {
@@ -162,9 +182,35 @@ impl Default for TaskConfig {
     }
 }
 
+/// A verification profile defines a set of paths to monitor with associated
+/// verification and setup commands.
+///
+/// Used in orchestration to run targeted checks only when specific paths change.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VerifyProfile {
+    /// Unique profile name
+    pub name: String,
+    /// Optional profile description
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub description: Option<String>,
+    /// Path patterns to monitor (glob-compatible)
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Optional working directory for commands
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    /// Verification commands to run when paths change
+    #[serde(default)]
+    pub verify_commands: Vec<VerifyCommand>,
+    /// Setup commands to run before verification
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub setup_commands: Vec<SetupCommand>,
+}
+
 /// Configuration for task orchestration (`[task.orchestrate]` in .ralph.toml)
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // verify_commands field used in task 13.3
 pub struct OrchestrateConfig {
     /// Number of parallel workers (default: 2)
     #[serde(default = "default_workers")]
@@ -211,6 +257,9 @@ pub struct OrchestrateConfig {
     /// Claude model to use for code review (default: "opus")
     #[serde(default)]
     pub review_model: Option<String>,
+    /// Verification profiles - targeted checks for specific path patterns
+    #[serde(default)]
+    pub profiles: Vec<VerifyProfile>,
 }
 
 impl Default for OrchestrateConfig {
@@ -229,6 +278,7 @@ impl Default for OrchestrateConfig {
             setup_timeout_secs: default_setup_timeout(),
             merge_timeout_minutes: default_merge_timeout(),
             review_model: None,
+            profiles: Vec::new(),
         }
     }
 }
@@ -269,6 +319,14 @@ fn default_tasks_file() -> PathBuf {
     PathBuf::from(".ralph/tasks.yml")
 }
 
+fn default_log_dir() -> PathBuf {
+    PathBuf::from(".ralph/logs")
+}
+
+fn default_max_log_files() -> u32 {
+    10
+}
+
 impl FileConfig {
     /// Load configuration from a specific path
     /// Returns default config if file doesn't exist
@@ -302,6 +360,81 @@ impl FileConfig {
 
         result
     }
+}
+
+/// Formats a list of verification profiles into a human-readable string.
+///
+/// Generates a formatted text description of each profile including:
+/// - Profile name and description
+/// - Path patterns monitored
+/// - Verification commands (using labels)
+/// - Setup commands (using labels)
+/// - Working directory (if specified)
+///
+/// # Arguments
+/// * `profiles` - Slice of VerifyProfile to format
+///
+/// # Returns
+/// Formatted string with profile information, or empty string if profiles is empty
+pub fn format_profiles_info(profiles: &[VerifyProfile]) -> String {
+    if profiles.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::new();
+
+    for (idx, profile) in profiles.iter().enumerate() {
+        if idx > 0 {
+            result.push('\n');
+        }
+
+        // Profile header with name
+        result.push_str(&format!("- **{}**", profile.name));
+
+        // Add description if present
+        if let Some(desc) = &profile.description {
+            result.push_str(&format!(": {}", desc));
+        }
+        result.push('\n');
+
+        // Paths
+        if !profile.paths.is_empty() {
+            result.push_str("  paths: [");
+            result.push_str(&profile.paths.join(", "));
+            result.push_str("]\n");
+        }
+
+        // Verify commands (using labels)
+        if !profile.verify_commands.is_empty() {
+            result.push_str("  verify: [");
+            let verify_labels: Vec<&str> = profile
+                .verify_commands
+                .iter()
+                .map(|cmd| cmd.label())
+                .collect();
+            result.push_str(&verify_labels.join(", "));
+            result.push_str("]\n");
+        }
+
+        // Setup commands (using labels)
+        if !profile.setup_commands.is_empty() {
+            result.push_str("  setup: [");
+            let setup_labels: Vec<&str> = profile
+                .setup_commands
+                .iter()
+                .map(|cmd| cmd.label())
+                .collect();
+            result.push_str(&setup_labels.join(", "));
+            result.push_str("]\n");
+        }
+
+        // Working directory
+        if let Some(wd) = &profile.working_dir {
+            result.push_str(&format!("  working_dir: {}\n", wd));
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -1180,6 +1313,1064 @@ review_model = "claude-opus-4-6"
         assert_eq!(
             config.task.orchestrate.review_model.as_deref(),
             Some("claude-opus-4-6")
+        );
+    }
+
+    // --- Logging config tests ---
+
+    #[test]
+    fn test_logging_config_defaults() {
+        let config = FileConfig::default();
+        assert_eq!(
+            config.logging.log_dir,
+            std::path::PathBuf::from(".ralph/logs")
+        );
+        assert_eq!(config.logging.max_log_files, 10);
+    }
+
+    #[test]
+    fn test_logging_config_backward_compat() {
+        // Existing .ralph.toml without [logging] section should still work
+        let toml_content = r#"
+[prompt]
+prefix = "test"
+
+[ui]
+nerd_font = false
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        // Logging config should have all defaults
+        assert_eq!(
+            config.logging.log_dir,
+            std::path::PathBuf::from(".ralph/logs")
+        );
+        assert_eq!(config.logging.max_log_files, 10);
+    }
+
+    #[test]
+    fn test_logging_config_custom() {
+        let toml_content = r#"
+[logging]
+log_dir = "custom/logs"
+max_log_files = 20
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            config.logging.log_dir,
+            std::path::PathBuf::from("custom/logs")
+        );
+        assert_eq!(config.logging.max_log_files, 20);
+    }
+
+    #[test]
+    fn test_logging_config_partial() {
+        let toml_content = r#"
+[logging]
+log_dir = ".logs"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.logging.log_dir, std::path::PathBuf::from(".logs"));
+        assert_eq!(config.logging.max_log_files, 10); // default
+    }
+
+    #[test]
+    fn test_logging_config_unlimited_files() {
+        let toml_content = r#"
+[logging]
+max_log_files = 0
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            config.logging.log_dir,
+            std::path::PathBuf::from(".ralph/logs")
+        ); // default
+        assert_eq!(config.logging.max_log_files, 0);
+    }
+
+    #[test]
+    fn test_logging_config_full() {
+        let toml_content = r#"
+[logging]
+log_dir = "logs/diagnostics"
+max_log_files = 15
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            config.logging.log_dir,
+            std::path::PathBuf::from("logs/diagnostics")
+        );
+        assert_eq!(config.logging.max_log_files, 15);
+    }
+
+    // ── Task 53.2: Test max_retries=0 parsing and scheduler integration ──
+
+    #[test]
+    fn test_max_retries_zero_parsing() {
+        // Test that max_retries=0 is parsed correctly from TOML
+        let toml_content = r#"
+[task.orchestrate]
+max_retries = 0
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            config.task.orchestrate.max_retries, 0,
+            "max_retries=0 should be parsed correctly"
+        );
+    }
+
+    #[test]
+    fn test_max_retries_zero_with_other_fields() {
+        // Test max_retries=0 alongside other config fields
+        let toml_content = r#"
+[task.orchestrate]
+workers = 4
+max_retries = 0
+worktree_prefix = "test"
+verify_commands = ["cargo test"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.workers, 4);
+        assert_eq!(
+            config.task.orchestrate.max_retries, 0,
+            "max_retries=0 should coexist with other fields"
+        );
+        assert_eq!(
+            config.task.orchestrate.worktree_prefix.as_deref(),
+            Some("test")
+        );
+        assert_eq!(config.task.orchestrate.verify_commands.len(), 1);
+    }
+
+    #[test]
+    fn test_max_retries_zero_vs_default() {
+        // Verify that max_retries=0 differs from the default value
+        let default_config = FileConfig::default();
+        assert_eq!(
+            default_config.task.orchestrate.max_retries, 3,
+            "Default max_retries should be 3"
+        );
+
+        let toml_content = r#"
+[task.orchestrate]
+max_retries = 0
+"#;
+        let zero_config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            zero_config.task.orchestrate.max_retries, 0,
+            "Explicit max_retries=0 should override default"
+        );
+    }
+
+    // --- VerifyProfile tests ---
+
+    #[test]
+    fn test_profiles_default_empty() {
+        let config = FileConfig::default();
+        assert!(config.task.orchestrate.profiles.is_empty());
+    }
+
+    #[test]
+    fn test_profiles_backward_compat() {
+        // Existing .ralph.toml without profiles should still work
+        let toml_content = r#"
+[task.orchestrate]
+workers = 4
+verify_commands = ["cargo test"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert!(config.task.orchestrate.profiles.is_empty());
+        assert_eq!(config.task.orchestrate.verify_commands.len(), 1);
+    }
+
+    #[test]
+    fn test_profiles_single_profile() {
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "frontend"
+description = "Frontend tests"
+paths = ["src/ui/**/*.rs", "assets/**/*"]
+working_dir = "frontend"
+verify_commands = ["npm test", "npm run lint"]
+setup_commands = ["npm install"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 1);
+
+        let profile = &config.task.orchestrate.profiles[0];
+        assert_eq!(profile.name, "frontend");
+        assert_eq!(profile.description.as_deref(), Some("Frontend tests"));
+        assert_eq!(profile.paths, vec!["src/ui/**/*.rs", "assets/**/*"]);
+        assert_eq!(profile.working_dir.as_deref(), Some("frontend"));
+        assert_eq!(profile.verify_commands.len(), 2);
+        assert_eq!(profile.setup_commands.len(), 1);
+    }
+
+    #[test]
+    fn test_profiles_multiple_profiles() {
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "backend"
+paths = ["src/api/**/*.rs"]
+verify_commands = ["cargo test --package api"]
+
+[[task.orchestrate.profiles]]
+name = "database"
+description = "Database migrations"
+paths = ["migrations/**/*.sql"]
+verify_commands = ["sqlx migrate run"]
+setup_commands = ["sqlx database create"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 2);
+
+        let backend = &config.task.orchestrate.profiles[0];
+        assert_eq!(backend.name, "backend");
+        assert!(backend.description.is_none());
+        assert_eq!(backend.paths, vec!["src/api/**/*.rs"]);
+        assert!(backend.working_dir.is_none());
+        assert_eq!(backend.verify_commands.len(), 1);
+        assert!(backend.setup_commands.is_empty());
+
+        let database = &config.task.orchestrate.profiles[1];
+        assert_eq!(database.name, "database");
+        assert_eq!(database.description.as_deref(), Some("Database migrations"));
+        assert_eq!(database.paths, vec!["migrations/**/*.sql"]);
+        assert_eq!(database.verify_commands.len(), 1);
+        assert_eq!(database.setup_commands.len(), 1);
+    }
+
+    #[test]
+    fn test_profiles_mixed_command_formats() {
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "mixed"
+paths = ["**/*.rs"]
+verify_commands = [
+    "cargo fmt --check",
+    { command = "cargo test", name = "Tests", description = "Run test suite" }
+]
+setup_commands = [
+    "cargo build",
+    { run = "cp .env.example .env", name = "Setup env" }
+]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 1);
+
+        let profile = &config.task.orchestrate.profiles[0];
+        assert_eq!(profile.name, "mixed");
+        assert_eq!(profile.verify_commands.len(), 2);
+        assert_eq!(profile.setup_commands.len(), 2);
+
+        // Verify first command is simple
+        assert_eq!(profile.verify_commands[0].command(), "cargo fmt --check");
+        assert!(profile.verify_commands[0].name().is_none());
+
+        // Verify second command is detailed
+        assert_eq!(profile.verify_commands[1].command(), "cargo test");
+        assert_eq!(profile.verify_commands[1].name(), Some("Tests"));
+        assert_eq!(
+            profile.verify_commands[1].description(),
+            Some("Run test suite")
+        );
+
+        // Setup commands
+        assert_eq!(profile.setup_commands[0].command(), "cargo build");
+        assert_eq!(profile.setup_commands[1].command(), "cp .env.example .env");
+        assert_eq!(profile.setup_commands[1].label(), "Setup env");
+    }
+
+    #[test]
+    fn test_profiles_minimal_profile() {
+        // Profile with only required field (name)
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "minimal"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 1);
+
+        let profile = &config.task.orchestrate.profiles[0];
+        assert_eq!(profile.name, "minimal");
+        assert!(profile.description.is_none());
+        assert!(profile.paths.is_empty());
+        assert!(profile.working_dir.is_none());
+        assert!(profile.verify_commands.is_empty());
+        assert!(profile.setup_commands.is_empty());
+    }
+
+    #[test]
+    fn test_profiles_with_existing_verify_commands() {
+        // Profiles can coexist with global verify_commands
+        let toml_content = r#"
+[task.orchestrate]
+verify_commands = ["cargo test"]
+
+[[task.orchestrate.profiles]]
+name = "docs"
+paths = ["docs/**/*.md"]
+verify_commands = ["mdbook test"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        // Global verify_commands still work
+        assert_eq!(config.task.orchestrate.verify_commands.len(), 1);
+        assert_eq!(
+            config.task.orchestrate.verify_commands[0].command(),
+            "cargo test"
+        );
+        // Profile-specific verify_commands also work
+        assert_eq!(config.task.orchestrate.profiles.len(), 1);
+        assert_eq!(config.task.orchestrate.profiles[0].name, "docs");
+        assert_eq!(config.task.orchestrate.profiles[0].verify_commands.len(), 1);
+        assert_eq!(
+            config.task.orchestrate.profiles[0].verify_commands[0].command(),
+            "mdbook test"
+        );
+    }
+
+    // --- Task 40.4: Comprehensive profile parsing tests ---
+
+    #[test]
+    fn test_profile_empty_paths_allowed() {
+        // Profile with empty paths array is allowed
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "global-checks"
+description = "Global checks that run always"
+paths = []
+verify_commands = ["cargo fmt --check", "cargo clippy"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 1);
+
+        let profile = &config.task.orchestrate.profiles[0];
+        assert_eq!(profile.name, "global-checks");
+        assert_eq!(
+            profile.description.as_deref(),
+            Some("Global checks that run always")
+        );
+        assert!(profile.paths.is_empty());
+        assert_eq!(profile.verify_commands.len(), 2);
+    }
+
+    #[test]
+    fn test_profile_with_working_dir() {
+        // Profile with working_dir for running commands in specific directory
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "api"
+paths = ["api/**/*.rs"]
+working_dir = "api"
+verify_commands = ["cargo test"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 1);
+
+        let profile = &config.task.orchestrate.profiles[0];
+        assert_eq!(profile.name, "api");
+        assert_eq!(profile.working_dir.as_deref(), Some("api"));
+        assert_eq!(profile.paths, vec!["api/**/*.rs"]);
+        assert_eq!(profile.verify_commands.len(), 1);
+    }
+
+    #[test]
+    fn test_profile_setup_commands_detailed_format() {
+        // Profile with setup commands using detailed format with name
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "frontend"
+paths = ["frontend/**/*.ts"]
+
+[[task.orchestrate.profiles.setup_commands]]
+run = "npm install"
+name = "Install dependencies"
+
+[[task.orchestrate.profiles.setup_commands]]
+run = "npm run build:dev"
+name = "Build for development"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 1);
+
+        let profile = &config.task.orchestrate.profiles[0];
+        assert_eq!(profile.name, "frontend");
+        assert_eq!(profile.setup_commands.len(), 2);
+
+        // First command
+        assert_eq!(profile.setup_commands[0].command(), "npm install");
+        assert_eq!(profile.setup_commands[0].label(), "Install dependencies");
+
+        // Second command
+        assert_eq!(profile.setup_commands[1].command(), "npm run build:dev");
+        assert_eq!(profile.setup_commands[1].label(), "Build for development");
+    }
+
+    #[test]
+    fn test_profile_verify_commands_detailed_format() {
+        // Profile with verify commands using detailed format
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "backend"
+paths = ["src/api/**/*.rs"]
+
+[[task.orchestrate.profiles.verify_commands]]
+command = "cargo test --package api"
+name = "API tests"
+description = "Run all API unit tests"
+
+[[task.orchestrate.profiles.verify_commands]]
+command = "cargo clippy --package api -- -D warnings"
+name = "API lint"
+description = "Check API code with clippy"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 1);
+
+        let profile = &config.task.orchestrate.profiles[0];
+        assert_eq!(profile.name, "backend");
+        assert_eq!(profile.verify_commands.len(), 2);
+
+        // First command
+        assert_eq!(
+            profile.verify_commands[0].command(),
+            "cargo test --package api"
+        );
+        assert_eq!(profile.verify_commands[0].name(), Some("API tests"));
+        assert_eq!(
+            profile.verify_commands[0].description(),
+            Some("Run all API unit tests")
+        );
+
+        // Second command
+        assert_eq!(
+            profile.verify_commands[1].command(),
+            "cargo clippy --package api -- -D warnings"
+        );
+        assert_eq!(profile.verify_commands[1].name(), Some("API lint"));
+        assert_eq!(
+            profile.verify_commands[1].description(),
+            Some("Check API code with clippy")
+        );
+    }
+
+    #[test]
+    fn test_profile_with_all_fields() {
+        // Profile with all possible fields populated
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "comprehensive"
+description = "Comprehensive test profile"
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+working_dir = "workspace"
+verify_commands = [
+    { command = "cargo test", name = "Tests", description = "Run tests" },
+    "cargo fmt --check"
+]
+setup_commands = [
+    { run = "cargo build", name = "Build" },
+    "cp .env.example .env"
+]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 1);
+
+        let profile = &config.task.orchestrate.profiles[0];
+        assert_eq!(profile.name, "comprehensive");
+        assert_eq!(
+            profile.description.as_deref(),
+            Some("Comprehensive test profile")
+        );
+        assert_eq!(profile.paths, vec!["src/**/*.rs", "tests/**/*.rs"]);
+        assert_eq!(profile.working_dir.as_deref(), Some("workspace"));
+        assert_eq!(profile.verify_commands.len(), 2);
+        assert_eq!(profile.setup_commands.len(), 2);
+
+        // Verify mixed command formats work
+        assert_eq!(profile.verify_commands[0].name(), Some("Tests"));
+        assert!(profile.verify_commands[1].name().is_none());
+        assert_eq!(profile.setup_commands[0].label(), "Build");
+        assert_eq!(profile.setup_commands[1].label(), "cp .env.example .env");
+    }
+
+    #[test]
+    fn test_multiple_profiles_different_configurations() {
+        // Multiple profiles with varying configurations
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "basic"
+paths = ["src/**/*.rs"]
+verify_commands = ["cargo test"]
+
+[[task.orchestrate.profiles]]
+name = "detailed"
+description = "Detailed profile"
+paths = ["api/**/*.rs"]
+working_dir = "api"
+verify_commands = [
+    { command = "cargo test --package api", name = "API Tests" }
+]
+setup_commands = ["npm install"]
+
+[[task.orchestrate.profiles]]
+name = "minimal"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 3);
+
+        // Basic profile
+        let basic = &config.task.orchestrate.profiles[0];
+        assert_eq!(basic.name, "basic");
+        assert!(basic.description.is_none());
+        assert_eq!(basic.paths, vec!["src/**/*.rs"]);
+        assert!(basic.working_dir.is_none());
+        assert_eq!(basic.verify_commands.len(), 1);
+        assert!(basic.setup_commands.is_empty());
+
+        // Detailed profile
+        let detailed = &config.task.orchestrate.profiles[1];
+        assert_eq!(detailed.name, "detailed");
+        assert_eq!(detailed.description.as_deref(), Some("Detailed profile"));
+        assert_eq!(detailed.paths, vec!["api/**/*.rs"]);
+        assert_eq!(detailed.working_dir.as_deref(), Some("api"));
+        assert_eq!(detailed.verify_commands.len(), 1);
+        assert_eq!(detailed.setup_commands.len(), 1);
+
+        // Minimal profile
+        let minimal = &config.task.orchestrate.profiles[2];
+        assert_eq!(minimal.name, "minimal");
+        assert!(minimal.description.is_none());
+        assert!(minimal.paths.is_empty());
+        assert!(minimal.working_dir.is_none());
+        assert!(minimal.verify_commands.is_empty());
+        assert!(minimal.setup_commands.is_empty());
+    }
+
+    #[test]
+    fn test_profile_without_paths_field() {
+        // Profile where paths field is omitted entirely (not just empty array)
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "no-paths"
+description = "Profile without paths field"
+verify_commands = ["cargo test --all"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.profiles.len(), 1);
+
+        let profile = &config.task.orchestrate.profiles[0];
+        assert_eq!(profile.name, "no-paths");
+        assert_eq!(
+            profile.description.as_deref(),
+            Some("Profile without paths field")
+        );
+        assert!(profile.paths.is_empty()); // Should default to empty vec
+        assert_eq!(profile.verify_commands.len(), 1);
+    }
+
+    // ── Task 53.4: Test duplikaty nazw profili w .ralph.toml ──
+
+    #[test]
+    fn test_profiles_duplicate_names_parsing() {
+        // Dwa profile z tą samą nazwą "frontend" — Vec<VerifyProfile> dopuszcza duplikaty
+        let toml_content = r#"
+[[task.orchestrate.profiles]]
+name = "frontend"
+description = "First frontend profile"
+paths = ["src/ui/**/*.ts"]
+verify_commands = ["npm test"]
+
+[[task.orchestrate.profiles]]
+name = "frontend"
+description = "Second frontend profile"
+paths = ["src/components/**/*.tsx"]
+verify_commands = ["npm run lint"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+
+        // Vec dopuszcza duplikaty — oba profile są sparsowane
+        assert_eq!(
+            config.task.orchestrate.profiles.len(),
+            2,
+            "Vec<VerifyProfile> powinien zawierać oba profile (duplikaty nazw są dozwolone)"
+        );
+
+        // Pierwszy profil
+        let profile1 = &config.task.orchestrate.profiles[0];
+        assert_eq!(profile1.name, "frontend");
+        assert_eq!(
+            profile1.description.as_deref(),
+            Some("First frontend profile")
+        );
+        assert_eq!(profile1.paths, vec!["src/ui/**/*.ts"]);
+        assert_eq!(profile1.verify_commands.len(), 1);
+
+        // Drugi profil (duplikat nazwy)
+        let profile2 = &config.task.orchestrate.profiles[1];
+        assert_eq!(profile2.name, "frontend");
+        assert_eq!(
+            profile2.description.as_deref(),
+            Some("Second frontend profile")
+        );
+        assert_eq!(profile2.paths, vec!["src/components/**/*.tsx"]);
+        assert_eq!(profile2.verify_commands.len(), 1);
+    }
+
+    // --- format_profiles_info tests ---
+
+    #[test]
+    fn test_format_profiles_info_empty() {
+        // Empty profiles slice should return empty string
+        let result = format_profiles_info(&[]);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_format_profiles_info_single_profile() {
+        // Single profile with all fields
+        let profile = VerifyProfile {
+            name: "frontend".to_string(),
+            description: Some("Frontend tests".to_string()),
+            paths: vec!["src/ui/**/*.rs".to_string(), "assets/**/*".to_string()],
+            working_dir: Some("frontend".to_string()),
+            verify_commands: vec![
+                VerifyCommand::Simple("npm test".to_string()),
+                VerifyCommand::Detailed {
+                    command: "npm run lint".to_string(),
+                    name: Some("Lint".to_string()),
+                    description: None,
+                },
+            ],
+            setup_commands: vec![SetupCommand::Simple("npm install".to_string())],
+        };
+
+        let result = format_profiles_info(&[profile]);
+        let expected = "- **frontend**: Frontend tests
+  paths: [src/ui/**/*.rs, assets/**/*]
+  verify: [npm test, Lint]
+  setup: [npm install]
+  working_dir: frontend
+";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_format_profiles_info_multiple_profiles() {
+        // Multiple profiles with varying configurations
+        let profiles = vec![
+            VerifyProfile {
+                name: "backend".to_string(),
+                description: None,
+                paths: vec!["src/api/**/*.rs".to_string()],
+                working_dir: None,
+                verify_commands: vec![VerifyCommand::Simple(
+                    "cargo test --package api".to_string(),
+                )],
+                setup_commands: vec![],
+            },
+            VerifyProfile {
+                name: "database".to_string(),
+                description: Some("Database migrations".to_string()),
+                paths: vec!["migrations/**/*.sql".to_string()],
+                working_dir: Some("db".to_string()),
+                verify_commands: vec![VerifyCommand::Simple("sqlx migrate run".to_string())],
+                setup_commands: vec![SetupCommand::Detailed {
+                    run: "sqlx database create".to_string(),
+                    name: Some("Create DB".to_string()),
+                }],
+            },
+        ];
+
+        let result = format_profiles_info(&profiles);
+        let expected = "- **backend**
+  paths: [src/api/**/*.rs]
+  verify: [cargo test --package api]
+
+- **database**: Database migrations
+  paths: [migrations/**/*.sql]
+  verify: [sqlx migrate run]
+  setup: [Create DB]
+  working_dir: db
+";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_format_profiles_info_profile_without_optional_fields() {
+        // Profile with only required field (name)
+        let profile = VerifyProfile {
+            name: "minimal".to_string(),
+            description: None,
+            paths: vec![],
+            working_dir: None,
+            verify_commands: vec![],
+            setup_commands: vec![],
+        };
+
+        let result = format_profiles_info(&[profile]);
+        let expected = "- **minimal**\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_format_profiles_info_mixed_command_formats() {
+        // Profile with mixed simple and detailed commands
+        let profile = VerifyProfile {
+            name: "mixed".to_string(),
+            description: Some("Mixed command formats".to_string()),
+            paths: vec!["**/*.rs".to_string()],
+            working_dir: None,
+            verify_commands: vec![
+                VerifyCommand::Simple("cargo fmt --check".to_string()),
+                VerifyCommand::Detailed {
+                    command: "cargo test".to_string(),
+                    name: Some("Tests".to_string()),
+                    description: Some("Run test suite".to_string()),
+                },
+                VerifyCommand::Detailed {
+                    command: "cargo clippy".to_string(),
+                    name: None, // Falls back to command as label
+                    description: None,
+                },
+            ],
+            setup_commands: vec![
+                SetupCommand::Simple("cargo build".to_string()),
+                SetupCommand::Detailed {
+                    run: "cp .env.example .env".to_string(),
+                    name: Some("Setup env".to_string()),
+                },
+            ],
+        };
+
+        let result = format_profiles_info(&[profile]);
+        let expected = "- **mixed**: Mixed command formats
+  paths: [**/*.rs]
+  verify: [cargo fmt --check, Tests, cargo clippy]
+  setup: [cargo build, Setup env]
+";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_format_profiles_info_no_paths_no_commands() {
+        // Profile with description but no paths or commands
+        let profile = VerifyProfile {
+            name: "empty-profile".to_string(),
+            description: Some("Profile with only description".to_string()),
+            paths: vec![],
+            working_dir: None,
+            verify_commands: vec![],
+            setup_commands: vec![],
+        };
+
+        let result = format_profiles_info(&[profile]);
+        let expected = "- **empty-profile**: Profile with only description\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_format_profiles_info_single_path_and_command() {
+        // Profile with single path and single command
+        let profile = VerifyProfile {
+            name: "simple".to_string(),
+            description: None,
+            paths: vec!["src/main.rs".to_string()],
+            working_dir: None,
+            verify_commands: vec![VerifyCommand::Simple("cargo build".to_string())],
+            setup_commands: vec![],
+        };
+
+        let result = format_profiles_info(&[profile]);
+        let expected = "- **simple**
+  paths: [src/main.rs]
+  verify: [cargo build]
+";
+        assert_eq!(result, expected);
+    }
+
+    // ── Task 48.2: Backward compatibility tests (config without profiles) ──
+
+    /// Test parsing .ralph.toml without [task.orchestrate.profiles] section.
+    /// Should default to empty profiles vec, preserving pre-profiles behavior.
+    #[test]
+    fn test_orchestrate_config_backward_compat_no_profiles() {
+        let toml_content = r#"
+[task.orchestrate]
+workers = 4
+verify_commands = ["cargo test", "cargo clippy"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.workers, 4);
+        assert_eq!(config.task.orchestrate.verify_commands.len(), 2);
+        // Profiles should default to empty vec
+        assert!(
+            config.task.orchestrate.profiles.is_empty(),
+            "Config without profiles section should have empty profiles vec"
+        );
+    }
+
+    /// Test that global verify_commands still work without profiles.
+    #[test]
+    fn test_orchestrate_config_global_verify_commands_without_profiles() {
+        let toml_content = r#"
+[task.orchestrate]
+verify_commands = ["cargo test", "cargo fmt --check"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        // Global verify_commands should work as before
+        assert_eq!(config.task.orchestrate.verify_commands.len(), 2);
+        assert_eq!(
+            config.task.orchestrate.verify_commands[0].command(),
+            "cargo test"
+        );
+        assert_eq!(
+            config.task.orchestrate.verify_commands[1].command(),
+            "cargo fmt --check"
+        );
+        // Profiles should be empty
+        assert!(config.task.orchestrate.profiles.is_empty());
+    }
+
+    /// Test minimal .ralph.toml without any orchestrate settings.
+    #[test]
+    fn test_orchestrate_config_minimal_toml() {
+        let toml_content = r#"
+[prompt]
+prefix = "test"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        // Should have all defaults
+        assert_eq!(config.task.orchestrate.workers, 2);
+        assert!(config.task.orchestrate.verify_commands.is_empty());
+        assert!(config.task.orchestrate.profiles.is_empty());
+    }
+
+    /// Test empty .ralph.toml (completely empty file).
+    #[test]
+    fn test_orchestrate_config_empty_toml() {
+        let config: FileConfig = toml::from_str("").unwrap();
+        // Should have all defaults
+        assert_eq!(config.task.orchestrate.workers, 2);
+        assert_eq!(config.task.orchestrate.max_retries, 3);
+        assert!(config.task.orchestrate.verify_commands.is_empty());
+        assert!(config.task.orchestrate.profiles.is_empty());
+    }
+
+    /// Test that profiles field is truly optional (omitted vs empty array).
+    #[test]
+    fn test_orchestrate_config_profiles_field_omitted_vs_empty() {
+        // Omitted profiles field
+        let toml_omitted = r#"
+[task.orchestrate]
+workers = 2
+"#;
+        let config_omitted: FileConfig = toml::from_str(toml_omitted).unwrap();
+        assert!(config_omitted.task.orchestrate.profiles.is_empty());
+
+        // Explicit empty profiles array
+        let toml_empty = r#"
+[task.orchestrate]
+workers = 2
+profiles = []
+"#;
+        let config_empty: FileConfig = toml::from_str(toml_empty).unwrap();
+        assert!(config_empty.task.orchestrate.profiles.is_empty());
+
+        // Both should behave identically
+        assert_eq!(
+            config_omitted.task.orchestrate.profiles.len(),
+            config_empty.task.orchestrate.profiles.len()
+        );
+    }
+
+    /// Test: .ralph.toml with unknown sections and fields — should be ignored gracefully.
+    /// Serde without deny_unknown_fields silently ignores unknown top-level sections
+    /// and unknown fields in known sections.
+    #[test]
+    fn test_toml_with_unknown_section_and_fields_ignored() {
+        let toml_content = r#"
+[prompt]
+prefix = "Test prefix"
+suffix = "Test suffix"
+
+[unknown_section]
+unknown_key = "This should be ignored"
+another_unknown = 42
+
+[task]
+progress_file = "CUSTOM_PROGRESS.md"
+tasks_file = "CUSTOM_TASKS.yml"
+unknown_field_in_task = "This should also be ignored"
+
+[task.orchestrate]
+workers = 5
+max_retries = 7
+unknown_orchestrate_field = "Ignored too"
+"#;
+        // Should parse successfully without error
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+
+        // Verify known fields were parsed correctly
+        assert_eq!(
+            config.prompt.prefix.as_deref(),
+            Some("Test prefix"),
+            "Known prompt.prefix should be parsed"
+        );
+        assert_eq!(
+            config.prompt.suffix.as_deref(),
+            Some("Test suffix"),
+            "Known prompt.suffix should be parsed"
+        );
+        assert_eq!(
+            config.task.progress_file,
+            std::path::PathBuf::from("CUSTOM_PROGRESS.md"),
+            "Known task.progress_file should be parsed"
+        );
+        assert_eq!(
+            config.task.tasks_file,
+            std::path::PathBuf::from("CUSTOM_TASKS.yml"),
+            "Known task.tasks_file should be parsed"
+        );
+        assert_eq!(
+            config.task.orchestrate.workers, 5,
+            "Known task.orchestrate.workers should be parsed"
+        );
+        assert_eq!(
+            config.task.orchestrate.max_retries, 7,
+            "Known task.orchestrate.max_retries should be parsed"
+        );
+
+        // Unknown sections and fields should simply be ignored
+        // (their absence in the config struct proves they were not deserialized)
+    }
+
+    // ── Task 53.1: workers=0 validation tests ──────────────────────────
+
+    #[test]
+    fn test_workers_zero_parsing_succeeds() {
+        // workers=0 parses as u32 without error — no validation at config level
+        let toml_content = r#"
+[task.orchestrate]
+workers = 0
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.task.orchestrate.workers, 0);
+    }
+
+    #[test]
+    fn test_workers_zero_vs_omitted_field() {
+        // Explicit workers=0 vs omitted field (default=2) — different behavior
+        let config_zero: FileConfig = toml::from_str(
+            r#"
+[task.orchestrate]
+workers = 0
+"#,
+        )
+        .unwrap();
+        assert_eq!(config_zero.task.orchestrate.workers, 0);
+
+        let config_omitted: FileConfig = toml::from_str(
+            r#"
+[task.orchestrate]
+max_retries = 3
+"#,
+        )
+        .unwrap();
+        assert_eq!(config_omitted.task.orchestrate.workers, 2);
+    }
+
+    /// Test: Empty [task.orchestrate] section without any fields.
+    /// Serde with #[serde(default)] should fill all fields with default values.
+    #[test]
+    fn test_empty_orchestrate_section_uses_defaults() {
+        let toml_content = r#"
+[task.orchestrate]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+
+        // All orchestrate fields should have their default values
+        assert_eq!(
+            config.task.orchestrate.workers, 2,
+            "Empty [task.orchestrate] should use default workers=2"
+        );
+        assert_eq!(
+            config.task.orchestrate.max_retries, 3,
+            "Empty [task.orchestrate] should use default max_retries=3"
+        );
+        assert!(
+            config.task.orchestrate.worktree_prefix.is_none(),
+            "Empty [task.orchestrate] should have default worktree_prefix=None"
+        );
+        assert!(
+            config.task.orchestrate.default_model.is_none(),
+            "Empty [task.orchestrate] should have default default_model=None"
+        );
+        assert!(
+            config.task.orchestrate.verify_commands.is_empty(),
+            "Empty [task.orchestrate] should have default verify_commands=[]"
+        );
+        assert!(
+            config.task.orchestrate.setup_commands.is_empty(),
+            "Empty [task.orchestrate] should have default setup_commands=[]"
+        );
+        assert!(
+            config.task.orchestrate.conflict_resolution_model.is_none(),
+            "Empty [task.orchestrate] should have default conflict_resolution_model=None"
+        );
+        assert_eq!(
+            config.task.orchestrate.watchdog_interval_secs, 10,
+            "Empty [task.orchestrate] should use default watchdog_interval_secs=10"
+        );
+        assert_eq!(
+            config.task.orchestrate.phase_timeout_minutes, 30,
+            "Empty [task.orchestrate] should use default phase_timeout_minutes=30"
+        );
+        assert_eq!(
+            config.task.orchestrate.git_timeout_secs, 120,
+            "Empty [task.orchestrate] should use default git_timeout_secs=120"
+        );
+        assert_eq!(
+            config.task.orchestrate.setup_timeout_secs, 300,
+            "Empty [task.orchestrate] should use default setup_timeout_secs=300"
+        );
+        assert_eq!(
+            config.task.orchestrate.merge_timeout_minutes, 15,
+            "Empty [task.orchestrate] should use default merge_timeout_minutes=15"
+        );
+        assert!(
+            config.task.orchestrate.review_model.is_none(),
+            "Empty [task.orchestrate] should have default review_model=None"
+        );
+        assert!(
+            config.task.orchestrate.profiles.is_empty(),
+            "Empty [task.orchestrate] should have default profiles=[]"
+        );
+    }
+
+    // ── Task 53.5: Negative timeout values — parse error ────────────────
+
+    /// Test: .ralph.toml z ujemnym phase_timeout_minutes — error
+    /// Typ u32 odrzuci ujemną wartość na etapie parsowania.
+    /// Sprawdzamy czytelność error message.
+    #[test]
+    fn test_negative_phase_timeout_minutes_parse_error() {
+        let toml_content = r#"
+[task.orchestrate]
+phase_timeout_minutes = -1
+"#;
+        let result = toml::from_str::<FileConfig>(toml_content);
+
+        assert!(
+            result.is_err(),
+            "Expected parsing error for negative phase_timeout_minutes"
+        );
+
+        // Error message powinien jasno wskazywać problem z typem
+        // np. "invalid value: integer `-1`, expected u32"
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("invalid value") && err_msg.contains("expected u32"),
+            "Error message should mention both invalid value and expected type. Got: {}",
+            err_msg
         );
     }
 }

@@ -1,0 +1,5 @@
+---
+source: src/commands/mcp/tui/choice_select.rs
+expression: snapshot
+---
+> Other  type your answer

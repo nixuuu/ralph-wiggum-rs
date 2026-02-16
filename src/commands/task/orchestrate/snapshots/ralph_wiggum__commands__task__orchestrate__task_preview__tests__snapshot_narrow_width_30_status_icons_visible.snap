@@ -1,0 +1,18 @@
+---
+source: src/commands/task/orchestrate/task_preview.rs
+expression: snapshot
+---
+╔ Task List (p to close, ↑↓ t╗
+║✓ 1: Done task [api]        ║
+║● 2: In progress [ui]       ║
+║○ 3: Todo task [test]       ║
+║✗ 4: Blocked [infra]        ║
+║                            ║
+║                            ║
+║                            ║
+║                            ║
+║                            ║
+║                            ║
+║                            ║
+║                            ║
+╚════════════════════════════╝

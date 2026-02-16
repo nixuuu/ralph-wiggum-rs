@@ -1,5 +1,6 @@
 use crate::commands::task::orchestrate::state::Lockfile;
 use crate::commands::task::orchestrate::worktree::WorktreeManager;
+use crate::diag_warn;
 use crate::shared::error::Result;
 use crate::shared::file_config::FileConfig;
 
@@ -14,8 +15,8 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
     // Safety check: don't clean if there's an active session
     let lock_path = ralph_dir.join("orchestrate.lock");
     if lock_path.exists() && !Lockfile::is_stale(&lock_path) {
-        eprintln!("Active orchestration session detected (lockfile is fresh).");
-        eprintln!("Wait for the session to complete or remove the lock manually.");
+        println!("Active orchestration session detected (lockfile is fresh).");
+        println!("Wait for the session to complete or remove the lock manually.");
         return Ok(());
     }
 
@@ -36,38 +37,41 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
     let has_lock = lock_path.exists();
 
     if orphans.is_empty() && !has_state && !has_logs && !has_lock {
-        eprintln!("Nothing to clean up.");
+        println!("Nothing to clean up.");
         return Ok(());
     }
 
     // Display findings
-    eprintln!("Found orchestration resources to clean:\n");
+    println!("Found orchestration resources to clean:\n");
 
     if !orphans.is_empty() {
-        eprintln!("  Worktrees ({}):", orphans.len());
+        println!("  Worktrees ({}):", orphans.len());
         for orphan in &orphans {
-            eprintln!("    {} (branch: {})", orphan.path.display(), orphan.branch);
+            println!("    {} (branch: {})", orphan.path.display(), orphan.branch);
         }
     }
 
     if has_state {
-        eprintln!("  State file: {}", state_path.display());
+        println!("  State file: {}", state_path.display());
     }
     if has_logs {
         let log_count = std::fs::read_dir(&log_dir).map(|d| d.count()).unwrap_or(0);
-        eprintln!("  Log files: {} in {}", log_count, log_dir.display());
+        println!("  Log files: {} in {}", log_count, log_dir.display());
     }
     if has_lock {
-        eprintln!("  Stale lockfile: {}", lock_path.display());
+        println!("  Stale lockfile: {}", lock_path.display());
     }
 
-    eprintln!("\nCleaning up...\n");
+    println!("\nCleaning up...\n");
 
     // Clean worktrees
     for orphan in &orphans {
         match worktree_mgr.remove_worktree(&orphan.path).await {
-            Ok(()) => eprintln!("  Removed worktree: {}", orphan.path.display()),
-            Err(e) => eprintln!("  Failed to remove worktree {}: {e}", orphan.path.display()),
+            Ok(()) => println!("  Removed worktree: {}", orphan.path.display()),
+            Err(e) => {
+                diag_warn!("Failed to remove worktree {}: {}", orphan.path.display(), e);
+                println!("  Failed to remove worktree {}: {e}", orphan.path.display());
+            }
         }
         // Also remove the branch
         worktree_mgr.remove_branch(&orphan.branch).await.ok();
@@ -79,21 +83,21 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
     // Clean state files
     if has_state {
         std::fs::remove_file(&state_path).ok();
-        eprintln!("  Removed state file");
+        println!("  Removed state file");
     }
 
     // Clean logs
     if has_logs {
         std::fs::remove_dir_all(&log_dir).ok();
-        eprintln!("  Removed log directory");
+        println!("  Removed log directory");
     }
 
     // Clean stale lock
     if has_lock {
         std::fs::remove_file(&lock_path).ok();
-        eprintln!("  Removed stale lockfile");
+        println!("  Removed stale lockfile");
     }
 
-    eprintln!("\nCleanup complete.");
+    println!("\nCleanup complete.");
     Ok(())
 }

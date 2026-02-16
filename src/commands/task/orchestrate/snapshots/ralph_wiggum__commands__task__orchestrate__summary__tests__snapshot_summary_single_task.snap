@@ -1,0 +1,13 @@
+---
+source: src/commands/task/orchestrate/summary.rs
+expression: normalized
+---
+┌───────┬──────────┬──────────┬──────────┬─────────┐
+│ Task  │ Status   │ Cost     │ Time     │ Retries │
+├───────┼──────────┼──────────┼──────────┼─────────┤
+│ 1.2   │ Done     │ $0.0400  │ 45s      │ 0       │
+├───────┼──────────┼──────────┼──────────┼─────────┤
+│ TOTAL │ 1/1 done │ $0.0400  │ 45s      │         │
+└───────┴──────────┴──────────┴──────────┴─────────┘
+
+Parallelism speedup: 1.0x (sum of task times / wall clock)

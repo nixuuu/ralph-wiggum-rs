@@ -10,7 +10,11 @@ use crate::templates;
 
 pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
     // Resolve input
-    let input = resolve_input(args.file.as_ref(), args.prompt.as_deref())?;
+    let input = resolve_input(
+        args.file.as_ref(),
+        args.prompt.as_deref(),
+        Some("Opisz wymagania projektu (PRD)..."),
+    )?;
 
     // Determine output dir
     let output_dir = args

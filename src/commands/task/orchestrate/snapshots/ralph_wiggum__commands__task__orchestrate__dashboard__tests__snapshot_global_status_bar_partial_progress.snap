@@ -1,0 +1,7 @@
+---
+source: src/commands/task/orchestrate/dashboard.rs
+expression: snapshot
+---
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ [██████░░░░░░░░░░░░░░] 3/10 (30%) │ $0.8423 │ $0.2808/task │ ⏱ 5m0s │ W 2/3
+ Queue: 2 ready │ 2 wip │ 1 blocked │ 2 pending  │  Focus: W1    q Tab ↑↓ Esc p=tasks r=reload R=restart

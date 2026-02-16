@@ -3,7 +3,7 @@ use std::io::{self, Stdout};
 use ansi_to_tui::IntoText;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::{
-    Terminal, Viewport,
+    Frame, Terminal, Viewport,
     backend::CrosstermBackend,
     buffer::Buffer,
     layout::Rect,
@@ -88,6 +88,89 @@ impl StatusData {
         spans.push(Span::raw(cost_text.trim_start_matches('$').to_string()));
 
         Line::from(spans)
+    }
+
+    /// Render status data to a ratatui Frame.
+    ///
+    /// Shared rendering logic used by both StatusTerminal::update() and tests.
+    /// For height >= 3 with task_progress: 3-line layout (metrics | task | gauge).
+    /// Otherwise: single-line metrics.
+    pub(crate) fn draw(&self, frame: &mut Frame, nerd_font: bool, height: u16) {
+        let area = frame.area();
+
+        if height >= 3
+            && let Some(ref tp) = self.task_progress
+        {
+            // 3-line layout: metrics | current task | gauge
+            let chunks = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+            // Line 1: existing status metrics
+            let line1 = self.to_line(nerd_font);
+            let p1 = Paragraph::new(line1);
+            frame.render_widget(p1, chunks[0]);
+
+            // Line 2: current task info + speed/ETA
+            let mut task_line = tp.to_status_line();
+            if let Some(ref speed) = self.speed_text {
+                task_line.spans.push(Span::raw(" │ "));
+                task_line.spans.push(Span::styled(
+                    format!("{} {}", icons::status_speed(nerd_font), speed),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            if let Some(ref eta) = self.eta_text {
+                task_line.spans.push(Span::raw(" "));
+                task_line.spans.push(Span::styled(
+                    format!("ETA {}", eta),
+                    Style::default().fg(Color::Cyan),
+                ));
+            }
+            let p2 = Paragraph::new(task_line);
+            frame.render_widget(p2, chunks[1]);
+
+            // Line 3: gauge progress bar
+            let ratio = if tp.total > 0 {
+                tp.done as f64 / tp.total as f64
+            } else {
+                0.0
+            };
+            let label = if let Some(ref eta) = self.eta_text {
+                format!(
+                    "{}/{} ({}%) | ETA {}",
+                    tp.done,
+                    tp.total,
+                    (ratio * 100.0).round() as u32,
+                    eta
+                )
+            } else {
+                format!(
+                    "{}/{} ({}%)",
+                    tp.done,
+                    tp.total,
+                    (ratio * 100.0).round() as u32
+                )
+            };
+            let gauge = Gauge::default()
+                .ratio(ratio)
+                .label(label)
+                .gauge_style(Style::default().fg(Color::Green).bg(Color::DarkGray))
+                .style(Style::default().fg(Color::White));
+            frame.render_widget(gauge, chunks[2]);
+
+            strip_trailing_spaces(frame.buffer_mut());
+            return;
+        }
+
+        // Default: single line
+        let line = self.to_line(nerd_font);
+        let paragraph = Paragraph::new(line);
+        frame.render_widget(paragraph, area);
+        strip_trailing_spaces(frame.buffer_mut());
     }
 
     /// Build version spans for inline display
@@ -205,81 +288,7 @@ impl StatusTerminal {
         let nf = self.use_nerd_font;
         let height = self.height;
         self.terminal.draw(|frame| {
-            let area = frame.area();
-
-            if height >= 3
-                && let Some(ref tp) = status.task_progress
-            {
-                // 3-line layout: metrics | current task | gauge
-                let chunks = Layout::vertical([
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                ])
-                .split(area);
-
-                // Line 1: existing status metrics
-                let line1 = status.to_line(nf);
-                let p1 = Paragraph::new(line1);
-                frame.render_widget(p1, chunks[0]);
-
-                // Line 2: current task info + speed/ETA
-                let mut task_line = tp.to_status_line();
-                if let Some(ref speed) = status.speed_text {
-                    task_line.spans.push(Span::raw(" │ "));
-                    task_line.spans.push(Span::styled(
-                        format!("{} {}", icons::status_speed(nf), speed),
-                        Style::default().fg(Color::Yellow),
-                    ));
-                }
-                if let Some(ref eta) = status.eta_text {
-                    task_line.spans.push(Span::raw(" "));
-                    task_line.spans.push(Span::styled(
-                        format!("ETA {}", eta),
-                        Style::default().fg(Color::Cyan),
-                    ));
-                }
-                let p2 = Paragraph::new(task_line);
-                frame.render_widget(p2, chunks[1]);
-
-                // Line 3: gauge progress bar
-                let ratio = if tp.total > 0 {
-                    tp.done as f64 / tp.total as f64
-                } else {
-                    0.0
-                };
-                let label = if let Some(ref eta) = status.eta_text {
-                    format!(
-                        "{}/{} ({}%) | ETA {}",
-                        tp.done,
-                        tp.total,
-                        (ratio * 100.0).round() as u32,
-                        eta
-                    )
-                } else {
-                    format!(
-                        "{}/{} ({}%)",
-                        tp.done,
-                        tp.total,
-                        (ratio * 100.0).round() as u32
-                    )
-                };
-                let gauge = Gauge::default()
-                    .ratio(ratio)
-                    .label(label)
-                    .gauge_style(Style::default().fg(Color::Green).bg(Color::DarkGray))
-                    .style(Style::default().fg(Color::White));
-                frame.render_widget(gauge, chunks[2]);
-
-                strip_trailing_spaces(frame.buffer_mut());
-                return;
-            }
-
-            // Default: single line
-            let line = status.to_line(nf);
-            let paragraph = Paragraph::new(line);
-            frame.render_widget(paragraph, area);
-            strip_trailing_spaces(frame.buffer_mut());
+            status.draw(frame, nf, height);
         })?;
 
         Ok(())
@@ -478,5 +487,496 @@ fn strip_trailing_spaces(buf: &mut Buffer) {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::snap;
+    use ratatui::backend::TestBackend;
+
+    /// Helper do renderowania statusu do bufora testowego.
+    ///
+    /// Wywołuje StatusData::draw() — tę samą logikę co produkcyjne StatusTerminal::update().
+    /// Dla height=1: single-line metryki. Dla height=3: metryki + task progress + gauge.
+    fn render_status_to_buffer(
+        status: &StatusData,
+        width: u16,
+        height: u16,
+        nerd_font: bool,
+    ) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("Failed to create test terminal");
+
+        terminal
+            .draw(|frame| {
+                status.draw(frame, nerd_font, height);
+            })
+            .expect("Failed to draw widget");
+
+        terminal.backend().buffer().clone()
+    }
+
+    /// Test snapshot: status bar z domyślnymi metrykami (iteracja 1, 0 tokenów)
+    #[test]
+    fn test_snapshot_default_metrics() {
+        let status = StatusData {
+            iteration: 1,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: None,
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 80, 1, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 1 │ [t] 0.0s │ ↓ 0 ↑ 0 │ $0.0000");
+    }
+
+    /// Test snapshot: status bar z aktywnymi metrykami (iteracja 5, 15k tokenów, $0.42)
+    #[test]
+    fn test_snapshot_active_metrics() {
+        let status = StatusData {
+            iteration: 5,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 42.7,
+            input_tokens: 15234,
+            output_tokens: 8976,
+            cost_usd: 0.4231,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: None,
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 80, 1, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 5 │ [t] 42.7s │ ↓ 15.2k ↑ 9.0k │ $0.4231");
+    }
+
+    /// Test snapshot: status bar z UpdateState::Completed (update gotowy do użycia)
+    #[test]
+    fn test_snapshot_update_completed() {
+        let status = StatusData {
+            iteration: 3,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 12.3,
+            input_tokens: 5000,
+            output_tokens: 3000,
+            cost_usd: 0.15,
+            update_info: Some(UpdateInfo {
+                update_available: true,
+                latest_version: "0.2.0".to_string(),
+            }),
+            update_state: UpdateState::Completed,
+            task_progress: None,
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 100, 1, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 -> 0.2.0 restart to apply │ Iter 3 │ [t] 12.3s │ ↓ 5.0k ↑ 3.0k │ $0.1500");
+    }
+
+    /// Test snapshot: status bar z UpdateState::Failed (błąd podczas update)
+    #[test]
+    fn test_snapshot_update_failed() {
+        let status = StatusData {
+            iteration: 2,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 8.5,
+            input_tokens: 2000,
+            output_tokens: 1500,
+            cost_usd: 0.08,
+            update_info: Some(UpdateInfo {
+                update_available: true,
+                latest_version: "0.3.0".to_string(),
+            }),
+            update_state: UpdateState::Failed,
+            task_progress: None,
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 100, 1, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 -> 0.3.0 update failed [Ctrl+U] │ Iter 2 │ [t] 8.5s │ ↓ 2.0k ↑ 1.5k │ $0.0800");
+    }
+
+    /// Test snapshot: status bar z UpdateState::Downloading (pobieranie aktualizacji)
+    #[test]
+    fn test_snapshot_update_downloading() {
+        let status = StatusData {
+            iteration: 1,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 3.2,
+            input_tokens: 1000,
+            output_tokens: 500,
+            cost_usd: 0.03,
+            update_info: Some(UpdateInfo {
+                update_available: true,
+                latest_version: "0.4.0".to_string(),
+            }),
+            update_state: UpdateState::Downloading,
+            task_progress: None,
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 100, 1, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 -> 0.4.0 downloading... │ Iter 1 │ [t] 3.2s │ ↓ 1.0k ↑ 500 │ $0.0300");
+    }
+
+    /// Test snapshot: status bar z gauge postępu (50%) i task progress
+    #[test]
+    fn test_snapshot_gauge_progress_50_percent() {
+        let status = StatusData {
+            iteration: 4,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 25.6,
+            input_tokens: 10000,
+            output_tokens: 6000,
+            cost_usd: 0.25,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: Some(TaskProgress {
+                done: 5,
+                total: 10,
+                in_progress: 0,
+                blocked: 0,
+                todo: 5,
+                current_task_id: Some("1.2".to_string()),
+                current_task_name: Some("Test task".to_string()),
+                current_task_component: Some("tests".to_string()),
+            }),
+            speed_text: Some("1.2/h".to_string()),
+            eta_text: Some("~23m".to_string()),
+        };
+
+        let buffer = render_status_to_buffer(&status, 80, 3, false);
+        insta::assert_snapshot!(snap(&buffer), @"
+        v0.9.0 │ Iter 4 │ [t] 25.6s │ ↓ 10.0k ↑ 6.0k │ $0.2500
+        ▶ 1.2 [tests] Test task │ ✓5 ~0 !0 ○5 │ ^ 1.2/h ETA ~23m
+        █████████████████████████████5/10 (50%) | ETA ~23m
+        ");
+    }
+
+    /// Test snapshot: status bar z task_progress (0/10, 0%)
+    #[test]
+    fn test_snapshot_task_progress_0_percent() {
+        let status = StatusData {
+            iteration: 1,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 5.2,
+            input_tokens: 2000,
+            output_tokens: 1000,
+            cost_usd: 0.05,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: Some(TaskProgress {
+                done: 0,
+                total: 10,
+                in_progress: 1,
+                blocked: 0,
+                todo: 9,
+                current_task_id: Some("1.1".to_string()),
+                current_task_name: Some("First task".to_string()),
+                current_task_component: Some("core".to_string()),
+            }),
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 80, 3, false);
+        insta::assert_snapshot!(snap(&buffer), @"
+        v0.9.0 │ Iter 1 │ [t] 5.2s │ ↓ 2.0k ↑ 1.0k │ $0.0500
+        ▶ 1.1 [core] First task │ ✓0 ~1 !0 ○9
+                                           0/10 (0%)
+        ");
+    }
+
+    /// Test snapshot: status bar z task_progress (10/10, 100%)
+    #[test]
+    fn test_snapshot_task_progress_100_percent() {
+        let status = StatusData {
+            iteration: 12,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 120.5,
+            input_tokens: 50000,
+            output_tokens: 30000,
+            cost_usd: 1.25,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: Some(TaskProgress {
+                done: 10,
+                total: 10,
+                in_progress: 0,
+                blocked: 0,
+                todo: 0,
+                current_task_id: Some("10.5".to_string()),
+                current_task_name: Some("Final task".to_string()),
+                current_task_component: Some("finalize".to_string()),
+            }),
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 80, 3, false);
+        insta::assert_snapshot!(snap(&buffer), @"
+        v0.9.0 │ Iter 12 │ [t] 120.5s │ ↓ 50.0k ↑ 30.0k │ $1.2500
+        ▶ 10.5 [finalize] Final task │ ✓10 ~0 !0 ○0
+        ██████████████████████████████████10/10 (100%) █████████████████████████████████
+        ");
+    }
+
+    /// Test snapshot: speed_text i eta_text ignorowane bez task_progress nawet przy height=3.
+    ///
+    /// Logika draw() wymaga `height >= 3 && task_progress.is_some()` aby wejść w 3-liniowy layout.
+    /// Bez task_progress fallback do single-line — speed/eta nie mają gdzie się pojawić.
+    #[test]
+    fn test_snapshot_speed_eta_ignored_without_task_progress() {
+        let status = StatusData {
+            iteration: 3,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 18.3,
+            input_tokens: 8000,
+            output_tokens: 4500,
+            cost_usd: 0.18,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: None,
+            speed_text: Some("5.2 tok/s".to_string()),
+            eta_text: Some("~2m 30s".to_string()),
+        };
+
+        // height=3 ale brak task_progress → single-line fallback, speed/eta pominięte
+        let buffer = render_status_to_buffer(&status, 80, 3, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 3 │ [t] 18.3s │ ↓ 8.0k ↑ 4.5k │ $0.1800");
+    }
+
+    /// Test snapshot: status bar z task_progress + speed_text + eta_text (wszystkie pola)
+    #[test]
+    fn test_snapshot_all_fields_combined() {
+        let status = StatusData {
+            iteration: 8,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 65.4,
+            input_tokens: 25000,
+            output_tokens: 15000,
+            cost_usd: 0.55,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: Some(TaskProgress {
+                done: 7,
+                total: 12,
+                in_progress: 1,
+                blocked: 1,
+                todo: 3,
+                current_task_id: Some("5.3".to_string()),
+                current_task_name: Some("Complex integration test".to_string()),
+                current_task_component: Some("integration".to_string()),
+            }),
+            speed_text: Some("3.8/h".to_string()),
+            eta_text: Some("~1h 15m".to_string()),
+        };
+
+        let buffer = render_status_to_buffer(&status, 100, 3, false);
+        insta::assert_snapshot!(snap(&buffer), @"
+        v0.9.0 │ Iter 8 │ [t] 65.4s │ ↓ 25.0k ↑ 15.0k │ $0.5500
+        ▶ 5.3 [integration] Complex integration test │ ✓7 ~1 !1 ○3 │ ^ 3.8/h ETA ~1h 15m
+        ██████████████████████████████████████7/12 (58%) | ETA ~1h 15m
+        ");
+    }
+
+    /// Test snapshot: task_progress z total=0 — gauge ratio=0.0, brak dzielenia przez zero
+    #[test]
+    fn test_snapshot_task_progress_total_zero() {
+        let status = StatusData {
+            iteration: 1,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 0.5,
+            input_tokens: 100,
+            output_tokens: 50,
+            cost_usd: 0.01,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: Some(TaskProgress {
+                done: 0,
+                total: 0,
+                in_progress: 0,
+                blocked: 0,
+                todo: 0,
+                current_task_id: None,
+                current_task_name: None,
+                current_task_component: None,
+            }),
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 80, 3, false);
+        insta::assert_snapshot!(snap(&buffer), @"
+        v0.9.0 │ Iter 1 │ [t] 0.5s │ ↓ 100 ↑ 50 │ $0.0100
+         │ ✓0 ~0 !0 ○0
+                                            0/0 (0%)
+        ");
+    }
+
+    /// Test formatowania tokenów: małe liczby (0-999) bez suffiksu
+    #[test]
+    fn test_format_tokens_small() {
+        assert_eq!(StatusData::format_tokens(0), "0");
+        assert_eq!(StatusData::format_tokens(123), "123");
+        assert_eq!(StatusData::format_tokens(999), "999");
+    }
+
+    /// Test formatowania tokenów: tysiące z suffiksem 'k' (1.2k, 15.2k)
+    #[test]
+    fn test_format_tokens_thousands() {
+        assert_eq!(StatusData::format_tokens(1_000), "1.0k");
+        assert_eq!(StatusData::format_tokens(1_234), "1.2k");
+        assert_eq!(StatusData::format_tokens(9_876), "9.9k");
+        assert_eq!(StatusData::format_tokens(15_234), "15.2k");
+        assert_eq!(StatusData::format_tokens(999_999), "1000.0k");
+    }
+
+    /// Test formatowania tokenów: miliony z suffiksem 'M' (1.2M, 15.2M)
+    #[test]
+    fn test_format_tokens_millions() {
+        assert_eq!(StatusData::format_tokens(1_000_000), "1.0M");
+        assert_eq!(StatusData::format_tokens(1_234_567), "1.2M");
+        assert_eq!(StatusData::format_tokens(9_876_543), "9.9M");
+        assert_eq!(StatusData::format_tokens(15_234_567), "15.2M");
+    }
+
+    /// Test snapshot: status bar z min_iterations=5, max_iterations=10, iteration=3
+    /// Oczekiwany format: "Iter 3 (5..10)"
+    #[test]
+    fn test_snapshot_min_max_iterations() {
+        let status = StatusData {
+            iteration: 3,
+            min_iterations: 5,
+            max_iterations: 10,
+            iteration_elapsed_secs: 15.2,
+            input_tokens: 8000,
+            output_tokens: 4000,
+            cost_usd: 0.18,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: None,
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 80, 1, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 3 (5..10) │ [t] 15.2s │ ↓ 8.0k ↑ 4.0k │ $0.1800");
+    }
+
+    /// Test snapshot: status bar z min_iterations=0, max_iterations=1 (single shot)
+    /// Oczekiwany format: "Iter 1/1"
+    #[test]
+    fn test_snapshot_single_shot() {
+        let status = StatusData {
+            iteration: 1,
+            min_iterations: 0,
+            max_iterations: 1,
+            iteration_elapsed_secs: 5.7,
+            input_tokens: 3000,
+            output_tokens: 1500,
+            cost_usd: 0.07,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: None,
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 80, 1, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 1/1 │ [t] 5.7s │ ↓ 3.0k ↑ 1.5k │ $0.0700");
+    }
+
+    /// Test snapshot: status bar z iteration=999 (duża liczba iteracji)
+    /// Oczekiwany format: "Iter 999"
+    #[test]
+    fn test_snapshot_large_iteration() {
+        let status = StatusData {
+            iteration: 999,
+            min_iterations: 0,
+            max_iterations: 0,
+            iteration_elapsed_secs: 1234.5,
+            input_tokens: 500_000,
+            output_tokens: 250_000,
+            cost_usd: 12.34,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: None,
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 100, 1, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 999 │ [t] 1234.5s │ ↓ 500.0k ↑ 250.0k │ $12.3400");
+    }
+
+    /// Test snapshot: status bar z min_iterations=5 bez max (tylko minimum)
+    /// Oczekiwany format: "Iter 3 (min 5)"
+    #[test]
+    fn test_snapshot_min_iterations_only() {
+        let status = StatusData {
+            iteration: 3,
+            min_iterations: 5,
+            max_iterations: 0,
+            iteration_elapsed_secs: 10.0,
+            input_tokens: 5000,
+            output_tokens: 2500,
+            cost_usd: 0.12,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: None,
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 80, 1, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 3 (min 5) │ [t] 10.0s │ ↓ 5.0k ↑ 2.5k │ $0.1200");
+    }
+
+    /// Test snapshot: status bar z max_iterations=20 bez min (tylko maximum)
+    /// Oczekiwany format: "Iter 15/20"
+    #[test]
+    fn test_snapshot_max_iterations_only() {
+        let status = StatusData {
+            iteration: 15,
+            min_iterations: 0,
+            max_iterations: 20,
+            iteration_elapsed_secs: 67.3,
+            input_tokens: 45_000,
+            output_tokens: 23_000,
+            cost_usd: 1.15,
+            update_info: None,
+            update_state: UpdateState::None,
+            task_progress: None,
+            speed_text: None,
+            eta_text: None,
+        };
+
+        let buffer = render_status_to_buffer(&status, 80, 1, false);
+        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 15/20 │ [t] 67.3s │ ↓ 45.0k ↑ 23.0k │ $1.1500");
     }
 }

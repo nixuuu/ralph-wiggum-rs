@@ -1,20 +1,31 @@
 use crossterm::style::Stylize;
 
-use crate::shared::error::{RalphError, Result};
+use crate::shared::error::Result;
 use crate::shared::file_config::FileConfig;
 use crate::shared::progress::TaskStatus;
 use crate::shared::tasks::TasksFile;
 
 pub fn execute(file_config: &FileConfig) -> Result<()> {
     let tasks_path = &file_config.task.tasks_file;
-    if !tasks_path.exists() {
-        return Err(RalphError::MissingFile(format!(
-            "{} not found. Run `ralph-wiggum task prd` first.",
-            tasks_path.display()
-        )));
+
+    // Auto-initialize if file doesn't exist (instead of returning error)
+    let tasks_file = TasksFile::load_or_init(tasks_path)?;
+
+    // If file was just initialized (empty), show friendly message
+    if tasks_file.tasks.is_empty() {
+        println!();
+        println!("{}", "━".repeat(60).dark_grey());
+        println!("{} No tasks yet.", "ℹ".cyan().bold());
+        println!(
+            "  Run {} or {} to get started.",
+            "task add".cyan(),
+            "task plan".cyan()
+        );
+        println!("{}", "━".repeat(60).dark_grey());
+        println!();
+        return Ok(());
     }
 
-    let tasks_file = TasksFile::load(tasks_path)?;
     let summary = tasks_file.to_summary();
     let total = summary.total();
 
@@ -73,7 +84,134 @@ pub fn execute(file_config: &FileConfig) -> Result<()> {
     }
 
     println!("{}", "━".repeat(60).dark_grey());
+
+    // Display verification profiles if configured
+    if !file_config.task.orchestrate.profiles.is_empty() {
+        let profile_count = file_config.task.orchestrate.profiles.len();
+        println!();
+        println!(
+            "  {} Profile weryfikacji: {} skonfigurowanych",
+            "ⓘ".cyan(),
+            profile_count.to_string().bold()
+        );
+        for profile in &file_config.task.orchestrate.profiles {
+            let paths_str = if profile.paths.is_empty() {
+                "brak ścieżek".dark_grey().to_string()
+            } else {
+                profile.paths.join(", ")
+            };
+            println!(
+                "    {} {} ({})",
+                "-".dark_grey(),
+                profile.name.as_str().bold(),
+                paths_str
+            );
+        }
+        println!("{}", "━".repeat(60).dark_grey());
+    }
+
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::file_config::{OrchestrateConfig, TaskConfig, VerifyProfile};
+    use tempfile::TempDir;
+
+    /// Creates a test config with given profiles and a valid temp tasks file.
+    fn create_test_config(temp_dir: &TempDir, profiles: Vec<VerifyProfile>) -> FileConfig {
+        let tasks_file = temp_dir.path().join("tasks.yml");
+        std::fs::write(&tasks_file, "tasks: []").unwrap();
+
+        FileConfig {
+            task: TaskConfig {
+                orchestrate: OrchestrateConfig {
+                    profiles,
+                    ..Default::default()
+                },
+                tasks_file,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_status_without_profiles() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir, vec![]);
+
+        let result = execute(&config);
+        assert!(result.is_ok(), "Should succeed without profiles");
+    }
+
+    #[test]
+    fn test_status_with_single_profile() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(
+            &temp_dir,
+            vec![VerifyProfile {
+                name: "frontend".to_string(),
+                description: Some("Frontend tests".to_string()),
+                paths: vec!["src/ui/**/*.rs".to_string(), "assets/**/*".to_string()],
+                working_dir: None,
+                verify_commands: vec![],
+                setup_commands: vec![],
+            }],
+        );
+
+        let result = execute(&config);
+        assert!(result.is_ok(), "Should succeed with single profile");
+    }
+
+    #[test]
+    fn test_status_with_multiple_profiles() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(
+            &temp_dir,
+            vec![
+                VerifyProfile {
+                    name: "backend".to_string(),
+                    description: None,
+                    paths: vec!["src/api/**/*.rs".to_string()],
+                    working_dir: None,
+                    verify_commands: vec![],
+                    setup_commands: vec![],
+                },
+                VerifyProfile {
+                    name: "database".to_string(),
+                    description: Some("Database migrations".to_string()),
+                    paths: vec!["migrations/**/*.sql".to_string()],
+                    working_dir: Some("db".to_string()),
+                    verify_commands: vec![],
+                    setup_commands: vec![],
+                },
+            ],
+        );
+
+        let result = execute(&config);
+        assert!(result.is_ok(), "Should succeed with multiple profiles");
+    }
+
+    #[test]
+    fn test_status_with_profile_without_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(
+            &temp_dir,
+            vec![VerifyProfile {
+                name: "global-checks".to_string(),
+                description: Some("Global checks".to_string()),
+                paths: vec![],
+                working_dir: None,
+                verify_commands: vec![],
+                setup_commands: vec![],
+            }],
+        );
+
+        let result = execute(&config);
+        assert!(result.is_ok(), "Should succeed with profile without paths");
+    }
 }

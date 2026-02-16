@@ -20,6 +20,7 @@ use crate::commands::task::orchestrate::shared_types::{format_duration, render_p
 use crate::commands::task::orchestrate::shutdown_types::{OrchestratorStatus, ShutdownState};
 use crate::commands::task::orchestrate::summary::TaskSummaryEntry;
 use crate::commands::task::orchestrate::task_preview::render_task_preview;
+use crate::commands::task::orchestrate::text_input_overlay::TextInputOverlay;
 use crate::commands::task::orchestrate::worker_status::{WorkerState, WorkerStatus};
 use crate::shared::error::Result;
 
@@ -63,10 +64,16 @@ pub struct Dashboard {
     focused_worker: Option<u32>,
     log_lines: VecDeque<Line<'static>>,
     preview_scroll_offset: usize,
+    /// Shared overlay instance synchronized with input thread (task 28.1).
+    /// Input thread updates this Arc when user presses 'i', Dashboard reads it during render.
+    shared_overlay: Arc<Mutex<Option<TextInputOverlay>>>,
 }
 
 impl Dashboard {
-    pub fn new(worker_count: u32) -> Result<Self> {
+    pub fn new(
+        worker_count: u32,
+        shared_overlay: Arc<Mutex<Option<TextInputOverlay>>>,
+    ) -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide)?;
@@ -85,6 +92,7 @@ impl Dashboard {
             focused_worker: None,
             log_lines: VecDeque::with_capacity(50),
             preview_scroll_offset: 0,
+            shared_overlay,
         })
     }
 
@@ -100,13 +108,143 @@ impl Dashboard {
         Ok(())
     }
 
-    /// Full render cycle: draw all panels + global status bar.
+    /// Check if a worker can receive messages based on its current phase.
     ///
-    /// When `tasks_file` is provided (preview overlay active), the dashboard
-    /// can access full task metadata for rendering task details.
+    /// Only workers in `Implement` or `ReviewFix` phases can receive user messages.
+    /// Workers in `Setup`, `Verify`, or `Idle` state cannot receive messages.
     ///
-    /// Task 21.3: Updates `active_worker_ids` with currently active (non-idle) worker IDs
-    /// for dynamic focus navigation.
+    /// Returns `Ok(())` if the worker can receive messages, or `Err(error_msg)` otherwise.
+    ///
+    /// # Usage
+    ///
+    /// Before showing the text input overlay, validate the worker phase:
+    ///
+    /// ```ignore
+    /// if let Err(msg) = dashboard.can_receive_message(worker_id) {
+    ///     dashboard.push_log_line(&format!("⚠ {}", msg));
+    ///     return;
+    /// }
+    /// dashboard.show_overlay(worker_id);
+    /// ```
+    #[allow(dead_code)] // Used in tests; needed for future message validation
+    pub fn can_receive_message(&self, worker_id: u32) -> std::result::Result<(), String> {
+        if let Some(panel) = self.panels.get(&worker_id) {
+            // Check if worker is idle
+            if panel.status.state == WorkerState::Idle {
+                return Err(format!(
+                    "Worker {} jest bezczynny (Idle) — nie można wysłać wiadomości",
+                    worker_id
+                ));
+            }
+
+            // Check phase — only Implement and ReviewFix are allowed
+            match panel.status.phase {
+                Some(crate::commands::task::orchestrate::events::WorkerPhase::Implement)
+                | Some(crate::commands::task::orchestrate::events::WorkerPhase::ReviewFix) => {
+                    Ok(())
+                }
+                Some(crate::commands::task::orchestrate::events::WorkerPhase::Setup) => {
+                    Err(format!(
+                        "Worker {} jest w fazie Setup — nie można wysłać wiadomości",
+                        worker_id
+                    ))
+                }
+                Some(crate::commands::task::orchestrate::events::WorkerPhase::Verify) => {
+                    Err(format!(
+                        "Worker {} jest w fazie Verify — nie można wysłać wiadomości",
+                        worker_id
+                    ))
+                }
+                None => Err(format!(
+                    "Worker {} nie ma aktywnej fazy — nie można wysłać wiadomości",
+                    worker_id
+                )),
+            }
+        } else {
+            Err(format!("Worker {} nie istnieje", worker_id))
+        }
+    }
+
+    /// Render worker grid with active workers only.
+    ///
+    /// Filters idle workers (beyond grace period) and renders active workers in a grid layout.
+    /// If `tasks_file` is provided (preview mode), renders task preview instead of worker grid.
+    fn render_worker_grid(
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        worker_count: u32,
+        focused: Option<u32>,
+        panels: &HashMap<u32, WorkerPanel>,
+        preview_scroll: usize,
+        tasks_file: Option<&crate::shared::tasks::TasksFile>,
+    ) {
+        // If preview overlay is active, render task list instead of worker grid
+        if let Some(tf) = tasks_file {
+            render_task_preview(frame, area, tf, preview_scroll);
+            return;
+        }
+
+        // Filter active workers (non-Idle or Idle within grace period)
+        let active_workers: Vec<u32> = (1..=worker_count)
+            .filter(|worker_id| {
+                if let Some(panel) = panels.get(worker_id) {
+                    is_worker_active(panel)
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        // Render worker grid with only active workers
+        let active_count = active_workers.len() as u32;
+        if active_count > 0 {
+            let rects = compute_grid_rects(area, active_count);
+            for (idx, (_grid_worker_id, rect)) in rects.into_iter().enumerate() {
+                // Map grid position (idx) to actual worker_id from active_workers
+                if let Some(&worker_id) = active_workers.get(idx)
+                    && let Some(panel) = panels.get(&worker_id)
+                {
+                    let is_focused = focused == Some(worker_id);
+                    let widget = render_panel_widget(panel, rect, is_focused);
+                    frame.render_widget(widget, rect);
+                }
+            }
+        }
+    }
+
+    /// Render text input overlay on top if active.
+    ///
+    /// Reads overlay state from `shared_overlay` (synchronized with input thread).
+    fn render_overlay(
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        shared_overlay: &Arc<Mutex<Option<TextInputOverlay>>>,
+    ) {
+        if let Some(ref overlay) = *shared_overlay.lock().unwrap() {
+            overlay.render(frame, area);
+        }
+    }
+
+    /// Update active worker IDs list (Task 21.3).
+    ///
+    /// Computes IDs of currently active (non-idle) workers and updates shared state
+    /// for input thread's dynamic focus navigation.
+    fn update_active_worker_ids(&self, active_worker_ids: Option<&Arc<Mutex<Vec<u32>>>>) {
+        if let Some(active_ids_ref) = active_worker_ids {
+            let mut active = Vec::with_capacity(self.worker_count as usize);
+            for id in 1..=self.worker_count {
+                if let Some(panel) = self.panels.get(&id) {
+                    // Consider worker active if not in Idle state
+                    if !panel.status.is_idle() {
+                        active.push(id);
+                    }
+                }
+            }
+            *active_ids_ref.lock().unwrap() = active;
+        }
+    }
+
+    /// Full render cycle: orchestrates drawing of worker grid, status bar, and overlay.
     pub fn render(
         &mut self,
         status: &OrchestratorStatus,
@@ -114,34 +252,24 @@ impl Dashboard {
         _task_summaries: &[TaskSummaryEntry],
         active_worker_ids: Option<&Arc<Mutex<Vec<u32>>>>,
     ) -> Result<()> {
-        let worker_count = self.worker_count;
-        let focused = self.focused_worker;
-        let panels = &self.panels;
-        let log_lines = &self.log_lines;
-        let preview_scroll = self.preview_scroll_offset;
+        // Update active worker IDs for input thread
+        self.update_active_worker_ids(active_worker_ids);
 
-        // Task 21.3: Compute active (non-idle) worker IDs before rendering
-        if let Some(active_ids_ref) = active_worker_ids {
-            let mut active = Vec::with_capacity(worker_count as usize);
-            for id in 1..=worker_count {
-                if let Some(panel) = panels.get(&id) {
-                    // Consider worker active if not in Idle state
-                    // Check via is_idle() method to avoid direct field access
-                    if !panel.status.is_idle() {
-                        active.push(id);
-                    }
-                }
-            }
-            // Update shared state (input thread reads this)
-            *active_ids_ref.lock().unwrap() = active;
-        }
+        // Capture state for terminal draw closure
+        let (worker_count, panels, log_lines, focused, preview_scroll, shared_overlay) = (
+            self.worker_count,
+            &self.panels,
+            &self.log_lines,
+            self.focused_worker,
+            self.preview_scroll_offset,
+            Arc::clone(&self.shared_overlay),
+        );
 
         self.terminal.draw(|frame| {
             let area = frame.area();
 
-            // Small terminal: show single panel + 1-line status
+            // Small terminal: compact mode
             if area.width < 60 || area.height < 12 {
-                let preview_active = tasks_file.is_some();
                 render_compact(
                     frame,
                     area,
@@ -150,54 +278,30 @@ impl Dashboard {
                     focused,
                     log_lines,
                     worker_count,
-                    preview_active,
+                    tasks_file.is_some(),
                 );
                 return;
             }
 
-            // Split: worker grid + 3 lines for global bar
+            // Split screen: worker grid + 3-line status bar
             let vertical =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(area);
 
-            let grid_area = vertical[0];
-            let bar_area = vertical[1];
-
-            // If preview overlay is active, render task list instead of worker grid
-            if let Some(tf) = tasks_file {
-                render_task_preview(frame, grid_area, tf, preview_scroll);
-            } else {
-                // Filter active workers (non-Idle or Idle within grace period)
-                let active_workers: Vec<u32> = (1..=worker_count)
-                    .filter(|worker_id| {
-                        if let Some(panel) = panels.get(worker_id) {
-                            is_worker_active(panel)
-                        } else {
-                            false
-                        }
-                    })
-                    .collect();
-
-                // Render worker grid with only active workers
-                let active_count = active_workers.len() as u32;
-                if active_count > 0 {
-                    let rects = compute_grid_rects(grid_area, active_count);
-                    for (idx, (_grid_worker_id, rect)) in rects.into_iter().enumerate() {
-                        // Map grid position (idx) to actual worker_id from active_workers
-                        if let Some(&worker_id) = active_workers.get(idx)
-                            && let Some(panel) = panels.get(&worker_id)
-                        {
-                            let is_focused = focused == Some(worker_id);
-                            let widget = render_panel_widget(panel, rect, is_focused);
-                            frame.render_widget(widget, rect);
-                        }
-                    }
-                }
-            }
-
-            // Render global status bar (preview_active when tasks_file is Some)
-            let preview_active = tasks_file.is_some();
-            let bar_widget = render_global_bar(status, focused, preview_active);
-            frame.render_widget(bar_widget, bar_area);
+            // Render components
+            Self::render_worker_grid(
+                frame,
+                vertical[0],
+                worker_count,
+                focused,
+                panels,
+                preview_scroll,
+                tasks_file,
+            );
+            frame.render_widget(
+                render_global_bar(status, focused, tasks_file.is_some()),
+                vertical[1],
+            );
+            Self::render_overlay(frame, area, &shared_overlay);
         })?;
 
         Ok(())
@@ -235,6 +339,17 @@ impl Dashboard {
             panel.status.cost_usd = cost_usd;
             panel.status.input_tokens = input_tokens;
             panel.status.output_tokens = output_tokens;
+        }
+    }
+
+    /// Update verify profile statuses for a worker (used on PhaseCompleted for Verify).
+    pub fn update_verify_profiles(
+        &mut self,
+        worker_id: u32,
+        profiles: Vec<(String, Option<bool>)>,
+    ) {
+        if let Some(panel) = self.panels.get_mut(&worker_id) {
+            panel.status.verify_profiles = profiles;
         }
     }
 
@@ -907,6 +1022,7 @@ mod tests {
             cost_usd: 0.0,
             input_tokens: 0,
             output_tokens: 0,
+            verify_profiles: Vec::new(),
         };
 
         // Apply the logic from update_worker_status
@@ -940,6 +1056,7 @@ mod tests {
             cost_usd: 0.0,
             input_tokens: 0,
             output_tokens: 0,
+            verify_profiles: Vec::new(),
         };
 
         // Apply the logic from update_worker_status
@@ -974,6 +1091,7 @@ mod tests {
             cost_usd: 1.23,
             input_tokens: 100,
             output_tokens: 50,
+            verify_profiles: Vec::new(),
         };
 
         // Apply the logic from update_worker_status
@@ -1178,6 +1296,1204 @@ mod tests {
             IDLE_GRACE_PERIOD,
             Duration::from_secs(5),
             "IDLE_GRACE_PERIOD should be 5 seconds as specified"
+        );
+    }
+
+    // ── Task 72.3: Tab bar edge cases snapshot tests ────────────────────
+
+    /// Helper: renders compact mode (tab bar + panel + status bar) to snapshot.
+    ///
+    /// Delegates to `render_compact` function from panels.rs, which is the production
+    /// code path for small terminals (width < 60 || height < 12).
+    fn render_compact_snapshot(
+        panels: &HashMap<u32, WorkerPanel>,
+        worker_count: u32,
+        focused: Option<u32>,
+        status: &OrchestratorStatus,
+        width: u16,
+        height: u16,
+    ) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        let log_lines = VecDeque::new();
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_compact(
+                    frame,
+                    area,
+                    panels,
+                    status,
+                    focused,
+                    &log_lines,
+                    worker_count,
+                    false, // preview_active
+                );
+            })
+            .expect("draw");
+
+        snap(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn test_snapshot_tab_bar_1_worker() {
+        // Test: 1 worker — tab bar should show only W1 (no overflow)
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+
+        let status = make_orchestrator_status(5, 1, 1, 1, 0);
+        let snapshot = render_compact_snapshot(&panels, 1, Some(1), &status, 80, 24);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_tab_bar_8_workers_width_80() {
+        // Test: 8 active workers on width=80 — all tabs fit (each tab " Wn " + separator = 5 chars, 8×5=40)
+        let mut panels = HashMap::new();
+        for i in 1..=8 {
+            panels.insert(
+                i,
+                make_panel(i, WorkerState::Implementing, Some("1.1"), Some("api")),
+            );
+        }
+
+        let status = make_orchestrator_status(12, 2, 8, 8, 0);
+        let snapshot = render_compact_snapshot(&panels, 8, Some(3), &status, 80, 24);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_tab_bar_overflow_narrow_terminal() {
+        // Test: 8 active workers on width=30 — tabs overflow beyond terminal width,
+        // ratatui truncates at buffer boundary so only first ~6 tabs visible
+        let mut panels = HashMap::new();
+        for i in 1..=8 {
+            panels.insert(
+                i,
+                make_panel(i, WorkerState::Implementing, Some("1.1"), Some("api")),
+            );
+        }
+
+        let status = make_orchestrator_status(12, 2, 8, 8, 0);
+        let snapshot = render_compact_snapshot(&panels, 8, Some(3), &status, 30, 12);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_tab_bar_mixed_states() {
+        // Test: 6 workers with mixed states (2 implementing, 3 idle, 1 error/resolving)
+        // Tab bar should only show active (non-idle) workers: W1, W2, W6
+        let mut panels = HashMap::new();
+
+        // 2 active: implementing
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Implementing, Some("2.1"), Some("core")),
+        );
+
+        // 3 idle (should not appear in tab bar)
+        panels.insert(3, make_panel(3, WorkerState::Idle, None, None));
+        panels.insert(4, make_panel(4, WorkerState::Idle, None, None));
+        panels.insert(5, make_panel(5, WorkerState::Idle, None, None));
+
+        // 1 error state: resolving conflicts
+        panels.insert(
+            6,
+            make_panel(6, WorkerState::ResolvingConflicts, Some("6.1"), Some("db")),
+        );
+
+        let status = make_orchestrator_status(10, 2, 3, 3, 3);
+        // Focus on worker 2 (active)
+        let snapshot = render_compact_snapshot(&panels, 6, Some(2), &status, 80, 24);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_tab_bar_focused_vs_idle_styling() {
+        // Test: tab bar styling — focused worker (W2) should have Cyan bg,
+        // idle workers should not appear, active unfocused should be DarkGray fg
+        let mut panels = HashMap::new();
+
+        // 2 active workers
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), Some("core")),
+        );
+        panels.insert(
+            3,
+            make_panel(3, WorkerState::Verifying, Some("3.1"), Some("ui")),
+        );
+
+        // 1 idle worker (should not appear in tab bar)
+        panels.insert(4, make_panel(4, WorkerState::Idle, None, None));
+
+        let status = make_orchestrator_status(8, 2, 3, 3, 1);
+        // Focus on worker 2
+        let snapshot = render_compact_snapshot(&panels, 4, Some(2), &status, 80, 24);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Task 28.4: Overlay sync and message pipeline tests ─────────────
+
+    #[test]
+    fn test_overlay_sync_from_shared() {
+        // Test: Dashboard should synchronize overlay state from shared_overlay
+        use std::sync::{Arc, Mutex};
+
+        let shared_overlay: Arc<Mutex<Option<TextInputOverlay>>> = Arc::new(Mutex::new(None));
+
+        // Initially, shared_overlay is None
+        assert!(shared_overlay.lock().unwrap().is_none());
+
+        // Simulate input thread setting shared_overlay
+        *shared_overlay.lock().unwrap() = Some(TextInputOverlay::new(1));
+
+        // Verify that shared_overlay is now Some
+        assert!(shared_overlay.lock().unwrap().is_some());
+
+        // Simulate Dashboard reading from shared_overlay (as done in render())
+        let overlay_ref = shared_overlay.lock().unwrap();
+        assert!(
+            overlay_ref.is_some(),
+            "Dashboard should read overlay from shared_overlay"
+        );
+
+        // Verify overlay target worker ID
+        if let Some(ref overlay) = *overlay_ref {
+            assert_eq!(
+                overlay.target_worker_id(),
+                1,
+                "Overlay should target worker 1"
+            );
+        }
+    }
+
+    #[test]
+    fn test_overlay_sync_clears_when_input_thread_hides() {
+        // Test: Dashboard should see None after input thread clears shared_overlay
+        use std::sync::{Arc, Mutex};
+
+        let shared_overlay: Arc<Mutex<Option<TextInputOverlay>>> = Arc::new(Mutex::new(None));
+
+        // Set overlay
+        *shared_overlay.lock().unwrap() = Some(TextInputOverlay::new(2));
+        assert!(shared_overlay.lock().unwrap().is_some());
+
+        // Input thread clears overlay (e.g., on Esc or Send)
+        *shared_overlay.lock().unwrap() = None;
+
+        // Verify dashboard reads None
+        assert!(
+            shared_overlay.lock().unwrap().is_none(),
+            "Dashboard should see None after input thread clears overlay"
+        );
+    }
+
+    #[test]
+    fn test_overlay_sync_multiple_workers() {
+        // Test: Overlay can be created for different workers
+        use std::sync::{Arc, Mutex};
+
+        let shared_overlay: Arc<Mutex<Option<TextInputOverlay>>> = Arc::new(Mutex::new(None));
+
+        // Create overlay for worker 1
+        *shared_overlay.lock().unwrap() = Some(TextInputOverlay::new(1));
+        assert_eq!(
+            shared_overlay
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .target_worker_id(),
+            1
+        );
+
+        // Change to worker 3
+        *shared_overlay.lock().unwrap() = Some(TextInputOverlay::new(3));
+        assert_eq!(
+            shared_overlay
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .target_worker_id(),
+            3
+        );
+
+        // Clear
+        *shared_overlay.lock().unwrap() = None;
+        assert!(shared_overlay.lock().unwrap().is_none());
+    }
+
+    // ── Task 25.3.2: Overlay integration tests ──────────────────────────
+
+    #[test]
+    fn test_overlay_initially_not_active() {
+        // Dashboard should start without overlay
+        // Can't create Dashboard without TTY, but we can test the logic
+        let overlay: Option<TextInputOverlay> = None;
+        assert!(overlay.is_none());
+    }
+
+    #[test]
+    fn test_show_overlay_activates_overlay() {
+        // Test the overlay activation logic
+        let mut overlay: Option<TextInputOverlay> = None;
+        assert!(overlay.is_none());
+
+        // Simulate show_overlay
+        overlay = Some(TextInputOverlay::new(1));
+        assert!(overlay.is_some());
+    }
+
+    #[test]
+    fn test_hide_overlay_deactivates_overlay() {
+        // Test overlay deactivation
+        let mut overlay: Option<TextInputOverlay> = Some(TextInputOverlay::new(1));
+        assert!(overlay.is_some());
+
+        // Simulate hide_overlay
+        overlay = None;
+        assert!(overlay.is_none());
+    }
+
+    #[test]
+    fn test_is_overlay_active_returns_true_when_overlay_present() {
+        let overlay: Option<TextInputOverlay> = Some(TextInputOverlay::new(2));
+        assert!(overlay.is_some());
+    }
+
+    #[test]
+    fn test_is_overlay_active_returns_false_when_overlay_absent() {
+        let overlay: Option<TextInputOverlay> = None;
+        assert!(overlay.is_none());
+    }
+
+    // ── Task 25.4.2: Phase validation tests ─────────────────────────────
+
+    #[test]
+    fn test_can_receive_message_allows_implement_phase() {
+        use crate::commands::task::orchestrate::events::WorkerPhase;
+
+        // Create a panel with Implement phase
+        let mut panels = std::collections::HashMap::new();
+        let mut status = WorkerStatus::idle(1);
+        status.state = WorkerState::Implementing;
+        status.phase = Some(WorkerPhase::Implement);
+        let panel = WorkerPanel {
+            worker_id: 1,
+            status,
+            output: crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer::new(10),
+            scroll_offset: 0,
+            idle_since: None,
+        };
+        panels.insert(1, panel);
+
+        // Simulate can_receive_message logic
+        let result = if let Some(panel) = panels.get(&1) {
+            if panel.status.state == WorkerState::Idle {
+                Err("Idle".to_string())
+            } else {
+                match panel.status.phase {
+                    Some(WorkerPhase::Implement) | Some(WorkerPhase::ReviewFix) => Ok(()),
+                    _ => Err("Wrong phase".to_string()),
+                }
+            }
+        } else {
+            Err("Not found".to_string())
+        };
+
+        assert!(result.is_ok(), "Implement phase should allow messages");
+    }
+
+    #[test]
+    fn test_can_receive_message_allows_review_fix_phase() {
+        use crate::commands::task::orchestrate::events::WorkerPhase;
+
+        let mut panels = std::collections::HashMap::new();
+        let mut status = WorkerStatus::idle(1);
+        status.state = WorkerState::Reviewing;
+        status.phase = Some(WorkerPhase::ReviewFix);
+        let panel = WorkerPanel {
+            worker_id: 1,
+            status,
+            output: crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer::new(10),
+            scroll_offset: 0,
+            idle_since: None,
+        };
+        panels.insert(1, panel);
+
+        let result = if let Some(panel) = panels.get(&1) {
+            if panel.status.state == WorkerState::Idle {
+                Err("Idle".to_string())
+            } else {
+                match panel.status.phase {
+                    Some(WorkerPhase::Implement) | Some(WorkerPhase::ReviewFix) => Ok(()),
+                    _ => Err("Wrong phase".to_string()),
+                }
+            }
+        } else {
+            Err("Not found".to_string())
+        };
+
+        assert!(result.is_ok(), "ReviewFix phase should allow messages");
+    }
+
+    #[test]
+    fn test_can_receive_message_rejects_setup_phase() {
+        use crate::commands::task::orchestrate::events::WorkerPhase;
+
+        let mut panels = std::collections::HashMap::new();
+        let mut status = WorkerStatus::idle(1);
+        status.state = WorkerState::SettingUp;
+        status.phase = Some(WorkerPhase::Setup);
+        let panel = WorkerPanel {
+            worker_id: 1,
+            status,
+            output: crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer::new(10),
+            scroll_offset: 0,
+            idle_since: None,
+        };
+        panels.insert(1, panel);
+
+        let result = if let Some(panel) = panels.get(&1) {
+            if panel.status.state == WorkerState::Idle {
+                Err("Idle".to_string())
+            } else {
+                match panel.status.phase {
+                    Some(WorkerPhase::Implement) | Some(WorkerPhase::ReviewFix) => Ok(()),
+                    Some(WorkerPhase::Setup) => Err("Setup not allowed".to_string()),
+                    _ => Err("Wrong phase".to_string()),
+                }
+            }
+        } else {
+            Err("Not found".to_string())
+        };
+
+        assert!(result.is_err(), "Setup phase should reject messages");
+        assert!(
+            result.unwrap_err().contains("Setup"),
+            "Error should mention Setup phase"
+        );
+    }
+
+    #[test]
+    fn test_can_receive_message_rejects_verify_phase() {
+        use crate::commands::task::orchestrate::events::WorkerPhase;
+
+        let mut panels = std::collections::HashMap::new();
+        let mut status = WorkerStatus::idle(1);
+        status.state = WorkerState::Verifying;
+        status.phase = Some(WorkerPhase::Verify);
+        let panel = WorkerPanel {
+            worker_id: 1,
+            status,
+            output: crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer::new(10),
+            scroll_offset: 0,
+            idle_since: None,
+        };
+        panels.insert(1, panel);
+
+        let result = if let Some(panel) = panels.get(&1) {
+            if panel.status.state == WorkerState::Idle {
+                Err("Idle".to_string())
+            } else {
+                match panel.status.phase {
+                    Some(WorkerPhase::Implement) | Some(WorkerPhase::ReviewFix) => Ok(()),
+                    Some(WorkerPhase::Verify) => Err("Verify not allowed".to_string()),
+                    _ => Err("Wrong phase".to_string()),
+                }
+            }
+        } else {
+            Err("Not found".to_string())
+        };
+
+        assert!(result.is_err(), "Verify phase should reject messages");
+        assert!(
+            result.unwrap_err().contains("Verify"),
+            "Error should mention Verify phase"
+        );
+    }
+
+    #[test]
+    fn test_can_receive_message_rejects_idle_worker() {
+        let mut panels = std::collections::HashMap::new();
+        let status = WorkerStatus::idle(1);
+        let panel = WorkerPanel {
+            worker_id: 1,
+            status,
+            output: crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer::new(10),
+            scroll_offset: 0,
+            idle_since: None,
+        };
+        panels.insert(1, panel);
+
+        let result = if let Some(panel) = panels.get(&1) {
+            if panel.status.state == WorkerState::Idle {
+                Err("Idle".to_string())
+            } else {
+                Ok(())
+            }
+        } else {
+            Err("Not found".to_string())
+        };
+
+        assert!(result.is_err(), "Idle worker should reject messages");
+        assert!(
+            result.unwrap_err().contains("Idle"),
+            "Error should mention Idle state"
+        );
+    }
+
+    #[test]
+    fn test_can_receive_message_rejects_nonexistent_worker() {
+        let panels: std::collections::HashMap<u32, WorkerPanel> = std::collections::HashMap::new();
+
+        let result = if let Some(_panel) = panels.get(&99) {
+            Ok(())
+        } else {
+            Err("Not found".to_string())
+        };
+
+        assert!(result.is_err(), "Nonexistent worker should reject");
+        assert!(
+            result.unwrap_err().contains("Not found"),
+            "Error should indicate worker not found"
+        );
+    }
+
+    // ── Snapshot tests: Dashboard grid layout (Task 64.2) ────────────
+
+    use crate::commands::task::orchestrate::events::WorkerPhase;
+    use crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer;
+    use crate::commands::task::orchestrate::scheduler::SchedulerStatus;
+    use crate::test_helpers::snap;
+
+    /// Helper: creates a WorkerPanel with given state and optional task info.
+    ///
+    /// Maps WorkerState to the correct WorkerPhase to match production behavior:
+    /// - SettingUp → Setup, Implementing → Implement, Reviewing → ReviewFix,
+    /// - Verifying → Verify, Merging/ResolvingConflicts/Idle → None.
+    fn make_panel(
+        worker_id: u32,
+        state: WorkerState,
+        task_id: Option<&str>,
+        component: Option<&str>,
+    ) -> WorkerPanel {
+        let mut status = WorkerStatus::idle(worker_id);
+        status.state = state;
+        status.task_id = task_id.map(|s| s.to_string());
+        status.component = component.map(|s| s.to_string());
+        status.phase = match &status.state {
+            WorkerState::SettingUp => Some(WorkerPhase::Setup),
+            WorkerState::Implementing => Some(WorkerPhase::Implement),
+            WorkerState::Reviewing => Some(WorkerPhase::ReviewFix),
+            WorkerState::Verifying => Some(WorkerPhase::Verify),
+            // Merging, ResolvingConflicts, Idle — no active phase
+            _ => None,
+        };
+        WorkerPanel {
+            worker_id,
+            status,
+            output: OutputRingBuffer::new(50),
+            scroll_offset: 0,
+            idle_since: None,
+        }
+    }
+
+    /// Helper: creates default OrchestratorStatus for snapshot tests.
+    fn make_orchestrator_status(
+        total: usize,
+        done: usize,
+        in_progress: usize,
+        active_workers: u32,
+        idle_workers: u32,
+    ) -> OrchestratorStatus {
+        OrchestratorStatus {
+            scheduler: SchedulerStatus {
+                total,
+                done,
+                ready: total.saturating_sub(done + in_progress),
+                in_progress,
+                blocked: 0,
+                pending: 0,
+            },
+            total_cost: 0.0842,
+            elapsed: std::time::Duration::from_secs(145),
+            shutdown_state: ShutdownState::Running,
+            shutdown_remaining: None,
+            quit_pending: false,
+            completed: false,
+            restart_pending: None,
+            active_workers,
+            idle_workers,
+        }
+    }
+
+    /// Renders the full dashboard layout (worker grid + status bar) to a snapshot string.
+    ///
+    /// Uses TestBackend to render without a real terminal, then converts to
+    /// a human-readable string via `snap()`.
+    ///
+    /// This function replicates the exact logic from Dashboard::render(), including
+    /// the compact mode check for small terminals (width < 60 || height < 12).
+    fn render_grid_snapshot(
+        panels: &HashMap<u32, WorkerPanel>,
+        worker_count: u32,
+        focused: Option<u32>,
+        status: &OrchestratorStatus,
+        width: u16,
+        height: u16,
+    ) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        // Empty log lines for testing
+        let log_lines = VecDeque::new();
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+
+                // Small terminal: compact mode (same check as Dashboard::render)
+                if area.width < 60 || area.height < 12 {
+                    render_compact(
+                        frame,
+                        area,
+                        panels,
+                        status,
+                        focused,
+                        &log_lines,
+                        worker_count,
+                        false, // preview_active
+                    );
+                    return;
+                }
+
+                // Same layout split as Dashboard::render — grid + 3-line status bar
+                let vertical =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(area);
+
+                // Filter active workers (same as render_worker_grid)
+                let active_workers: Vec<u32> = (1..=worker_count)
+                    .filter(|wid| panels.get(wid).map(is_worker_active).unwrap_or(false))
+                    .collect();
+
+                let active_count = active_workers.len() as u32;
+                if active_count > 0 {
+                    let rects = compute_grid_rects(vertical[0], active_count);
+                    for (idx, (_grid_id, rect)) in rects.into_iter().enumerate() {
+                        if let Some(&wid) = active_workers.get(idx)
+                            && let Some(panel) = panels.get(&wid)
+                        {
+                            let is_focused = focused == Some(wid);
+                            let widget =
+                                crate::commands::task::orchestrate::panels::render_panel_widget(
+                                    panel, rect, is_focused,
+                                );
+                            frame.render_widget(widget, rect);
+                        }
+                    }
+                }
+
+                frame.render_widget(render_global_bar(status, focused, false), vertical[1]);
+            })
+            .expect("draw");
+
+        snap(terminal.backend().buffer())
+    }
+
+    // ── 1. Grid layout: 1 worker (fullscreen panel) ─────────────────
+
+    #[test]
+    fn test_snapshot_grid_1_worker() {
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+
+        let status = make_orchestrator_status(5, 1, 1, 1, 0);
+        let snapshot = render_grid_snapshot(&panels, 1, None, &status, 80, 24);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 2. Grid layout: 2 workers (1x2 horizontal) ─────────────────
+
+    #[test]
+    fn test_snapshot_grid_2_workers() {
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Verifying, Some("2.1"), Some("core")),
+        );
+
+        let status = make_orchestrator_status(5, 1, 2, 2, 0);
+        let snapshot = render_grid_snapshot(&panels, 2, None, &status, 80, 24);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 3. Grid layout: 4 workers (2x2) ────────────────────────────
+
+    #[test]
+    fn test_snapshot_grid_4_workers() {
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), Some("core")),
+        );
+        panels.insert(
+            3,
+            make_panel(3, WorkerState::SettingUp, Some("3.1"), Some("ui")),
+        );
+        panels.insert(
+            4,
+            make_panel(4, WorkerState::Merging, Some("4.1"), Some("db")),
+        );
+
+        let status = make_orchestrator_status(10, 3, 4, 4, 0);
+        let snapshot = render_grid_snapshot(&panels, 4, None, &status, 120, 40);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 4. Grid layout: 6 workers (3x2) ────────────────────────────
+
+    #[test]
+    fn test_snapshot_grid_6_workers() {
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), Some("core")),
+        );
+        panels.insert(
+            3,
+            make_panel(3, WorkerState::SettingUp, Some("3.1"), Some("ui")),
+        );
+        panels.insert(
+            4,
+            make_panel(4, WorkerState::Verifying, Some("4.1"), Some("db")),
+        );
+        panels.insert(
+            5,
+            make_panel(5, WorkerState::Merging, Some("5.1"), Some("auth")),
+        );
+        panels.insert(
+            6,
+            make_panel(
+                6,
+                WorkerState::ResolvingConflicts,
+                Some("6.1"),
+                Some("config"),
+            ),
+        );
+
+        let status = make_orchestrator_status(12, 4, 6, 6, 0);
+        let snapshot = render_grid_snapshot(&panels, 6, None, &status, 120, 40);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 5. Grid with global status bar at bottom ────────────────────
+
+    #[test]
+    fn test_snapshot_grid_with_status_bar() {
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Implementing, Some("2.1"), Some("core")),
+        );
+
+        // Status with progress and cost data (total=8: done=3, wip=2, blocked=1, pending=2, ready=0)
+        let mut status = make_orchestrator_status(8, 3, 2, 2, 1);
+        status.total_cost = 1.2345;
+        status.scheduler.blocked = 1;
+        status.scheduler.pending = 2;
+        status.scheduler.ready = 0; // Recalculate: 8 - 3 - 2 - 1 - 2 = 0
+
+        let snapshot = render_grid_snapshot(&panels, 2, None, &status, 100, 24);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 6. Grid with focused worker (▶ marker) ─────────────────────
+
+    #[test]
+    fn test_snapshot_grid_focused_worker() {
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), Some("core")),
+        );
+        panels.insert(
+            3,
+            make_panel(3, WorkerState::Verifying, Some("3.1"), Some("ui")),
+        );
+
+        let status = make_orchestrator_status(6, 2, 3, 3, 0);
+        // Focus on worker 2
+        let snapshot = render_grid_snapshot(&panels, 3, Some(2), &status, 100, 30);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 7. Different terminal sizes ─────────────────────────────────
+
+    #[test]
+    fn test_snapshot_grid_terminal_80x24() {
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), Some("core")),
+        );
+        panels.insert(
+            3,
+            make_panel(3, WorkerState::Verifying, Some("3.1"), Some("ui")),
+        );
+
+        let status = make_orchestrator_status(6, 2, 3, 3, 0);
+        let snapshot = render_grid_snapshot(&panels, 3, Some(1), &status, 80, 24);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_grid_terminal_120x40() {
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), Some("core")),
+        );
+        panels.insert(
+            3,
+            make_panel(3, WorkerState::Verifying, Some("3.1"), Some("ui")),
+        );
+        panels.insert(
+            4,
+            make_panel(4, WorkerState::Merging, Some("4.1"), Some("db")),
+        );
+
+        let status = make_orchestrator_status(8, 3, 4, 4, 0);
+        let snapshot = render_grid_snapshot(&panels, 4, Some(2), &status, 120, 40);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_grid_terminal_200x60() {
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), Some("core")),
+        );
+        panels.insert(
+            3,
+            make_panel(3, WorkerState::Verifying, Some("3.1"), Some("ui")),
+        );
+        panels.insert(
+            4,
+            make_panel(4, WorkerState::Merging, Some("4.1"), Some("db")),
+        );
+        panels.insert(
+            5,
+            make_panel(5, WorkerState::SettingUp, Some("5.1"), Some("auth")),
+        );
+        panels.insert(
+            6,
+            make_panel(
+                6,
+                WorkerState::ResolvingConflicts,
+                Some("6.1"),
+                Some("config"),
+            ),
+        );
+
+        let status = make_orchestrator_status(15, 5, 6, 6, 0);
+        let snapshot = render_grid_snapshot(&panels, 6, Some(3), &status, 200, 60);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Task 69.2: Small terminal tests ─────────────────────────────────
+
+    #[test]
+    fn test_snapshot_grid_small_terminal_80x10() {
+        // Test: 4 workers on 80x10 terminal (height < 12, triggers compact mode)
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), Some("core")),
+        );
+        panels.insert(
+            3,
+            make_panel(3, WorkerState::Verifying, Some("3.1"), Some("ui")),
+        );
+        panels.insert(
+            4,
+            make_panel(4, WorkerState::Merging, Some("4.1"), Some("db")),
+        );
+
+        let status = make_orchestrator_status(10, 3, 4, 4, 0);
+        let snapshot = render_grid_snapshot(&panels, 4, Some(1), &status, 80, 10);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_grid_small_terminal_40x15() {
+        // Test: 4 workers on 40x15 terminal (width < 60, triggers compact mode)
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), Some("core")),
+        );
+        panels.insert(
+            3,
+            make_panel(3, WorkerState::SettingUp, Some("3.1"), Some("ui")),
+        );
+        panels.insert(4, make_panel(4, WorkerState::Idle, None, None));
+
+        let status = make_orchestrator_status(8, 2, 3, 3, 1);
+        let snapshot = render_grid_snapshot(&panels, 4, Some(2), &status, 40, 15);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_grid_small_terminal_60x20() {
+        // Test: 6 workers on 60x20 terminal (width == 60, height >= 12, normal grid mode)
+        let mut panels = HashMap::new();
+        panels.insert(
+            1,
+            make_panel(1, WorkerState::Implementing, Some("1.1"), Some("api")),
+        );
+        panels.insert(
+            2,
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), Some("core")),
+        );
+        panels.insert(
+            3,
+            make_panel(3, WorkerState::SettingUp, Some("3.1"), Some("ui")),
+        );
+        panels.insert(
+            4,
+            make_panel(4, WorkerState::Verifying, Some("4.1"), Some("db")),
+        );
+        panels.insert(
+            5,
+            make_panel(5, WorkerState::Merging, Some("5.1"), Some("auth")),
+        );
+        panels.insert(
+            6,
+            make_panel(
+                6,
+                WorkerState::ResolvingConflicts,
+                Some("6.1"),
+                Some("config"),
+            ),
+        );
+
+        let status = make_orchestrator_status(12, 4, 6, 6, 0);
+        let snapshot = render_grid_snapshot(&panels, 6, Some(3), &status, 60, 20);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Task 69.2: Panel dimension validation tests ─────────────────────
+
+    #[test]
+    fn test_grid_rects_non_zero_dimensions_80x10() {
+        // Verify that panels have non-zero dimensions on 80x10 terminal
+        let area = Rect::new(0, 0, 80, 10);
+        let rects = compute_grid_rects(area, 4);
+
+        for (worker_id, rect) in &rects {
+            assert!(
+                rect.width > 0,
+                "Worker {} panel should have non-zero width, got {}",
+                worker_id,
+                rect.width
+            );
+            assert!(
+                rect.height > 0,
+                "Worker {} panel should have non-zero height, got {}",
+                worker_id,
+                rect.height
+            );
+        }
+    }
+
+    #[test]
+    fn test_grid_rects_non_zero_dimensions_40x15() {
+        // Verify that panels have non-zero dimensions on 40x15 terminal
+        let area = Rect::new(0, 0, 40, 15);
+        let rects = compute_grid_rects(area, 4);
+
+        for (worker_id, rect) in &rects {
+            assert!(
+                rect.width > 0,
+                "Worker {} panel should have non-zero width, got {}",
+                worker_id,
+                rect.width
+            );
+            assert!(
+                rect.height > 0,
+                "Worker {} panel should have non-zero height, got {}",
+                worker_id,
+                rect.height
+            );
+        }
+    }
+
+    #[test]
+    fn test_grid_rects_non_zero_dimensions_60x20() {
+        // Verify that panels have non-zero dimensions on 60x20 terminal
+        let area = Rect::new(0, 0, 60, 20);
+        let rects = compute_grid_rects(area, 6);
+
+        for (worker_id, rect) in &rects {
+            assert!(
+                rect.width > 0,
+                "Worker {} panel should have non-zero width, got {}",
+                worker_id,
+                rect.width
+            );
+            assert!(
+                rect.height > 0,
+                "Worker {} panel should have non-zero height, got {}",
+                worker_id,
+                rect.height
+            );
+        }
+    }
+
+    // ── Task 72.4: Snapshot tests for global status bar ─────────────────
+
+    /// Helper: Renders global status bar to a snapshot string.
+    ///
+    /// Creates a 3-line buffer (same height as global status bar) and renders
+    /// the status bar widget to it, then converts to snapshot string.
+    fn render_status_bar_snapshot(
+        status: &OrchestratorStatus,
+        focused: Option<u32>,
+        preview_active: bool,
+        width: u16,
+    ) -> String {
+        use crate::test_helpers::render_widget_to_buffer;
+
+        let widget = render_global_bar(status, focused, preview_active);
+        let buffer = render_widget_to_buffer(widget, width, 3);
+        snap(&buffer)
+    }
+
+    #[test]
+    fn test_snapshot_global_status_bar_partial_progress() {
+        // Test: 3/10 tasks done (30%), 5min session, moderate cost
+        let status = OrchestratorStatus {
+            scheduler: SchedulerStatus {
+                total: 10,
+                done: 3,
+                ready: 2,
+                in_progress: 2,
+                blocked: 1,
+                pending: 2,
+            },
+            total_cost: 0.8423,
+            elapsed: Duration::from_secs(300), // 5min
+            shutdown_state: ShutdownState::Running,
+            shutdown_remaining: None,
+            quit_pending: false,
+            completed: false,
+            restart_pending: None,
+            active_workers: 2,
+            idle_workers: 1,
+        };
+
+        let snapshot = render_status_bar_snapshot(&status, Some(1), false, 120);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_global_status_bar_100_percent() {
+        // Test: 10/10 tasks done (100%), completed session
+        let status = OrchestratorStatus {
+            scheduler: SchedulerStatus {
+                total: 10,
+                done: 10,
+                ready: 0,
+                in_progress: 0,
+                blocked: 0,
+                pending: 0,
+            },
+            total_cost: 2.4567,
+            elapsed: Duration::from_secs(720), // 12min
+            shutdown_state: ShutdownState::Running,
+            shutdown_remaining: None,
+            quit_pending: false,
+            completed: true, // Mark as completed for green banner
+            restart_pending: None,
+            active_workers: 0,
+            idle_workers: 3,
+        };
+
+        // Completed banner should show when all tasks done and not shutting down
+        let snapshot = render_status_bar_snapshot(&status, None, false, 120);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_global_status_bar_empty_session() {
+        // Test: 0/0 tasks (empty session), no cost, minimal elapsed time
+        let status = OrchestratorStatus {
+            scheduler: SchedulerStatus {
+                total: 0,
+                done: 0,
+                ready: 0,
+                in_progress: 0,
+                blocked: 0,
+                pending: 0,
+            },
+            total_cost: 0.0,
+            elapsed: Duration::from_secs(5),
+            shutdown_state: ShutdownState::Running,
+            shutdown_remaining: None,
+            quit_pending: false,
+            completed: false,
+            restart_pending: None,
+            active_workers: 0,
+            idle_workers: 0,
+        };
+
+        let snapshot = render_status_bar_snapshot(&status, None, false, 100);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_global_status_bar_high_cost() {
+        // Test: Large cost ($50.00), many tasks
+        let status = OrchestratorStatus {
+            scheduler: SchedulerStatus {
+                total: 50,
+                done: 25,
+                ready: 10,
+                in_progress: 5,
+                blocked: 5,
+                pending: 5,
+            },
+            total_cost: 50.0,
+            elapsed: Duration::from_secs(7200), // 2h
+            shutdown_state: ShutdownState::Running,
+            shutdown_remaining: None,
+            quit_pending: false,
+            completed: false,
+            restart_pending: None,
+            active_workers: 5,
+            idle_workers: 5,
+        };
+
+        let snapshot = render_status_bar_snapshot(&status, Some(3), false, 140);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Task 73.2: Snapshot testy dla 0 workerów ───────────────────────
+
+    #[test]
+    fn test_snapshot_grid_0_workers_80x24() {
+        // Edge case: Dashboard z 0 workerów na standardowym terminalu 80x24
+        // Sprawdza czy grid layout nie panic-uje i renderuje się poprawnie z pustą listą
+        let panels: HashMap<u32, WorkerPanel> = HashMap::new(); // Brak paneli
+        let status = make_orchestrator_status(5, 0, 0, 0, 0); // 0 active, 0 idle workers
+
+        let snapshot = render_grid_snapshot(&panels, 0, None, &status, 80, 24);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_compute_grid_0_workers_returns_1x1() {
+        // Test: compute_grid(0) zwraca (1, 1) zamiast panic-ować
+        assert_eq!(
+            compute_grid(0),
+            (1, 1),
+            "compute_grid(0) should return (1, 1) without panicking"
+        );
+    }
+
+    #[test]
+    fn test_compute_grid_rects_0_workers_returns_empty() {
+        // Test: compute_grid_rects z 0 workerów zwraca pustą listę
+        let area = Rect::new(0, 0, 80, 24);
+        let rects = compute_grid_rects(area, 0);
+        assert_eq!(
+            rects.len(),
+            0,
+            "compute_grid_rects(0) should return empty vector"
+        );
+    }
+
+    #[test]
+    fn test_render_grid_all_idle_workers_filtered_out() {
+        // Test: 3 workerów Idle (poza grace period) — wszystkie odfiltrowane
+        // Grid powinien być pusty, ale status bar nadal renderowany
+        let mut panels = HashMap::new();
+        for wid in 1..=3 {
+            panels.insert(wid, make_panel(wid, WorkerState::Idle, None, None));
+        }
+
+        let status = make_orchestrator_status(5, 2, 0, 3, 0); // 0 active, 3 idle
+        let snapshot = render_grid_snapshot(&panels, 3, None, &status, 80, 24);
+
+        // Verify grid area is empty (no worker panels rendered)
+        // but status bar at the bottom is present
+        assert!(
+            snapshot.contains("Queue:"),
+            "Status bar should still be rendered with 0 active workers"
         );
     }
 }

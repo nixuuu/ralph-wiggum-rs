@@ -106,10 +106,6 @@ pub const INVALID_REQUEST: i32 = -32600;
 /// MCP protocol version constant (Streamable HTTP transport)
 pub const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
-/// Legacy MCP protocol version (pre-Streamable HTTP)
-#[allow(dead_code)]
-pub const MCP_PROTOCOL_VERSION_LEGACY: &str = "2024-11-05";
-
 /// MCP initialization parameters (client → server)
 #[allow(dead_code)] // Public API: will be used in future task implementations
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1029,5 +1025,151 @@ mod tests {
         const { assert!(METHOD_NOT_FOUND == -32601) };
         const { assert!(INVALID_PARAMS == -32602) };
         const { assert!(INTERNAL_ERROR == -32603) };
+    }
+
+    // ── Falsy Values in JSON-RPC ID ────────────────────────────────────
+    // JSON-RPC spec allows any JSON value as ID, including falsy values like 0.
+    // In JavaScript, 0 is falsy but it's a valid ID. This test ensures
+    // proper serialization/deserialization roundtrip.
+
+    #[test]
+    fn test_json_rpc_request_id_zero() {
+        // id: 0 is a valid JSON-RPC request ID (though falsy in JavaScript)
+        let json = r#"{"jsonrpc":"2.0","id":0,"method":"test"}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(req.jsonrpc, "2.0");
+        assert_eq!(req.method, "test");
+        // id=0 should parse as Some(Value::Number(0)), not None
+        assert_eq!(req.id, Some(json!(0)));
+    }
+
+    #[test]
+    fn test_json_rpc_request_id_zero_with_params() {
+        // Full request roundtrip with id=0 and params
+        let json = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"key":"value"}}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(req.id, Some(json!(0)));
+        assert_eq!(req.method, "initialize");
+        assert!(req.params.is_some());
+        assert_eq!(req.params.unwrap()["key"], "value");
+    }
+
+    #[test]
+    fn test_json_rpc_request_id_zero_serialization_roundtrip() {
+        // Create request with id=0, serialize, deserialize, verify
+        let original = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(0)),
+            method: "test_method".into(),
+            params: Some(json!({"arg": "val"})),
+        };
+
+        // Serialize to JSON string
+        let json_str = serde_json::to_string(&original).unwrap();
+        assert!(json_str.contains("\"id\":0"));
+
+        // Deserialize back
+        let parsed: JsonRpcRequest = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed.jsonrpc, original.jsonrpc);
+        assert_eq!(parsed.id, Some(json!(0)));
+        assert_eq!(parsed.method, original.method);
+        assert_eq!(parsed.params, original.params);
+    }
+
+    #[test]
+    fn test_json_rpc_response_with_id_zero() {
+        // Create response with id=0 and success result
+        let resp = JsonRpcResponse::success(Some(json!(0)), json!({"result": "ok"}));
+
+        assert_eq!(resp.jsonrpc, "2.0");
+        assert_eq!(resp.id, Some(json!(0)));
+        assert!(resp.result.is_some());
+        assert!(resp.error.is_none());
+
+        // Verify serialization preserves id=0
+        let json_str = serde_json::to_string(&resp).unwrap();
+        assert!(json_str.contains("\"id\":0"));
+
+        // Deserialize and verify
+        let parsed: JsonRpcResponse = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.id, Some(json!(0)));
+    }
+
+    #[test]
+    fn test_json_rpc_error_response_with_id_zero() {
+        // Error response with id=0
+        let resp =
+            JsonRpcResponse::error(Some(json!(0)), INVALID_PARAMS, "Invalid parameters".into());
+
+        assert_eq!(resp.jsonrpc, "2.0");
+        assert_eq!(resp.id, Some(json!(0)));
+        assert!(resp.result.is_none());
+        assert!(resp.error.is_some());
+
+        let err = resp.error.as_ref().unwrap();
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert_eq!(err.message, "Invalid parameters");
+
+        // Verify serialization includes id=0
+        let json_str = serde_json::to_string(&resp).unwrap();
+        assert!(json_str.contains("\"id\":0"));
+    }
+
+    #[test]
+    fn test_json_rpc_response_id_zero_roundtrip() {
+        // Full roundtrip: create response with id=0, serialize, deserialize
+        let original = JsonRpcResponse::success(Some(json!(0)), json!({"status": "success"}));
+
+        let json_str = serde_json::to_string(&original).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed.jsonrpc, "2.0");
+        assert_eq!(parsed.id, Some(json!(0)));
+        assert_eq!(parsed.result, Some(json!({"status": "success"})));
+        assert!(parsed.error.is_none());
+    }
+
+    #[test]
+    fn test_json_rpc_request_id_zero_vs_null() {
+        // Verify that id=0 is distinct from id=null (which becomes None)
+        let json_zero = r#"{"jsonrpc":"2.0","id":0,"method":"test"}"#;
+        let json_null = r#"{"jsonrpc":"2.0","id":null,"method":"test"}"#;
+
+        let req_zero: JsonRpcRequest = serde_json::from_str(json_zero).unwrap();
+        let req_null: JsonRpcRequest = serde_json::from_str(json_null).unwrap();
+
+        // id=0 should be Some(0)
+        assert_eq!(req_zero.id, Some(json!(0)));
+        // id=null should be None
+        assert!(req_null.id.is_none());
+
+        // They should not be equal
+        assert_ne!(req_zero.id, req_null.id);
+    }
+
+    #[test]
+    fn test_json_rpc_request_missing_method_field() {
+        // JSON-RPC request bez pola method powinno zwrócić błąd deserializacji
+        // method jest obowiązkowym polem, więc serde powinien zwrócić Err
+        let json = r#"{"jsonrpc":"2.0","id":1}"#;
+        let result: Result<JsonRpcRequest, _> = serde_json::from_str(json);
+
+        // Deserializacja powinna się nie powieść
+        assert!(
+            result.is_err(),
+            "Missing 'method' field should cause deserialization error"
+        );
+
+        // Sprawdzamy że error istnieje i zawiera informację o brakującym polu
+        let err = result.unwrap_err();
+        let error_msg = err.to_string();
+        assert!(
+            error_msg.contains("method"),
+            "Error message should mention missing 'method' field: {}",
+            error_msg
+        );
     }
 }

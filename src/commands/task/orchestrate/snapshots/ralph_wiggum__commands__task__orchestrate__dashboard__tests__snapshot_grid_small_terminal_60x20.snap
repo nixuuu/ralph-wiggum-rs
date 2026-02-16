@@ -1,0 +1,24 @@
+---
+source: src/commands/task/orchestrate/dashboard.rs
+expression: snapshot
+---
+╭ W1 [1.1: api] ───╮╭ W2 [2.1: core] ──╮╔ ▶ W3 [3.1: ui] ══╗
+│● implement       ││◎ review+fix      │║⚙ setup           ║
+│                  ││                  │║                  ║
+│                  ││                  │║                  ║
+│                  ││                  │║                  ║
+│                  ││                  │║                  ║
+│                  ││                  │║                  ║
+│                  ││                  │║                  ║
+╰ $0.0000 │ ↓0 ↑0 ─╯╰ $0.0000 │ ↓0 ↑0 ─╯╚ $0.0000 │ ↓0 ↑0 ═╝
+╭ W4 [4.1: db] ────╮╭ W5 [5.1: auth] ──╮╭ W6 [6.1: config] ╮
+│◉ verify          ││⊕ merging         ││⚡ resolving      │
+│                  ││                  ││conflicts         │
+│                  ││                  ││                  │
+│                  ││                  ││                  │
+│                  ││                  ││                  │
+│                  ││                  ││                  │
+╰ $0.0000 │ ↓0 ↑0 ─╯╰ $0.0000 │ ↓0 ↑0 ─╯╰ $0.0000 │ ↓0 ↑0 ─╯
+────────────────────────────────────────────────────────────
+ [██████░░░░░░░░░░░░░░] 4/12 (33%) │ $0.0842 │ $0.0210/task
+ Queue: 2 ready │ 6 wip │ 0 blocked │ 0 pending  │  Focus: W

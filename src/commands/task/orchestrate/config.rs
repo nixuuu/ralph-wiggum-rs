@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::commands::task::orchestrate::events::WorkerPhase;
 use crate::shared::file_config::FileConfig;
 
 // ── Input flags from TUI input thread ───────────────────────────────────
@@ -31,6 +33,10 @@ pub(super) struct InputFlags {
     /// List of currently active (non-idle) worker IDs, updated by dashboard on each render.
     /// Used by input thread for focus navigation (Tab cycles only through active workers).
     pub(super) active_worker_ids: Arc<Mutex<Vec<u32>>>,
+    /// Map of worker phases (worker_id -> phase) for validation (task 25.3.3).
+    /// Updated by orchestrator events when worker phase changes.
+    /// Used by input thread to validate 'i' key press (only allow in Claude phases).
+    pub(super) worker_phases: Arc<Mutex<HashMap<u32, Option<WorkerPhase>>>>,
 }
 
 // ── Resolved config ─────────────────────────────────────────────────────
@@ -41,17 +47,12 @@ pub struct ResolvedConfig {
     pub max_retries: u32,
     pub model: Option<String>,
     pub worktree_prefix: Option<String>,
-    /// Verbosity flag — parsed from CLI but not actively used in orchestrator logic.
-    #[allow(dead_code)] // CLI flag: parsed from args but not currently used in orchestrator
     pub verbose: bool,
     pub resume: bool,
     pub dry_run: bool,
     pub no_merge: bool,
     pub max_cost: Option<f64>,
     pub timeout: Option<Duration>,
-    /// Task filter — parsed from CLI but not actively used in orchestrator logic.
-    #[allow(dead_code)] // CLI flag: parsed from args but not currently used in orchestrator
-    pub task_filter: Option<Vec<String>>,
     /// Model to use for merge conflict resolution (fallback: "opus")
     pub conflict_resolution_model: String,
     /// Model to use for code review phase (review+fix). Defaults to "opus".
@@ -87,10 +88,6 @@ impl ResolvedConfig {
             .clone()
             .or_else(|| orch_cfg.worktree_prefix.clone());
         let timeout = cli.timeout.as_deref().and_then(parse_duration);
-        let task_filter = cli
-            .tasks
-            .as_ref()
-            .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
         let conflict_resolution_model = cli
             .conflict_model
             .clone()
@@ -134,7 +131,6 @@ impl ResolvedConfig {
             no_merge: cli.no_merge,
             max_cost: cli.max_cost,
             timeout,
-            task_filter,
             conflict_resolution_model,
             review_model,
             watchdog_interval_secs: orch_cfg.watchdog_interval_secs,
@@ -246,10 +242,6 @@ mod tests {
         assert!(config.verbose);
         assert_eq!(config.max_cost, Some(5.0));
         assert_eq!(config.timeout, Some(Duration::from_secs(3600)));
-        assert_eq!(
-            config.task_filter,
-            Some(vec!["T01".to_string(), "T03".to_string()])
-        );
         // Default "opus" should be resolved to full ID
         assert_eq!(config.conflict_resolution_model, "claude-opus-4-6");
     }
@@ -584,5 +576,51 @@ max_retries = 3
     fn test_orchestrate_config_review_model_none_by_default() {
         let orch_cfg = crate::shared::file_config::OrchestrateConfig::default();
         assert!(orch_cfg.review_model.is_none());
+    }
+
+    // ── Task 53.1: workers=0 validation boundary tests ──────────────────
+
+    #[test]
+    fn test_resolved_config_workers_zero_from_file() {
+        // workers=0 from .ralph.toml passes through without validation
+        let cli_args = default_orchestrate_args();
+        let file_config: FileConfig = toml::from_str(
+            r#"
+[task.orchestrate]
+workers = 0
+"#,
+        )
+        .unwrap();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+        assert_eq!(config.workers, 0);
+    }
+
+    #[test]
+    fn test_resolved_config_workers_zero_from_cli() {
+        // --workers=0 from CLI passes through without validation
+        let cli_args = crate::commands::task::args::OrchestrateArgs {
+            workers: Some(0),
+            ..default_orchestrate_args()
+        };
+        let config = ResolvedConfig::from_args(&cli_args, &FileConfig::default());
+        assert_eq!(config.workers, 0);
+    }
+
+    #[test]
+    fn test_resolved_config_workers_zero_cli_overrides_config() {
+        // CLI --workers=0 overrides valid config workers=4
+        let cli_args = crate::commands::task::args::OrchestrateArgs {
+            workers: Some(0),
+            ..default_orchestrate_args()
+        };
+        let file_config: FileConfig = toml::from_str(
+            r#"
+[task.orchestrate]
+workers = 4
+"#,
+        )
+        .unwrap();
+        let config = ResolvedConfig::from_args(&cli_args, &file_config);
+        assert_eq!(config.workers, 0);
     }
 }

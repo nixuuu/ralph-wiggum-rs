@@ -116,7 +116,7 @@ fn build_border_style(
         // Worker in grace period — use dimmed color
         (BorderType::Rounded, Color::Gray)
     } else {
-        (BorderType::Rounded, state_color(state))
+        (BorderType::Rounded, state.color())
     };
 
     let border_style = if is_focused {
@@ -145,19 +145,42 @@ fn build_panel_content<'a>(panel: &'a WorkerPanel, area: Rect) -> Vec<Line<'a>> 
         return Vec::new();
     }
 
-    // First line: phase icon + name
-    let (icon, icon_color) = state_icon(&ws.state);
+    // First line: phase icon + name + profiles (if verify phase)
+    let (icon, icon_color) = ws.state.icon();
     let phase_str = ws
         .phase
         .as_ref()
         .map(|p| p.to_string())
         .unwrap_or_else(|| ws.state.to_string());
 
-    let status_line = Line::from(vec![
+    let mut status_spans = vec![
         Span::styled(icon.to_string(), Style::default().fg(icon_color)),
         Span::raw(" "),
         Span::styled(phase_str, Style::default().fg(icon_color)),
-    ]);
+    ];
+
+    // Add profile info for Verify phase
+    if ws.state == WorkerState::Verifying && !ws.verify_profiles.is_empty() {
+        let profile_info: Vec<String> = ws
+            .verify_profiles
+            .iter()
+            .map(|(name, success)| {
+                let icon = match success {
+                    Some(true) => "✓",
+                    Some(false) => "✗",
+                    None => "⏳",
+                };
+                format!("{} {}", name, icon)
+            })
+            .collect();
+        let profiles_str = format!(" [{}]", profile_info.join(", "));
+        status_spans.push(Span::styled(
+            profiles_str,
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let status_line = Line::from(status_spans);
 
     // Remaining lines: output tail (visual-wrap aware)
     let output_height = inner_height.saturating_sub(1);
@@ -185,37 +208,12 @@ fn build_panel_content<'a>(panel: &'a WorkerPanel, area: Rect) -> Vec<Line<'a>> 
     lines
 }
 
-/// Get color for a worker state.
-fn state_color(state: &WorkerState) -> Color {
-    match state {
-        WorkerState::Idle => Color::DarkGray,
-        WorkerState::SettingUp => Color::Blue,
-        WorkerState::Implementing => Color::Cyan,
-        WorkerState::Reviewing => Color::Yellow,
-        WorkerState::Verifying => Color::Magenta,
-        WorkerState::Merging => Color::Green,
-        WorkerState::ResolvingConflicts => Color::Red,
-    }
-}
-
-/// Get icon and color for a worker state.
-fn state_icon(state: &WorkerState) -> (&'static str, Color) {
-    match state {
-        WorkerState::Idle => ("○", Color::DarkGray),
-        WorkerState::SettingUp => ("⚙", Color::Blue),
-        WorkerState::Implementing => ("●", Color::Cyan),
-        WorkerState::Reviewing => ("◎", Color::Yellow),
-        WorkerState::Verifying => ("◉", Color::Magenta),
-        WorkerState::Merging => ("⊕", Color::Green),
-        WorkerState::ResolvingConflicts => ("⚡", Color::Red),
-    }
-}
-
 // ── Compact render ───────────────────────────────────────────────────
 
 /// Compact render for small terminals — single panel + tab bar.
 /// Only shows non-idle workers in the tab bar and auto-focuses the next active worker
 /// when the focused worker becomes idle. Shows a placeholder when all workers are idle.
+// Too many arguments: grouped rendering context (frame, area, panels, status, etc.)
 #[allow(clippy::too_many_arguments)]
 pub fn render_compact(
     frame: &mut ratatui::Frame<'_>,
@@ -397,25 +395,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_state_color_mapping() {
-        assert_eq!(state_color(&WorkerState::Idle), Color::DarkGray);
-        assert_eq!(state_color(&WorkerState::SettingUp), Color::Blue);
-        assert_eq!(state_color(&WorkerState::Implementing), Color::Cyan);
-        assert_eq!(state_color(&WorkerState::Reviewing), Color::Yellow);
-        assert_eq!(state_color(&WorkerState::Verifying), Color::Magenta);
-        assert_eq!(state_color(&WorkerState::Merging), Color::Green);
-        assert_eq!(state_color(&WorkerState::ResolvingConflicts), Color::Red);
-    }
+    fn test_build_panel_content_with_verify_profiles() {
+        use crate::commands::task::orchestrate::dashboard::WorkerPanel;
+        use crate::commands::task::orchestrate::events::WorkerPhase;
+        use crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer;
 
-    #[test]
-    fn test_state_icon_mapping() {
-        let (icon, _) = state_icon(&WorkerState::Idle);
-        assert_eq!(icon, "○");
-        let (icon, color) = state_icon(&WorkerState::SettingUp);
-        assert_eq!(icon, "⚙");
-        assert_eq!(color, Color::Blue);
-        let (icon, _) = state_icon(&WorkerState::Implementing);
-        assert_eq!(icon, "●");
+        let mut status = WorkerStatus::idle(1);
+        status.state = WorkerState::Verifying;
+        status.phase = Some(WorkerPhase::Verify);
+        status.verify_profiles = vec![
+            ("frontend".to_string(), Some(true)),
+            ("backend".to_string(), None),
+            ("database".to_string(), Some(false)),
+        ];
+
+        let panel = WorkerPanel {
+            worker_id: 1,
+            status,
+            output: OutputRingBuffer::new(10),
+            scroll_offset: 0,
+            idle_since: None,
+        };
+
+        let area = Rect::new(0, 0, 80, 10);
+        let lines = build_panel_content(&panel, area);
+
+        // First line should contain phase and profiles
+        assert!(!lines.is_empty());
+        let first_line_text = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+
+        // Should contain phase name
+        assert!(first_line_text.contains("verify"));
+        // Should contain profile names with status icons
+        assert!(first_line_text.contains("frontend"));
+        assert!(first_line_text.contains("backend"));
+        assert!(first_line_text.contains("database"));
+        // Should contain status icons
+        assert!(first_line_text.contains("✓")); // frontend success
+        assert!(first_line_text.contains("⏳")); // backend in progress
+        assert!(first_line_text.contains("✗")); // database failed
     }
 
     #[test]
@@ -429,6 +451,7 @@ mod tests {
             cost_usd: 0.1234,
             input_tokens: 5000,
             output_tokens: 3000,
+            verify_profiles: Vec::new(),
         };
 
         let footer = build_footer_line(&ws);
@@ -448,6 +471,7 @@ mod tests {
             cost_usd: 0.0,
             input_tokens: 0,
             output_tokens: 0,
+            verify_profiles: Vec::new(),
         };
 
         let line = build_title_line(1, &ws, false);
@@ -473,6 +497,7 @@ mod tests {
             cost_usd: 0.0,
             input_tokens: 0,
             output_tokens: 0,
+            verify_profiles: Vec::new(),
         };
 
         let line = build_title_line(2, &ws, false);
@@ -493,6 +518,7 @@ mod tests {
             task_id: None,
             component: None,
             model: None,
+            verify_profiles: Vec::new(),
             cost_usd: 0.0,
             input_tokens: 0,
             output_tokens: 0,
@@ -569,6 +595,7 @@ mod tests {
             model: None,
             cost_usd: 0.0,
             input_tokens: 0,
+            verify_profiles: Vec::new(),
             output_tokens: 0,
         };
 
@@ -662,6 +689,290 @@ mod tests {
         assert_eq!(spans[2].style.bg, None);
     }
 
+    // ── Snapshot tests ─────────────────────────────────────────────────
+
+    /// Helper: builds a WorkerPanel and renders it via render_panel_widget + snap.
+    /// Delegates to `render_panel_with_output` with empty output.
+    fn render_panel_snapshot(
+        status: WorkerStatus,
+        worker_id: u32,
+        is_focused: bool,
+        idle_since: Option<std::time::Instant>,
+        width: u16,
+        height: u16,
+    ) -> String {
+        render_panel_with_output(
+            status,
+            worker_id,
+            is_focused,
+            idle_since,
+            &[],
+            width,
+            height,
+        )
+    }
+
+    /// Helper: builds a WorkerPanel with output lines and renders it.
+    fn render_panel_with_output(
+        status: WorkerStatus,
+        worker_id: u32,
+        is_focused: bool,
+        idle_since: Option<std::time::Instant>,
+        output_lines: &[&str],
+        width: u16,
+        height: u16,
+    ) -> String {
+        use crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer;
+        use crate::test_helpers::snap;
+        use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+        let mut output = OutputRingBuffer::new(100);
+        for line in output_lines {
+            output.push(line);
+        }
+
+        let panel = WorkerPanel {
+            worker_id,
+            status,
+            output,
+            scroll_offset: 0,
+            idle_since,
+        };
+
+        let area = Rect::new(0, 0, width, height);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let widget = render_panel_widget(&panel, area, is_focused);
+                frame.render_widget(widget, area);
+            })
+            .expect("draw");
+
+        snap(terminal.backend().buffer())
+    }
+
+    /// Helper: creates a default WorkerStatus with common fields.
+    fn make_status(state: WorkerState) -> WorkerStatus {
+        WorkerStatus {
+            state,
+            phase: None,
+            task_id: None,
+            component: None,
+            model: None,
+            cost_usd: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+            verify_profiles: Vec::new(),
+        }
+    }
+
+    // ── 1. Border type: focused (Double) vs unfocused (Rounded) ──────
+
+    #[test]
+    fn test_snapshot_panel_focused_border() {
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("2.1".into());
+        status.component = Some("api".into());
+        status.cost_usd = 0.042;
+        status.input_tokens = 1500;
+        status.output_tokens = 2300;
+
+        let snapshot = render_panel_snapshot(status, 1, true, None, 50, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_panel_unfocused_border() {
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("2.1".into());
+        status.component = Some("api".into());
+        status.cost_usd = 0.042;
+        status.input_tokens = 1500;
+        status.output_tokens = 2300;
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 50, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 2–3. Title line variants ─────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_title_with_component_and_model() {
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("3.2".into());
+        status.component = Some("frontend".into());
+        status.model = Some("claude-sonnet-4-5-20250929".into());
+        status.cost_usd = 0.015;
+        status.input_tokens = 800;
+        status.output_tokens = 400;
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_title_no_component_no_model() {
+        let mut status = make_status(WorkerState::Idle);
+        status.task_id = None;
+        status.component = None;
+        status.model = None;
+
+        let snapshot = render_panel_snapshot(status, 3, false, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 4. Footer line ───────────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_footer_cost_tokens() {
+        let mut status = make_status(WorkerState::Reviewing);
+        status.task_id = Some("1.1".into());
+        status.cost_usd = 0.042;
+        status.input_tokens = 1500;
+        status.output_tokens = 2300;
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 5–8. Panel content with different WorkerStates ───────────────
+
+    #[test]
+    fn test_snapshot_state_implementing() {
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("5.1".into());
+        status.phase = Some(super::super::events::WorkerPhase::Implement);
+
+        let snapshot = render_panel_snapshot(status, 2, false, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_state_resolving_conflicts() {
+        let mut status = make_status(WorkerState::ResolvingConflicts);
+        status.task_id = Some("6.1".into());
+        status.model = Some("claude-opus-4-6".into());
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_state_idle() {
+        let status = make_status(WorkerState::Idle);
+
+        let snapshot = render_panel_snapshot(status, 4, false, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_state_verifying() {
+        let mut status = make_status(WorkerState::Verifying);
+        status.task_id = Some("7.1".into());
+        status.phase = Some(super::super::events::WorkerPhase::Verify);
+
+        let snapshot = render_panel_snapshot(status, 3, false, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 9. Grace period dimming ──────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_grace_period_dimming() {
+        let status = make_status(WorkerState::Idle);
+        // idle_since = Some(Instant::now()) simulates grace period
+        let idle_since = Some(std::time::Instant::now());
+
+        let snapshot = render_panel_snapshot(status, 2, false, idle_since, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 10. Profile status rows (verify phase) ──────────────────────
+
+    #[test]
+    fn test_snapshot_verify_profiles() {
+        let mut status = make_status(WorkerState::Verifying);
+        status.task_id = Some("8.1".into());
+        status.phase = Some(super::super::events::WorkerPhase::Verify);
+        status.verify_profiles = vec![
+            ("lint".into(), Some(true)),
+            ("test".into(), Some(false)),
+            ("build".into(), None),
+        ];
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 60, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── 11. Panel with output buffer tail ────────────────────────────
+
+    #[test]
+    fn test_snapshot_panel_with_output_lines() {
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("9.1".into());
+        status.component = Some("core".into());
+        status.phase = Some(super::super::events::WorkerPhase::Implement);
+
+        let output_lines = &[
+            "Compiling ralph-wiggum v0.1.0",
+            "  Running `target/debug/ralph`",
+            "warning: unused variable `x`",
+            "  --> src/main.rs:42:9",
+            "Build completed successfully",
+        ];
+
+        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 55, 10);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Missing state snapshots: SettingUp, Reviewing, Merging ─────────
+
+    #[test]
+    fn test_snapshot_state_setting_up() {
+        let mut status = make_status(WorkerState::SettingUp);
+        status.task_id = Some("10.1".into());
+        status.phase = Some(super::super::events::WorkerPhase::Setup);
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_state_reviewing() {
+        let mut status = make_status(WorkerState::Reviewing);
+        status.task_id = Some("11.1".into());
+        status.phase = Some(super::super::events::WorkerPhase::ReviewFix);
+
+        let snapshot = render_panel_snapshot(status, 2, false, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_state_merging() {
+        let mut status = make_status(WorkerState::Merging);
+        status.task_id = Some("12.1".into());
+
+        let snapshot = render_panel_snapshot(status, 3, false, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Focused panel with model ────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_focused_with_model() {
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("4.1".into());
+        status.component = Some("cli".into());
+        status.model = Some("claude-sonnet-4-5-20250929".into());
+        status.cost_usd = 0.025;
+        status.input_tokens = 3000;
+        status.output_tokens = 1200;
+
+        let snapshot = render_panel_snapshot(status, 1, true, None, 50, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
     // ── Grace period rendering tests ─────────────────────────────────────
 
     #[test]
@@ -704,5 +1015,297 @@ mod tests {
         assert_eq!(border_type, BorderType::Rounded);
         assert_eq!(border_style.fg, Some(Color::Cyan));
         assert!(!border_style.add_modifier.contains(Modifier::DIM));
+    }
+
+    // ── Narrow terminal tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_narrow_width_20() {
+        // Test minimal width (20) — title/footer truncation, bordering preserved
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("13.1".into());
+        status.component = Some("backend".into());
+        status.model = Some("claude-sonnet-4-5-20250929".into());
+        status.cost_usd = 0.0123;
+        status.input_tokens = 1234;
+        status.output_tokens = 567;
+
+        let output_lines = &[
+            "Short line",
+            "This is a much longer line that should wrap",
+            "OK",
+        ];
+
+        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 20, 8);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_narrow_width_30() {
+        // Test narrow but usable width (30) — better layout
+        let mut status = make_status(WorkerState::Verifying);
+        status.task_id = Some("14.2".into());
+        status.component = Some("api".into());
+        status.model = Some("claude-opus-4-6".into());
+        status.cost_usd = 0.456;
+        status.input_tokens = 5000;
+        status.output_tokens = 3000;
+        status.phase = Some(super::super::events::WorkerPhase::Verify);
+        status.verify_profiles = vec![("lint".into(), Some(true)), ("test".into(), None)];
+
+        let output_lines = &[
+            "Running verification...",
+            "Profile: lint — passed",
+            "Profile: test — in progress",
+        ];
+
+        let snapshot = render_panel_with_output(status, 2, false, None, output_lines, 30, 10);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_minimal_height_3() {
+        // Test minimal height (3) — border + 1 line content
+        let mut status = make_status(WorkerState::Idle);
+        status.task_id = None;
+        status.cost_usd = 0.0;
+        status.input_tokens = 0;
+        status.output_tokens = 0;
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 50, 3);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_narrow_width_20_focused() {
+        // Test focused panel at minimal width
+        let mut status = make_status(WorkerState::Reviewing);
+        status.task_id = Some("15".into());
+        status.component = Some("ui".into());
+        status.cost_usd = 0.001;
+        status.input_tokens = 100;
+        status.output_tokens = 50;
+
+        let snapshot = render_panel_snapshot(status, 3, true, None, 20, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_narrow_width_30_with_long_output() {
+        // Test narrow panel with wrapping output lines
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("16.1".into());
+        status.component = Some("core".into());
+
+        let output_lines = &[
+            "Line 1 normal",
+            "This is a very long line that will definitely wrap in a 30-char wide terminal",
+            "Short",
+            "Another long line with many words that should cause wrapping behavior",
+        ];
+
+        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 30, 12);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_minimal_height_4() {
+        // Test height=4 — border + status + 1 output line
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("17".into());
+        status.phase = Some(super::super::events::WorkerPhase::Implement);
+
+        let output_lines = &["First output line", "Second line (hidden)"];
+
+        let snapshot = render_panel_with_output(status, 2, false, None, output_lines, 50, 4);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Unicode tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_unicode_polish_task_id_component() {
+        // Test Polish characters in task_id and component
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("zażółć".into());
+        status.component = Some("środowisko".into());
+        status.model = Some("claude-sonnet-4-5-20250929".into());
+        status.cost_usd = 0.042;
+        status.input_tokens = 1500;
+        status.output_tokens = 2300;
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 60, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_unicode_emoji_output() {
+        // Test emoji in output lines
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("18.1".into());
+        status.component = Some("core".into());
+
+        let output_lines = &[
+            "🚀 Starting build process",
+            "✅ Tests passed successfully",
+            "❌ Linter found issues",
+            "⚠️  Warning: deprecated API",
+        ];
+
+        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 60, 10);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_unicode_cjk_output() {
+        // Test CJK double-width characters in output
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("19.1".into());
+        status.component = Some("i18n".into());
+
+        let output_lines = &[
+            "中文测试 Chinese test",
+            "日本語テスト Japanese test",
+            "한글 테스트 Korean test",
+            "Mixed: 中文 and English",
+        ];
+
+        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 60, 10);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_unicode_mixed_polish_emoji_cjk() {
+        // Test mixed Unicode: Polish + emoji + CJK
+        let mut status = make_status(WorkerState::Verifying);
+        status.task_id = Some("zażółć".into());
+        status.component = Some("środowisko".into());
+        status.phase = Some(super::super::events::WorkerPhase::Verify);
+
+        let output_lines = &[
+            "🚀 Uruchamianie testów",
+            "✅ Test został zakończony pomyślnie",
+            "中文: 测试通过",
+            "❌ Błąd: nie znaleziono pliku",
+        ];
+
+        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 70, 10);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Extremely long task_id and component tests ────────────────────────
+
+    #[test]
+    fn test_snapshot_extremely_long_task_id_width_60() {
+        // Test task_id with 100 characters on width=60
+        // Title line should be truncated to fit panel width
+        let mut status = make_status(WorkerState::Implementing);
+        // 100-char task_id
+        status.task_id = Some(
+            "1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16.17.18.19.20.21.22.23.24.25.26.27.28.29.30.31.32.33.34.35.36.37.38.39.40".into()
+        );
+        status.component = Some("api".into());
+        status.model = Some("claude-sonnet-4-5-20250929".into());
+        status.cost_usd = 0.042;
+        status.input_tokens = 1500;
+        status.output_tokens = 2300;
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 60, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_extremely_long_component_width_40() {
+        // Test component with 50 characters on width=40
+        // Title line should be truncated to fit panel width
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("2.1".into());
+        // 50-char component
+        status.component = Some("authentication-and-authorization-backend-service".into());
+        status.model = Some("claude-opus-4-6".into());
+        status.cost_usd = 0.123;
+        status.input_tokens = 2000;
+        status.output_tokens = 1000;
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 40, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_extremely_high_cost_footer() {
+        // Test footer with extremely high cost ($999999.99)
+        // Footer should display large cost without panic
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("3.1".into());
+        status.component = Some("core".into());
+        status.cost_usd = 999999.99;
+        status.input_tokens = 999_999_999;
+        status.output_tokens = 999_999_999;
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 50, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_extremely_long_both_task_id_and_component() {
+        // Test both task_id and component extremely long
+        // Should verify truncation behavior with both long values
+        let mut status = make_status(WorkerState::Reviewing);
+        // 100-char task_id
+        status.task_id = Some(
+            "feature.authentication.oauth2.implementation.backend.api.endpoints.v2.user.profile.settings.update.handler".into()
+        );
+        // 50-char component
+        status.component = Some("authentication-backend-microservice-orchestrator".into());
+        status.model = Some("claude-sonnet-4-5-20250929".into());
+        status.cost_usd = 12.3456;
+        status.input_tokens = 50_000;
+        status.output_tokens = 25_000;
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 60, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Empty/minimal data tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_empty_worker_with_task_id_no_component_no_model() {
+        // Test worker with task_id but without component and model
+        // Should render task_id without component or model suffix
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("42.1".into());
+        status.component = None;
+        status.model = None;
+        status.cost_usd = 0.0;
+        status.input_tokens = 0;
+        status.output_tokens = 0;
+
+        let snapshot = render_panel_snapshot(status, 2, false, None, 50, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_empty_worker_zero_cost_zero_tokens() {
+        // Test worker with cost=0.0 and tokens=0/0
+        // Footer should display $0.0000 and ↓0 ↑0 without errors
+        let mut status = make_status(WorkerState::Idle);
+        status.task_id = Some("1.1".into());
+        status.component = Some("test".into());
+
+        let snapshot = render_panel_snapshot(status, 3, false, None, 50, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_empty_worker_empty_output_buffer() {
+        // Test worker with empty output buffer
+        // Should render only status line, no output lines
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("5.2".into());
+        status.component = Some("core".into());
+        status.phase = Some(super::super::events::WorkerPhase::Implement);
+
+        let snapshot = render_panel_snapshot(status, 1, false, None, 50, 8);
+        insta::assert_snapshot!(snapshot);
     }
 }

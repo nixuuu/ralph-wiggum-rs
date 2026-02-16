@@ -1,0 +1,16 @@
+---
+source: src/commands/task/orchestrate/panels.rs
+expression: snapshot
+---
+╭ W1 [16.1: core] ───────────╮
+│● implementing              │
+│Line 1 normal               │
+│This is a very long line    │
+│that will definitely wrap in│
+│a 30-char wide terminal     │
+│Short                       │
+│Another long line with many │
+│words that should cause     │
+│wrapping behavior           │
+│                            │
+╰ $0.0000 │ ↓0 ↑0 ───────────╯

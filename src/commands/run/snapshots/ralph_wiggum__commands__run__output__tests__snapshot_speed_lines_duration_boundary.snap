@@ -1,0 +1,6 @@
+---
+source: src/commands/run/output.rs
+expression: output
+---
+  Speed:     3 tasks | —
+  Avg iter:   60s

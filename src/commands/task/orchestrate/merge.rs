@@ -197,18 +197,47 @@ pub fn step_output_lines(step: &StepOutput) -> Vec<String> {
 }
 
 /// Extract conflicting file paths from git merge output.
+///
+/// Supports multiple conflict formats:
+/// - `CONFLICT (content): Merge conflict in <file>`
+/// - `CONFLICT (add/add): Merge conflict in <file>`
+/// - `CONFLICT (modify/delete): <file> deleted in HEAD ...`
+/// - `CONFLICT (rename/delete): <file> deleted in HEAD ...`
+/// - `CONFLICT (rename/rename): <file> renamed to <a> in HEAD and to <b> in ...`
+///
+/// Deduplicates results when the same file appears in both stdout and stderr.
 fn extract_conflict_files(stdout: &str, stderr: &str) -> Vec<String> {
     let mut files = Vec::new();
     let combined = format!("{stdout}\n{stderr}");
 
     for line in combined.lines() {
-        // git merge --squash shows "CONFLICT (content): Merge conflict in <file>"
-        if let Some(rest) = line.strip_prefix("CONFLICT")
-            && let Some(file_part) = rest.rsplit("Merge conflict in ").next()
-        {
-            let file = file_part.trim();
-            if !file.is_empty() {
-                files.push(file.to_string());
+        if let Some(rest) = line.strip_prefix("CONFLICT") {
+            let after_type = if let Some(colon_pos) = rest.find(':') {
+                rest[colon_pos + 1..].trim()
+            } else {
+                continue;
+            };
+
+            // "Merge conflict in <file>"
+            if let Some(file) = after_type.strip_prefix("Merge conflict in ") {
+                let file = file.trim();
+                if !file.is_empty() && !files.contains(&file.to_string()) {
+                    files.push(file.to_string());
+                }
+                continue;
+            }
+
+            // "<file> deleted in HEAD ..." lub "<file> renamed to ..."
+            if (after_type.contains(" deleted in") || after_type.contains(" renamed to "))
+                && let Some(file) = after_type
+                    .split(" deleted in")
+                    .next()
+                    .and_then(|s| s.split(" renamed to ").next())
+            {
+                let file = file.trim();
+                if !file.is_empty() && !files.contains(&file.to_string()) {
+                    files.push(file.to_string());
+                }
             }
         }
     }
@@ -297,5 +326,103 @@ Auto-merging README.md";
         let lines = step_output_lines(&step);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1], "warning: something");
+    }
+
+    #[test]
+    fn test_extract_conflict_files_format_content() {
+        let stdout = "CONFLICT (content): Merge conflict in src/main.rs";
+        let files = extract_conflict_files(stdout, "");
+        assert_eq!(files, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_format_modify_delete() {
+        let stdout = "CONFLICT (modify/delete): src/old.rs deleted in HEAD and modified in branch.";
+        let files = extract_conflict_files(stdout, "");
+        assert_eq!(files, vec!["src/old.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_format_add_add() {
+        let stdout = "CONFLICT (add/add): Merge conflict in src/new.rs";
+        let files = extract_conflict_files(stdout, "");
+        assert_eq!(files, vec!["src/new.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_mixed_formats() {
+        let stdout = "\
+Auto-merging src/main.rs
+CONFLICT (content): Merge conflict in src/main.rs
+Auto-merging src/old.rs
+CONFLICT (modify/delete): src/old.rs deleted in HEAD and modified in branch.
+CONFLICT (add/add): Merge conflict in src/new.rs
+Auto-merging Cargo.toml
+CONFLICT (content): Merge conflict in Cargo.toml";
+        let files = extract_conflict_files(stdout, "");
+        assert_eq!(
+            files,
+            vec!["src/main.rs", "src/old.rs", "src/new.rs", "Cargo.toml"]
+        );
+    }
+
+    #[test]
+    fn test_extract_conflict_files_rename_delete() {
+        let stdout = "CONFLICT (rename/delete): src/renamed.rs deleted in HEAD and renamed to src/new_name.rs in branch.";
+        let files = extract_conflict_files(stdout, "");
+        assert_eq!(files, vec!["src/renamed.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_from_stderr() {
+        let stderr = "\
+CONFLICT (content): Merge conflict in lib/utils.rs
+CONFLICT (modify/delete): lib/legacy.rs deleted in HEAD and modified in branch.";
+        let files = extract_conflict_files("", stderr);
+        assert_eq!(files, vec!["lib/utils.rs", "lib/legacy.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_combined_stdout_stderr() {
+        let stdout = "CONFLICT (content): Merge conflict in src/app.rs";
+        let stderr = "CONFLICT (add/add): Merge conflict in src/config.rs";
+        let files = extract_conflict_files(stdout, stderr);
+        assert_eq!(files, vec!["src/app.rs", "src/config.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_dedup_across_streams() {
+        let stdout = "CONFLICT (content): Merge conflict in src/main.rs";
+        let stderr = "CONFLICT (content): Merge conflict in src/main.rs";
+        let files = extract_conflict_files(stdout, stderr);
+        assert_eq!(files, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_rename_rename() {
+        let stdout = "CONFLICT (rename/rename): src/old.rs renamed to src/a.rs in HEAD and to src/b.rs in branch.";
+        let files = extract_conflict_files(stdout, "");
+        assert_eq!(files, vec!["src/old.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_empty_after_colon() {
+        let stdout = "CONFLICT (content):";
+        let files = extract_conflict_files(stdout, "");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_step_output_lines_empty_fields() {
+        let step = StepOutput {
+            command: "".to_string(),
+            stdout: "".to_string(),
+            stderr: "".to_string(),
+            success: true,
+        };
+        let lines = step_output_lines(&step);
+        // Puste pola → tylko linia z promptem "$ "
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "$ ");
     }
 }

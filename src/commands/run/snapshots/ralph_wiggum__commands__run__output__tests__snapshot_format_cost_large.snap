@@ -1,0 +1,6 @@
+---
+source: src/commands/run/output.rs
+expression: output
+---
+  Cost:      $99.9900
+            $99.9900 claude-opus-4-6

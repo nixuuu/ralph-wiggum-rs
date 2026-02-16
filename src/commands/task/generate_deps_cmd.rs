@@ -3,22 +3,16 @@ use crossterm::style::Stylize;
 use super::args::GenerateDepsArgs;
 use crate::commands::run::{RunOnceOptions, run_once};
 use crate::shared::dag::TaskDag;
-use crate::shared::error::{RalphError, Result};
+use crate::shared::error::Result;
 use crate::shared::file_config::FileConfig;
 use crate::shared::tasks::TasksFile;
 use crate::templates;
 
 pub async fn execute(args: GenerateDepsArgs, file_config: &FileConfig) -> Result<()> {
     let tasks_path = &file_config.task.tasks_file;
-    if !tasks_path.exists() {
-        return Err(RalphError::MissingFile(format!(
-            "{} not found. Run `ralph-wiggum task prd` first.",
-            tasks_path.display()
-        )));
-    }
 
-    // Get before state
-    let before = TasksFile::load(tasks_path)?;
+    // Auto-initialize if file doesn't exist (instead of returning error)
+    let before = TasksFile::load_or_init(tasks_path)?;
 
     // Build prompt (YAML template — Claude edits tasks.yml directly)
     let prompt = templates::DEPS_GENERATION_PROMPT_YAML.to_string();

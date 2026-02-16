@@ -1,0 +1,15 @@
+---
+source: src/commands/task/orchestrate/worker_status.rs
+expression: format_worker_status(&status)
+---
+WorkerStatus {
+│ state: Verifying
+│ task_id: Some("20.2")
+│ component: Some("backend")
+│ phase: Some(Verify)
+│ model: Some("claude-sonnet-4-5-20250929")
+│ cost_usd: $0.0800
+│ input_tokens: 3000
+│ output_tokens: 2200
+│ verify_profiles: [("format", Some(true)), ("clippy", None)]
+}

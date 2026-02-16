@@ -1,0 +1,14 @@
+---
+source: src/commands/run/output.rs
+expression: output
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[v] COMPLETED - Promise found: <promise>done</promise>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Iterations: 3
+  Time:      0.00s
+  Tokens:    12k in / 6.8k out
+  Cost:      $0.5432
+            $0.5432 claude-sonnet-4-5
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

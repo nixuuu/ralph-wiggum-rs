@@ -50,12 +50,12 @@ impl OutputRingBuffer {
             .collect()
     }
 
-    #[allow(dead_code)] // Used in tests
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.lines.len()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
@@ -691,5 +691,230 @@ mod tests {
         // show 2 rows → should show "abc" (rows 2,3,4 from bottom)
         let result = buf.slice_visual(1, 2, 1);
         assert_eq!(result.len(), 1); // tylko "abc"
+    }
+
+    // ── Snapshot Tests ──────────────────────────────────────────────────
+
+    /// Helper: render OutputRingBuffer lines to a snapshot-friendly string.
+    /// Simulates rendering the lines to a ratatui Buffer.
+    fn render_buffer_snapshot(lines: Vec<Line<'static>>, width: u16) -> String {
+        use crate::test_helpers::{render_widget_to_buffer, snap};
+        use ratatui::text::Text;
+
+        let height = lines.len().max(1) as u16;
+        let text = Text::from(lines);
+        let buffer = render_widget_to_buffer(text, width, height);
+        snap(&buffer)
+    }
+
+    #[test]
+    fn test_snapshot_empty_buffer() {
+        let buf = OutputRingBuffer::new(10);
+        let lines = buf.tail(10);
+        let snapshot = render_buffer_snapshot(lines, 40);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_plain_text_lines() {
+        let mut buf = OutputRingBuffer::new(10);
+        buf.push("Line 1: Hello world");
+        buf.push("Line 2: Plain text");
+        buf.push("Line 3: No colors");
+        buf.push("Line 4: Just text");
+        buf.push("Line 5: End of buffer");
+
+        let lines = buf.tail(10);
+        let snapshot = render_buffer_snapshot(lines, 40);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_ansi_color_codes() {
+        let mut buf = OutputRingBuffer::new(10);
+        // ANSI escape sequences: red, green, bold
+        buf.push("\x1b[31mRed text\x1b[0m");
+        buf.push("\x1b[32mGreen text\x1b[0m");
+        buf.push("\x1b[1mBold text\x1b[0m");
+        buf.push("\x1b[31;1mRed and bold\x1b[0m");
+
+        let lines = buf.tail(10);
+        let snapshot = render_buffer_snapshot(lines, 40);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_tail_visual_with_wrapping() {
+        let mut buf = OutputRingBuffer::new(20);
+        buf.push("Short line");
+        buf.push(&"X".repeat(60)); // Wraps to 2 lines at width 40
+        buf.push("Another short line");
+
+        let lines = buf.tail_visual(5, 40);
+        let snapshot = render_buffer_snapshot(lines, 40);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_buffer_overflow() {
+        let mut buf = OutputRingBuffer::new(3);
+        buf.push("Line 1 - will be evicted");
+        buf.push("Line 2 - will be evicted");
+        buf.push("Line 3 - stays");
+        buf.push("Line 4 - stays");
+        buf.push("Line 5 - stays (newest)");
+
+        let lines = buf.tail(10);
+        let snapshot = render_buffer_snapshot(lines, 50);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_mixed_ansi_and_plain() {
+        let mut buf = OutputRingBuffer::new(10);
+        buf.push("Plain text line");
+        buf.push("\x1b[32m✓ Success\x1b[0m");
+        buf.push("Another plain line");
+        buf.push("\x1b[31m✗ Error\x1b[0m");
+        buf.push("\x1b[33m⚠ Warning\x1b[0m");
+        buf.push("Final plain text");
+
+        let lines = buf.tail(10);
+        let snapshot = render_buffer_snapshot(lines, 40);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── CJK Double-Width Character Tests ──────────────────────────────────
+
+    #[test]
+    fn test_snapshot_cjk_line_width_6() {
+        // '你好世界' = 4 CJK × 2 = 8 visual width, panel width=6
+        // tail_visual oblicza ceil(8/6) = 2 visual rows dla budżetu
+        // Snapshot weryfikuje że rendering nie overflow-uje panel width
+        let mut buf = OutputRingBuffer::new(10);
+        buf.push("你好世界");
+
+        let lines = buf.tail_visual(3, 6);
+        let snapshot = render_buffer_snapshot(lines, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_cjk_mixed_ascii() {
+        // "Hello你好World" = 5 + 4 + 5 = 14 visual width, panel width=10
+        // tail_visual oblicza ceil(14/10) = 2 visual rows
+        // Snapshot weryfikuje poprawne truncation przy mieszanym ASCII + CJK
+        let mut buf = OutputRingBuffer::new(10);
+        buf.push("Hello你好World");
+
+        let lines = buf.tail_visual(3, 10);
+        let snapshot = render_buffer_snapshot(lines, 10);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_cjk_emoji_modifiers() {
+        // Emoji z ZWJ sequence (👨‍💻) + standard emoji (🧪) — multiple codepoints
+        // Weryfikuje rendering emoji przy ograniczonej szerokości panelu
+        let mut buf = OutputRingBuffer::new(10);
+        buf.push("Coding: 👨‍💻 Testing: 🧪");
+
+        let lines = buf.tail_visual(5, 20);
+        let snapshot = render_buffer_snapshot(lines, 20);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_total_visual_rows_cjk() {
+        // "你好" (4w) → 1 row, "你好世界啊" (10w) → 1 row, "你好世界啊啊" (12w) → 2 rows
+        // Expected total: 1 + 1 + 2 = 4 visual rows w panel width=10
+        let mut buf = OutputRingBuffer::new(10);
+        buf.push("你好");
+        buf.push("你好世界啊");
+        buf.push("你好世界啊啊");
+
+        let total = buf.total_visual_rows(10);
+        assert_eq!(
+            total, 4,
+            "CJK double-width should compute correct visual rows"
+        );
+
+        // tail_visual z budżetem 4 visual rows zwraca wszystkie 3 logiczne linie
+        let lines = buf.tail_visual(4, 10);
+        let snapshot = render_buffer_snapshot(lines, 10);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_cjk_overflow_prevention() {
+        // '世界你好' (8 visual width) na panel width=5
+        // Double-width char nie mieści się w 1-kolumnowej reszcie → brak overflow
+        // tail_visual: ceil(8/5) = 2 visual rows → mieści się w budżecie 2
+        let mut buf = OutputRingBuffer::new(10);
+        buf.push("世界你好");
+
+        let lines = buf.tail_visual(2, 5);
+        assert_eq!(lines.len(), 1);
+
+        let snapshot = render_buffer_snapshot(lines, 5);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_cjk_multiple_lines_wrapping() {
+        // "你好" (4w) → 1 row, "世界" (4w) → 1 row, "你好世界" (8w) → 2 rows w width 6
+        // Total: 4 visual rows → tail_visual(4, 6) zwraca wszystkie 3 logiczne linie
+        let mut buf = OutputRingBuffer::new(10);
+        buf.push("你好");
+        buf.push("世界");
+        buf.push("你好世界");
+
+        let lines = buf.tail_visual(4, 6);
+        assert_eq!(lines.len(), 3);
+
+        let snapshot = render_buffer_snapshot(lines, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Capacity & Edge Case Tests ──────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_capacity_one_push_five() {
+        // Edge case: capacity=1 (minimalna), push 5 linii
+        // Tylko ostatnia powinna być zachowana
+        let mut buf = OutputRingBuffer::new(1);
+        buf.push("Line 1 - evicted");
+        buf.push("Line 2 - evicted");
+        buf.push("Line 3 - evicted");
+        buf.push("Line 4 - evicted");
+        buf.push("Line 5 - only this remains");
+
+        let lines = buf.tail(10);
+        let snapshot = render_buffer_snapshot(lines, 50);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_very_long_line_tail_visual() {
+        // Edge case: linia 500 chars z tail_visual na width=40
+        // Powinno wygenerować wiele wrap rows (500/40 = 13 visual rows)
+        let mut buf = OutputRingBuffer::new(10);
+        buf.push(&"A".repeat(500)); // 500 chars → 13 visual rows at width 40
+
+        // Tail visual z budżetem 15 rows (więcej niż wymaga linia)
+        let lines = buf.tail_visual(15, 40);
+        let snapshot = render_buffer_snapshot(lines, 40);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_capacity_one_push_empty() {
+        // Edge case: capacity=1, push pustą linię
+        let mut buf = OutputRingBuffer::new(1);
+        buf.push("");
+
+        let lines = buf.tail(10);
+        let snapshot = render_buffer_snapshot(lines, 40);
+        insta::assert_snapshot!(snapshot);
     }
 }

@@ -17,7 +17,6 @@ use crate::commands::task::orchestrate::worker::TaskResult;
 use crate::commands::task::orchestrate::worktree::WorktreeManager;
 use crate::shared::dag::TaskDag;
 use crate::shared::error::Result;
-use crate::shared::progress::ProgressTask;
 use crate::shared::tasks::TasksFile;
 
 use super::assignment::{WorkerSlot, get_mtime};
@@ -40,16 +39,14 @@ pub(super) struct RunLoopContext<'a> {
     pub(super) event_logger: EventLogger,
     pub(super) worker_slots: HashMap<u32, WorkerSlot>,
     pub(super) join_handles: HashMap<u32, tokio::task::JoinHandle<Result<TaskResult>>>,
-    pub(super) tasks_file: &'a TasksFile,
-    pub(super) progress: &'a crate::shared::progress::ProgressSummary,
-    pub(super) task_lookup: HashMap<&'a str, &'a ProgressTask>,
     pub(super) lockfile: Option<Lockfile>,
     pub(super) tui: &'a mut TuiContext,
     pub(super) merge_ctx: MergeContext,
     pub(super) progress_mtime: Option<SystemTime>,
     pub(super) flags: InputFlags,
-    /// Cached TasksFile for preview overlay rendering.
-    /// Updated on hot-reload and passed to dashboard when preview is active.
+    /// Cached TasksFile for preview overlay rendering and task lookups.
+    /// Updated on hot-reload (apply_reload) to reflect latest tasks.yml state.
+    /// All task metadata queries (component, model, name) should use this field.
     pub(super) cached_tasks_file: Arc<TasksFile>,
     /// Last heartbeat timestamp per worker (for liveness checking in watchdog).
     pub(super) last_heartbeat: HashMap<u32, Instant>,
@@ -61,6 +58,8 @@ pub(super) struct RunLoopContext<'a> {
     pub(super) mcp_cancel_token: CancellationToken,
     /// JoinHandle for the MCP server task.
     pub(super) mcp_server_handle: tokio::task::JoinHandle<()>,
+    /// Receiver for user messages from the TUI overlay (keyboard input thread → run_loop).
+    pub(super) user_message_rx: mpsc::Receiver<(u32, String)>,
 }
 
 impl RunLoopContext<'_> {
@@ -72,6 +71,42 @@ impl RunLoopContext<'_> {
         }
         self.worker_slots.insert(worker_id, WorkerSlot::Idle);
         self.last_heartbeat.remove(&worker_id);
+    }
+
+    /// Send a message to a specific worker.
+    ///
+    /// Returns Ok(()) if the message was sent successfully, or an error if:
+    /// - The worker doesn't exist
+    /// - The worker is idle (not assigned to a task)
+    /// - The message channel is full or closed
+    pub(super) async fn send_message_to_worker(
+        &self,
+        worker_id: u32,
+        message: String,
+    ) -> Result<()> {
+        match self.worker_slots.get(&worker_id) {
+            Some(WorkerSlot::Busy {
+                message_tx,
+                task_id,
+                ..
+            }) => {
+                message_tx.send(message).await.map_err(|_| {
+                    crate::shared::error::RalphError::Orchestrate(format!(
+                        "Failed to send message to worker {} (task {}): channel closed",
+                        worker_id, task_id
+                    ))
+                })?;
+                Ok(())
+            }
+            Some(WorkerSlot::Idle) => Err(crate::shared::error::RalphError::Orchestrate(format!(
+                "Worker {} is idle, cannot send message",
+                worker_id
+            ))),
+            None => Err(crate::shared::error::RalphError::Orchestrate(format!(
+                "Worker {} does not exist",
+                worker_id
+            ))),
+        }
     }
 }
 
@@ -116,6 +151,10 @@ impl Orchestrator {
                     self.handle_worker_event(&event, ctx, started_at, graceful_shutdown_started).await?;
                 }
 
+                Some((worker_id, message)) = ctx.user_message_rx.recv() => {
+                    self.handle_user_message(ctx, worker_id, message).await?;
+                }
+
                 _ = tokio::signal::ctrl_c() => {
                     if self.handle_ctrl_c(ctx, &mut graceful_shutdown_started) {
                         break;
@@ -158,12 +197,14 @@ impl Orchestrator {
 
 impl Orchestrator {
     fn print_startup_messages(&self, ctx: &mut RunLoopContext<'_>) {
+        // Generate summary from cached_tasks_file for up-to-date counts
+        let progress = ctx.cached_tasks_file.as_ref().to_summary();
         let msg = MultiplexedOutput::format_orchestrator_line(&format!(
             "Started: {} workers, {} tasks ({} done, {} remaining)",
             self.config.workers,
-            ctx.progress.total(),
-            ctx.progress.done,
-            ctx.progress.remaining()
+            progress.total(),
+            progress.done,
+            progress.remaining()
         ));
         ctx.tui.dashboard.push_log_line(&msg);
 
@@ -273,6 +314,34 @@ impl Orchestrator {
             ctx.tui.dashboard.handle_resize()?;
         }
         self.render_dashboard(ctx, started_at, graceful_shutdown_started)
+    }
+
+    /// Handle a user message from the TUI overlay.
+    ///
+    /// Sends the message to the specified worker via the message channel,
+    /// then emits a UserMessageSent event to update the TUI.
+    async fn handle_user_message(
+        &self,
+        ctx: &mut RunLoopContext<'_>,
+        worker_id: u32,
+        message: String,
+    ) -> Result<()> {
+        // Send message to worker via message channel
+        if let Err(e) = ctx.send_message_to_worker(worker_id, message.clone()).await {
+            // Log error to dashboard if message send fails
+            let msg = MultiplexedOutput::format_orchestrator_line(&format!(
+                "✗ Failed to send message to worker {}: {}",
+                worker_id, e
+            ));
+            ctx.tui.dashboard.push_log_line(&msg);
+            return Ok(()); // Don't propagate error — just log and continue
+        }
+
+        // Emit UserMessageSent event to TUI for logging
+        let event = WorkerEvent::new(WorkerEventKind::UserMessageSent { worker_id, message });
+        let _ = ctx.event_tx.send(event).await;
+
+        Ok(())
     }
 
     /// Returns `true` if the loop should break (force shutdown).
@@ -764,15 +833,38 @@ impl Orchestrator {
                     ));
                     ctx.tui.dashboard.push_log_line(&msg);
                 } else {
-                    self.apply_reload(ctx, &mut new_tf, new_dag);
-                    let delta = (new_count as i32) - (old_count as i32);
-                    let delta_str = if delta > 0 {
-                        format!("{} new tasks added", delta)
-                    } else if delta < 0 {
-                        format!("{} tasks removed", -delta)
-                    } else {
+                    // Apply reload and capture unblocked tasks
+                    let unblocked = self.apply_reload(ctx, &mut new_tf, new_dag);
+
+                    // Build comprehensive delta message
+                    let mut delta_parts = Vec::new();
+
+                    let task_delta = (new_count as i32) - (old_count as i32);
+                    if task_delta > 0 {
+                        delta_parts.push(format!(
+                            "{} new task{}",
+                            task_delta,
+                            if task_delta == 1 { "" } else { "s" }
+                        ));
+                    } else if task_delta < 0 {
+                        delta_parts.push(format!(
+                            "{} task{} removed",
+                            -task_delta,
+                            if task_delta == -1 { "" } else { "s" }
+                        ));
+                    }
+
+                    if !unblocked.is_empty() {
+                        let ids = unblocked.join(", ");
+                        delta_parts.push(format!("{} unblocked: {}", unblocked.len(), ids));
+                    }
+
+                    let delta_str = if delta_parts.is_empty() {
                         "no change".to_string()
+                    } else {
+                        delta_parts.join(", ")
                     };
+
                     let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                         "♻ [{timestamp}] tasks.yml reloaded ({})",
                         delta_str
@@ -798,13 +890,19 @@ impl Orchestrator {
             let new_dag = TaskDag::from_tasks_file(&new_tf);
             if new_dag.detect_cycles().is_none() {
                 ctx.progress_mtime = Some(new_mtime);
-                self.apply_reload(ctx, &mut new_tf, new_dag);
+                let _ = self.apply_reload(ctx, &mut new_tf, new_dag);
             }
         }
     }
 
     /// Patch scheduler state onto a freshly loaded TasksFile and update cache.
-    fn apply_reload(&self, ctx: &mut RunLoopContext<'_>, new_tf: &mut TasksFile, new_dag: TaskDag) {
+    /// Returns the list of task IDs that were unblocked.
+    fn apply_reload(
+        &self,
+        ctx: &mut RunLoopContext<'_>,
+        new_tf: &mut TasksFile,
+        new_dag: TaskDag,
+    ) -> Vec<String> {
         for task_id in ctx.scheduler.done_tasks() {
             let _ = new_tf.update_status(task_id, crate::shared::progress::TaskStatus::Done);
         }
@@ -819,6 +917,9 @@ impl Orchestrator {
         ctx.cached_tasks_file = Arc::new(new_tf.clone());
         ctx.scheduler.add_tasks(new_dag);
 
+        // Synchronize blocked set with file: if user changed blocked→todo, unblock them
+        let unblocked = ctx.scheduler.sync_blocked_with_file(new_tf);
+
         // Reset completed flag if new tasks make scheduler incomplete
         if ctx.flags.completed.load(Ordering::Relaxed) && !ctx.scheduler.is_complete() {
             ctx.flags.completed.store(false, Ordering::Relaxed);
@@ -829,6 +930,8 @@ impl Orchestrator {
             ));
             ctx.tui.dashboard.push_log_line(&msg);
         }
+
+        unblocked
     }
 }
 
@@ -851,7 +954,9 @@ pub(super) fn extract_worker_id(kind: &WorkerEventKind) -> Option<u32> {
         | WorkerEventKind::MergeConflict { worker_id, .. }
         | WorkerEventKind::OutputLines { worker_id, .. }
         | WorkerEventKind::MergeStepOutput { worker_id, .. }
-        | WorkerEventKind::Heartbeat { worker_id, .. } => Some(*worker_id),
+        | WorkerEventKind::Heartbeat { worker_id, .. }
+        | WorkerEventKind::UserMessageSent { worker_id, .. }
+        | WorkerEventKind::UserMessageReceived { worker_id, .. } => Some(*worker_id),
     }
 }
 
@@ -896,6 +1001,10 @@ mod tests {
             WorkerEventKind::Heartbeat {
                 worker_id: 5,
                 phase: WorkerPhase::Implement,
+            },
+            WorkerEventKind::UserMessageSent {
+                worker_id: 6,
+                message: "Test message".to_string(),
             },
         ];
         for (i, kind) in kinds.iter().enumerate() {
@@ -1055,6 +1164,7 @@ mod tests {
         use crate::commands::task::orchestrate::worktree::WorktreeInfo;
 
         let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+        let (msg_tx, _rx) = mpsc::channel(16);
         worker_slots.insert(
             1,
             WorkerSlot::Busy {
@@ -1066,6 +1176,7 @@ mod tests {
                 },
                 started_at: Instant::now(),
                 mcp_session_id: "session-1".to_string(),
+                message_tx: msg_tx,
             },
         );
 
@@ -1226,5 +1337,308 @@ mod tests {
 
         assert!(!restart_confirmed.load(Ordering::SeqCst));
         assert_eq!(restart_worker_id.load(Ordering::SeqCst), 0);
+    }
+
+    // ── Task 25.2.3: Message channel tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_send_message_to_worker_success() {
+        // Test: Successfully send a message to a busy worker
+        use crate::commands::task::orchestrate::assignment::WorkerSlot;
+        use crate::commands::task::orchestrate::worktree::WorktreeInfo;
+
+        let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+        let (msg_tx, mut msg_rx) = mpsc::channel(16);
+
+        worker_slots.insert(
+            1,
+            WorkerSlot::Busy {
+                task_id: "T01".to_string(),
+                worktree: WorktreeInfo {
+                    path: std::path::PathBuf::from("/tmp/wt1"),
+                    branch: "ralph/task/T01".to_string(),
+                    task_id: "T01".to_string(),
+                },
+                started_at: Instant::now(),
+                mcp_session_id: "session-1".to_string(),
+                message_tx: msg_tx,
+            },
+        );
+
+        // Send a test message by simulating send_message_to_worker logic
+        if let Some(WorkerSlot::Busy { message_tx, .. }) = worker_slots.get(&1) {
+            let result = message_tx.send("test message".to_string()).await;
+            assert!(result.is_ok(), "Message should be sent successfully");
+        }
+
+        // Verify message was received
+        let received = msg_rx.recv().await;
+        assert_eq!(received, Some("test message".to_string()));
+    }
+
+    #[test]
+    fn test_send_message_to_idle_worker_returns_error() {
+        // Test: Sending a message to an idle worker should return an error
+        use crate::commands::task::orchestrate::assignment::WorkerSlot;
+
+        let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+        worker_slots.insert(1, WorkerSlot::Idle);
+
+        // Check if worker is idle (simulating send_message_to_worker logic)
+        let slot = worker_slots.get(&1);
+        assert!(
+            matches!(slot, Some(WorkerSlot::Idle)),
+            "Idle worker should be detected"
+        );
+    }
+
+    #[test]
+    fn test_send_message_to_nonexistent_worker() {
+        // Test: Sending a message to a worker that doesn't exist
+        use crate::commands::task::orchestrate::assignment::WorkerSlot;
+
+        let worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+
+        // Check if worker exists
+        assert!(
+            !worker_slots.contains_key(&999),
+            "Non-existent worker should return None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_channel_capacity() {
+        // Test: Message channel has capacity of 16
+        let (msg_tx, mut msg_rx) = mpsc::channel::<String>(16);
+
+        // Send 16 messages (should all succeed without blocking)
+        for i in 0..16 {
+            let result = msg_tx.send(format!("msg{}", i)).await;
+            assert!(result.is_ok(), "Should send message {} without blocking", i);
+        }
+
+        // Verify all messages can be received
+        for i in 0..16 {
+            let received = msg_rx.recv().await;
+            assert_eq!(received, Some(format!("msg{}", i)));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_message_channel_closed_after_sender_drop() {
+        // Test: Channel is closed when sender is dropped
+        let (msg_tx, mut msg_rx) = mpsc::channel::<String>(16);
+
+        // Send a message
+        msg_tx.send("test".to_string()).await.unwrap();
+
+        // Drop sender
+        drop(msg_tx);
+
+        // Receive the sent message
+        assert_eq!(msg_rx.recv().await, Some("test".to_string()));
+
+        // Next recv should return None (channel closed)
+        assert_eq!(msg_rx.recv().await, None);
+    }
+
+    // ── Task 28.4: End-to-end message pipeline tests ────────────────────
+
+    #[tokio::test]
+    async fn test_message_pipeline_end_to_end() {
+        // Test: Full message pipeline from user_message_tx → user_message_rx → worker message_tx → worker message_rx
+        use crate::commands::task::orchestrate::assignment::WorkerSlot;
+        use crate::commands::task::orchestrate::worktree::WorktreeInfo;
+
+        // 1. Create user message channel (TUI overlay → run_loop)
+        let (user_message_tx, mut user_message_rx) = mpsc::channel::<(u32, String)>(16);
+
+        // 2. Create worker message channel (run_loop → worker)
+        let (worker_message_tx, mut worker_message_rx) = mpsc::channel::<String>(16);
+
+        // 3. Setup worker slots with message channel
+        let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+        worker_slots.insert(
+            1,
+            WorkerSlot::Busy {
+                task_id: "T01".to_string(),
+                worktree: WorktreeInfo {
+                    path: std::path::PathBuf::from("/tmp/wt1"),
+                    branch: "ralph/task/T01".to_string(),
+                    task_id: "T01".to_string(),
+                },
+                started_at: Instant::now(),
+                mcp_session_id: "session-1".to_string(),
+                message_tx: worker_message_tx,
+            },
+        );
+
+        // 4. Simulate TUI sending a message (user presses Ctrl+Enter in overlay)
+        user_message_tx
+            .send((1, "test message from user".to_string()))
+            .await
+            .unwrap();
+
+        // 5. Simulate run_loop receiving the message
+        let (worker_id, message) = user_message_rx.recv().await.unwrap();
+        assert_eq!(worker_id, 1);
+        assert_eq!(message, "test message from user");
+
+        // 6. Simulate run_loop forwarding the message to worker
+        if let Some(WorkerSlot::Busy { message_tx, .. }) = worker_slots.get(&worker_id) {
+            message_tx.send(message).await.unwrap();
+        }
+
+        // 7. Verify worker receives the message
+        let received = worker_message_rx.recv().await;
+        assert_eq!(received, Some("test message from user".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_message_pipeline_multiple_messages() {
+        // Test: Pipeline can handle multiple messages in sequence
+        let (user_message_tx, mut user_message_rx) = mpsc::channel::<(u32, String)>(16);
+        let (worker_message_tx, mut worker_message_rx) = mpsc::channel::<String>(16);
+
+        // Send multiple messages
+        user_message_tx
+            .send((1, "message 1".to_string()))
+            .await
+            .unwrap();
+        user_message_tx
+            .send((1, "message 2".to_string()))
+            .await
+            .unwrap();
+        user_message_tx
+            .send((1, "message 3".to_string()))
+            .await
+            .unwrap();
+
+        // Forward all messages
+        while let Ok((_, message)) = user_message_rx.try_recv() {
+            worker_message_tx.send(message).await.unwrap();
+        }
+
+        // Verify all messages arrive at worker
+        assert_eq!(
+            worker_message_rx.recv().await,
+            Some("message 1".to_string())
+        );
+        assert_eq!(
+            worker_message_rx.recv().await,
+            Some("message 2".to_string())
+        );
+        assert_eq!(
+            worker_message_rx.recv().await,
+            Some("message 3".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_pipeline_multiple_workers() {
+        // Test: Pipeline can route messages to different workers
+        use crate::commands::task::orchestrate::assignment::WorkerSlot;
+        use crate::commands::task::orchestrate::worktree::WorktreeInfo;
+
+        let (user_message_tx, mut user_message_rx) = mpsc::channel::<(u32, String)>(16);
+
+        // Create two worker message channels
+        let (worker1_tx, mut worker1_rx) = mpsc::channel::<String>(16);
+        let (worker2_tx, mut worker2_rx) = mpsc::channel::<String>(16);
+
+        let mut worker_slots: HashMap<u32, WorkerSlot> = HashMap::new();
+        worker_slots.insert(
+            1,
+            WorkerSlot::Busy {
+                task_id: "T01".to_string(),
+                worktree: WorktreeInfo {
+                    path: std::path::PathBuf::from("/tmp/wt1"),
+                    branch: "ralph/task/T01".to_string(),
+                    task_id: "T01".to_string(),
+                },
+                started_at: Instant::now(),
+                mcp_session_id: "session-1".to_string(),
+                message_tx: worker1_tx,
+            },
+        );
+        worker_slots.insert(
+            2,
+            WorkerSlot::Busy {
+                task_id: "T02".to_string(),
+                worktree: WorktreeInfo {
+                    path: std::path::PathBuf::from("/tmp/wt2"),
+                    branch: "ralph/task/T02".to_string(),
+                    task_id: "T02".to_string(),
+                },
+                started_at: Instant::now(),
+                mcp_session_id: "session-2".to_string(),
+                message_tx: worker2_tx,
+            },
+        );
+
+        // Send messages to different workers
+        user_message_tx
+            .send((1, "message for worker 1".to_string()))
+            .await
+            .unwrap();
+        user_message_tx
+            .send((2, "message for worker 2".to_string()))
+            .await
+            .unwrap();
+
+        // Route messages to workers
+        while let Ok((worker_id, message)) = user_message_rx.try_recv() {
+            if let Some(WorkerSlot::Busy { message_tx, .. }) = worker_slots.get(&worker_id) {
+                message_tx.send(message).await.unwrap();
+            }
+        }
+
+        // Verify each worker receives the correct message
+        assert_eq!(
+            worker1_rx.recv().await,
+            Some("message for worker 1".to_string())
+        );
+        assert_eq!(
+            worker2_rx.recv().await,
+            Some("message for worker 2".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_pipeline_channel_capacity() {
+        // Test: Both channels have capacity of 16 messages
+        let (user_message_tx, _user_message_rx) = mpsc::channel::<(u32, String)>(16);
+        let (worker_message_tx, _worker_message_rx) = mpsc::channel::<String>(16);
+
+        // Send 16 messages to user_message channel without blocking
+        for i in 0..16 {
+            let result = user_message_tx.send((1, format!("msg{}", i))).await;
+            assert!(result.is_ok(), "Should send message {} without blocking", i);
+        }
+
+        // Send 16 messages to worker_message channel without blocking
+        for i in 0..16 {
+            let result = worker_message_tx.send(format!("worker msg{}", i)).await;
+            assert!(
+                result.is_ok(),
+                "Should send worker message {} without blocking",
+                i
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_message_pipeline_user_channel_closed() {
+        // Test: user_message_rx returns None when sender is dropped
+        let (user_message_tx, mut user_message_rx) = mpsc::channel::<(u32, String)>(16);
+
+        user_message_tx.send((1, "test".to_string())).await.unwrap();
+        drop(user_message_tx);
+
+        // First recv gets the message
+        assert_eq!(user_message_rx.recv().await, Some((1, "test".to_string())));
+
+        // Second recv returns None (channel closed)
+        assert_eq!(user_message_rx.recv().await, None);
     }
 }

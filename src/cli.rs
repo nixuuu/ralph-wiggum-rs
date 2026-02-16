@@ -18,6 +18,18 @@ pub struct Cli {
     pub run_args: RunArgs,
 }
 
+impl Cli {
+    /// Zwraca czy flaga --debug jest aktywna dla tego CLI wywołania
+    pub fn debug(&self) -> bool {
+        match &self.command {
+            Some(Commands::Run(args)) => args.debug,
+            Some(Commands::Task { debug, .. }) => *debug,
+            Some(Commands::Update) => false,
+            None => self.run_args.debug,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Run claude in a loop until completion promise is found
@@ -28,6 +40,10 @@ pub enum Commands {
 
     /// Task management commands
     Task {
+        /// Enable debug logging to .ralph/logs/ diagnostic file
+        #[arg(long)]
+        debug: bool,
+
         #[command(subcommand)]
         command: TaskCommands,
     },
@@ -87,6 +103,47 @@ mod tests {
     fn test_no_subcommand_backward_compat() {
         let cli = Cli::parse_from(["ralph-wiggum", "--prompt", "test"]);
         assert!(cli.command.is_none());
+        assert_eq!(cli.run_args.prompt, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_debug_flag_default() {
+        let cli = Cli::parse_from(["ralph-wiggum", "--prompt", "test"]);
+        assert!(!cli.debug());
+    }
+
+    #[test]
+    fn test_debug_flag_enabled() {
+        let cli = Cli::parse_from(["ralph-wiggum", "--debug", "--prompt", "test"]);
+        assert!(cli.debug());
+    }
+
+    #[test]
+    fn test_debug_flag_with_run_subcommand() {
+        let cli = Cli::parse_from(["ralph-wiggum", "run", "--debug", "--prompt", "test"]);
+        assert!(cli.debug());
+        assert!(matches!(cli.command, Some(Commands::Run(_))));
+    }
+
+    #[test]
+    fn test_debug_flag_with_task_subcommand() {
+        let cli = Cli::parse_from(["ralph-wiggum", "task", "--debug", "status"]);
+        assert!(cli.debug());
+        assert!(matches!(cli.command, Some(Commands::Task { .. })));
+    }
+
+    #[test]
+    fn test_debug_flag_with_update_subcommand() {
+        let cli = Cli::parse_from(["ralph-wiggum", "update"]);
+        assert!(!cli.debug()); // update nie ma flagi debug
+        assert!(matches!(cli.command, Some(Commands::Update)));
+    }
+
+    #[test]
+    fn test_debug_flag_position() {
+        // Flaga --debug musi być po nazwach subkomend, przed pozostałymi flagami
+        let cli = Cli::parse_from(["ralph-wiggum", "--debug", "--prompt", "test"]);
+        assert!(cli.debug());
         assert_eq!(cli.run_args.prompt, Some("test".to_string()));
     }
 }

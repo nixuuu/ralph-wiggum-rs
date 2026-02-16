@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::shared::dag::TaskDag;
+use crate::shared::file_config::VerifyProfile;
 use crate::shared::progress::{ProgressSummary, TaskStatus};
+use crate::shared::tasks::TasksFile;
 
 /// Layered representation of the DAG for visualization.
 ///
@@ -125,7 +127,15 @@ fn estimate_rounds(layers: &[Vec<String>], workers: u32) -> usize {
 }
 
 /// Generate a simple dependency list for dry-run preview.
-pub fn format_dep_list(dag: &TaskDag, progress: &ProgressSummary) -> String {
+///
+/// Now includes profile information for each task that has profiles assigned.
+/// For each profile, shows setup and verify commands.
+pub fn format_dep_list(
+    dag: &TaskDag,
+    progress: &ProgressSummary,
+    tasks_file: &TasksFile,
+    profiles: &[VerifyProfile],
+) -> String {
     let mut lines = Vec::new();
     let done: HashSet<String> = progress
         .tasks
@@ -160,6 +170,46 @@ pub fn format_dep_list(dag: &TaskDag, progress: &ProgressSummary) -> String {
             "  [{status}] {} [{}] {} ← deps: {deps_str}",
             task.id, task.component, task.name
         ));
+
+        // Show profile information if task has profiles assigned
+        if let Some(task_node) = tasks_file.find_node(&task.id)
+            && !task_node.profiles.is_empty()
+        {
+            lines.push(format!("    Profiles: [{}]", task_node.profiles.join(", ")));
+
+            // For each profile, show setup and verify commands
+            for profile_name in &task_node.profiles {
+                if let Some(profile) = profiles.iter().find(|p| &p.name == profile_name) {
+                    // Setup commands
+                    if !profile.setup_commands.is_empty() {
+                        let setup_labels: Vec<&str> = profile
+                            .setup_commands
+                            .iter()
+                            .map(|cmd| cmd.label())
+                            .collect();
+                        lines.push(format!(
+                            "      Setup ({}): {}",
+                            profile_name,
+                            setup_labels.join(", ")
+                        ));
+                    }
+
+                    // Verify commands
+                    if !profile.verify_commands.is_empty() {
+                        let verify_labels: Vec<&str> = profile
+                            .verify_commands
+                            .iter()
+                            .map(|cmd| cmd.label())
+                            .collect();
+                        lines.push(format!(
+                            "      Verify ({}): {}",
+                            profile_name,
+                            verify_labels.join(", ")
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     lines.join("\n")
@@ -168,7 +218,9 @@ pub fn format_dep_list(dag: &TaskDag, progress: &ProgressSummary) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::file_config::{SetupCommand, VerifyCommand, VerifyProfile};
     use crate::shared::progress::{ProgressFrontmatter, ProgressTask};
+    use crate::shared::tasks::TaskNode;
 
     fn make_dag(deps: Vec<(&str, Vec<&str>)>) -> TaskDag {
         let mut fm = ProgressFrontmatter::default();
@@ -208,6 +260,13 @@ mod tests {
             blocked: 0,
             todo,
             frontmatter: None,
+        }
+    }
+
+    fn make_empty_tasks_file() -> TasksFile {
+        TasksFile {
+            default_model: None,
+            tasks: Vec::new(),
         }
     }
 
@@ -294,8 +353,10 @@ mod tests {
             ("T01", "api", TaskStatus::Done),
             ("T02", "api", TaskStatus::Todo),
         ]);
+        let tasks_file = make_empty_tasks_file();
+        let profiles: Vec<VerifyProfile> = Vec::new();
 
-        let output = format_dep_list(&dag, &progress);
+        let output = format_dep_list(&dag, &progress, &tasks_file, &profiles);
         assert!(output.contains("[x] T01"));
         assert!(output.contains("[ ] T02"));
         assert!(output.contains("T01 ✓"));
@@ -307,5 +368,174 @@ mod tests {
         let progress = make_progress(vec![]);
         let viz = visualize_dag(&dag, &progress);
         assert!(viz.layers.is_empty() || viz.layers.iter().all(|l| l.is_empty()));
+    }
+
+    #[test]
+    fn test_format_dep_list_with_profiles() {
+        let dag = make_dag(vec![("T01", vec![]), ("T02", vec!["T01"])]);
+        let progress = make_progress(vec![
+            ("T01", "frontend", TaskStatus::Todo),
+            ("T02", "backend", TaskStatus::Todo),
+        ]);
+
+        // Create tasks with profiles
+        let mut tasks_file = make_empty_tasks_file();
+        tasks_file.tasks = vec![
+            TaskNode {
+                id: "T01".to_string(),
+                name: "Frontend task".to_string(),
+                component: Some("frontend".to_string()),
+                status: Some(TaskStatus::Todo),
+                deps: Vec::new(),
+                model: None,
+                description: None,
+                related_files: Vec::new(),
+                implementation_steps: Vec::new(),
+                profiles: vec!["frontend".to_string()],
+                subtasks: Vec::new(),
+            },
+            TaskNode {
+                id: "T02".to_string(),
+                name: "Backend task".to_string(),
+                component: Some("backend".to_string()),
+                status: Some(TaskStatus::Todo),
+                deps: vec!["T01".to_string()],
+                model: None,
+                description: None,
+                related_files: Vec::new(),
+                implementation_steps: Vec::new(),
+                profiles: vec!["backend".to_string()],
+                subtasks: Vec::new(),
+            },
+        ];
+
+        // Create profiles
+        let profiles = vec![
+            VerifyProfile {
+                name: "frontend".to_string(),
+                description: Some("Frontend tests".to_string()),
+                paths: vec!["src/ui/**/*.rs".to_string()],
+                working_dir: None,
+                verify_commands: vec![
+                    VerifyCommand::Simple("npm test".to_string()),
+                    VerifyCommand::Detailed {
+                        command: "npm run lint".to_string(),
+                        name: Some("Lint".to_string()),
+                        description: None,
+                    },
+                ],
+                setup_commands: vec![SetupCommand::Simple("npm install".to_string())],
+            },
+            VerifyProfile {
+                name: "backend".to_string(),
+                description: Some("Backend tests".to_string()),
+                paths: vec!["src/api/**/*.rs".to_string()],
+                working_dir: None,
+                verify_commands: vec![VerifyCommand::Simple("cargo test".to_string())],
+                setup_commands: vec![SetupCommand::Detailed {
+                    run: "cargo build".to_string(),
+                    name: Some("Build".to_string()),
+                }],
+            },
+        ];
+
+        let output = format_dep_list(&dag, &progress, &tasks_file, &profiles);
+
+        // Check basic task info
+        assert!(output.contains("[ ] T01"));
+        assert!(output.contains("[ ] T02"));
+
+        // Check profile info for T01
+        assert!(output.contains("Profiles: [frontend]"));
+        assert!(output.contains("Setup (frontend): npm install"));
+        assert!(output.contains("Verify (frontend): npm test, Lint"));
+
+        // Check profile info for T02
+        assert!(output.contains("Profiles: [backend]"));
+        assert!(output.contains("Setup (backend): Build"));
+        assert!(output.contains("Verify (backend): cargo test"));
+    }
+
+    #[test]
+    fn test_format_dep_list_with_multiple_profiles() {
+        let dag = make_dag(vec![("T01", vec![])]);
+        let progress = make_progress(vec![("T01", "fullstack", TaskStatus::Todo)]);
+
+        // Create task with multiple profiles
+        let mut tasks_file = make_empty_tasks_file();
+        tasks_file.tasks = vec![TaskNode {
+            id: "T01".to_string(),
+            name: "Fullstack task".to_string(),
+            component: Some("fullstack".to_string()),
+            status: Some(TaskStatus::Todo),
+            deps: Vec::new(),
+            model: None,
+            description: None,
+            related_files: Vec::new(),
+            implementation_steps: Vec::new(),
+            profiles: vec!["frontend".to_string(), "backend".to_string()],
+            subtasks: Vec::new(),
+        }];
+
+        // Create profiles
+        let profiles = vec![
+            VerifyProfile {
+                name: "frontend".to_string(),
+                description: None,
+                paths: vec![],
+                working_dir: None,
+                verify_commands: vec![VerifyCommand::Simple("npm test".to_string())],
+                setup_commands: vec![SetupCommand::Simple("npm install".to_string())],
+            },
+            VerifyProfile {
+                name: "backend".to_string(),
+                description: None,
+                paths: vec![],
+                working_dir: None,
+                verify_commands: vec![VerifyCommand::Simple("cargo test".to_string())],
+                setup_commands: vec![SetupCommand::Simple("cargo build".to_string())],
+            },
+        ];
+
+        let output = format_dep_list(&dag, &progress, &tasks_file, &profiles);
+
+        // Check that both profiles are listed
+        assert!(output.contains("Profiles: [frontend, backend]"));
+
+        // Check that both profiles' commands are shown
+        assert!(output.contains("Setup (frontend): npm install"));
+        assert!(output.contains("Verify (frontend): npm test"));
+        assert!(output.contains("Setup (backend): cargo build"));
+        assert!(output.contains("Verify (backend): cargo test"));
+    }
+
+    #[test]
+    fn test_format_dep_list_with_no_profiles() {
+        let dag = make_dag(vec![("T01", vec![])]);
+        let progress = make_progress(vec![("T01", "api", TaskStatus::Todo)]);
+
+        // Task without profiles
+        let mut tasks_file = make_empty_tasks_file();
+        tasks_file.tasks = vec![TaskNode {
+            id: "T01".to_string(),
+            name: "Simple task".to_string(),
+            component: Some("api".to_string()),
+            status: Some(TaskStatus::Todo),
+            deps: Vec::new(),
+            model: None,
+            description: None,
+            related_files: Vec::new(),
+            implementation_steps: Vec::new(),
+            profiles: Vec::new(),
+            subtasks: Vec::new(),
+        }];
+
+        let profiles: Vec<VerifyProfile> = Vec::new();
+        let output = format_dep_list(&dag, &progress, &tasks_file, &profiles);
+
+        // Should not contain profile info
+        assert!(!output.contains("Profiles:"));
+        assert!(!output.contains("Setup"));
+        assert!(!output.contains("Verify"));
     }
 }

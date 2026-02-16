@@ -1,0 +1,7 @@
+---
+source: src/commands/task/orchestrate/ring_buffer.rs
+expression: snapshot
+---
+Short line
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+Another short line

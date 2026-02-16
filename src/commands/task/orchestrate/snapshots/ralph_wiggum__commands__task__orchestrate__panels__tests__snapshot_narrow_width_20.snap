@@ -1,0 +1,12 @@
+---
+source: src/commands/task/orchestrate/panels.rs
+expression: snapshot
+---
+╭ W1 [13.1: backend╮
+│● implementing    │
+│Short line        │
+│This is a much    │
+│longer line that  │
+│should wrap       │
+│OK                │
+╰ $0.0123 │ ↓1.2k ↑╯

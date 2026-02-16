@@ -1,0 +1,19 @@
+---
+source: src/commands/task/orchestrate/dashboard.rs
+expression: snapshot
+---
+ W1   W2   W3
+╔ ▶ W2 [2.1: core] ════════════════════╗
+║◎ review+fix                          ║
+║                                      ║
+║                                      ║
+║                                      ║
+║                                      ║
+║                                      ║
+║                                      ║
+║                                      ║
+║                                      ║
+║                                      ║
+║                                      ║
+╚ $0.0000 │ ↓0 ↑0 ═════════════════════╝
+ 2/8 (25%) │ $0.0842 │ ⏱ 2m25s  q=quit T

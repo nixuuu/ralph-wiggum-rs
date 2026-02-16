@@ -1,0 +1,15 @@
+---
+source: src/commands/task/orchestrate/worker_status.rs
+expression: format_worker_status(&status)
+---
+WorkerStatus {
+│ state: Implementing
+│ task_id: Some("20.2")
+│ component: Some("backend")
+│ phase: Some(Implement)
+│ model: Some("claude-sonnet-4-5-20250929")
+│ cost_usd: $0.0500
+│ input_tokens: 2000
+│ output_tokens: 1500
+│ verify_profiles: []
+}

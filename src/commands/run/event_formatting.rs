@@ -1,5 +1,6 @@
 use crossterm::style::Stylize;
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use super::runner::{ClaudeEvent, ContentBlock, ModelUsageEntry, Usage};
 use super::tool_formatting::{colorize_tool_name, format_tool_details, shorten_path};
@@ -91,11 +92,13 @@ fn format_assistant_message(
                 // Render thinking as blockquotes (same as <thinking> tags)
                 for line in thinking.lines() {
                     let trimmed = line.trim();
+                    let mut line_output = String::new();
                     if trimmed.is_empty() {
-                        lines.push("> ".to_string());
+                        line_output.push_str("> ");
                     } else {
-                        lines.push(format!("> *{}*", trimmed));
+                        write!(line_output, "> *{}*", trimmed).unwrap();
                     }
+                    lines.push(line_output);
                 }
             }
             ContentBlock::ToolResult {
@@ -310,7 +313,7 @@ fn process_thinking_blocks(text: &str) -> String {
                 if trimmed.is_empty() {
                     result.push_str("> \n");
                 } else {
-                    result.push_str(&format!("> *{}*\n", trimmed));
+                    writeln!(result, "> *{}*", trimmed).unwrap();
                 }
             }
             search_from = content_start + end + close_tag.len();

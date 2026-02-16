@@ -5,11 +5,16 @@
 //! panel focus and scroll control, plus q/Ctrl+C for shutdown.
 //! Runs on a dedicated OS thread (never tokio::spawn).
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+
+use crate::commands::task::orchestrate::events::WorkerPhase;
+use crate::commands::task::orchestrate::text_input_overlay::{InputAction, TextInputOverlay};
+use crate::diag_warn;
 
 // ── Parameters ──────────────────────────────────────────────────────
 
@@ -27,6 +32,17 @@ pub struct DashboardInputParams {
     pub restart_worker_id: Arc<AtomicU32>,
     pub restart_confirmed: Arc<AtomicBool>,
     pub active_worker_ids: Arc<Mutex<Vec<u32>>>,
+    /// Flag indicating whether text input overlay is active (task 25.3.3).
+    pub overlay_active: Arc<AtomicBool>,
+    /// Map of worker phases (worker_id -> phase) for validation (task 25.3.3).
+    /// Allows input thread to check if focused worker is in a Claude phase (Implement or ReviewFix).
+    pub worker_phases: Arc<Mutex<HashMap<u32, Option<WorkerPhase>>>>,
+    /// Sender for user messages from TUI overlay to run_loop (task 25.4.3).
+    /// Allows the input thread to send (worker_id, message) tuples to the orchestrator.
+    pub user_message_tx: tokio::sync::mpsc::Sender<(u32, String)>,
+    /// Shared overlay instance (task 25.4.3).
+    /// Allows input thread to handle keyboard events and Dashboard to render overlay.
+    pub shared_overlay: Arc<Mutex<Option<TextInputOverlay>>>,
 }
 
 // ── Input thread ────────────────────────────────────────────────────
@@ -55,6 +71,10 @@ impl DashboardInputThread {
             restart_worker_id,
             restart_confirmed,
             active_worker_ids,
+            overlay_active,
+            worker_phases,
+            user_message_tx,
+            shared_overlay,
         } = params;
 
         let handle = std::thread::Builder::new()
@@ -73,6 +93,10 @@ impl DashboardInputThread {
                     restart_worker_id,
                     restart_confirmed,
                     active_worker_ids,
+                    overlay_active,
+                    worker_phases,
+                    user_message_tx,
+                    shared_overlay,
                 };
 
                 while running_clone.load(Ordering::SeqCst) {
@@ -123,6 +147,14 @@ struct InputContext {
     restart_worker_id: Arc<AtomicU32>,
     restart_confirmed: Arc<AtomicBool>,
     active_worker_ids: Arc<Mutex<Vec<u32>>>,
+    /// Flag indicating whether text input overlay is active (task 25.3.3).
+    overlay_active: Arc<AtomicBool>,
+    /// Map of worker phases for validation (task 25.3.3).
+    worker_phases: Arc<Mutex<HashMap<u32, Option<WorkerPhase>>>>,
+    /// Sender for user messages to run_loop (task 25.4.3).
+    user_message_tx: tokio::sync::mpsc::Sender<(u32, String)>,
+    /// Shared overlay instance (task 25.4.3).
+    shared_overlay: Arc<Mutex<Option<TextInputOverlay>>>,
 }
 
 impl InputContext {
@@ -163,6 +195,12 @@ impl InputContext {
 
 /// Top-level key event dispatcher.
 fn handle_key_event(ctx: &InputContext, key: KeyEvent) {
+    // Task 25.3.3: If overlay is active, route ALL keys to overlay handler
+    if ctx.overlay_active.load(Ordering::SeqCst) {
+        handle_overlay_key(ctx, key);
+        return;
+    }
+
     let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
 
     if is_ctrl_c {
@@ -182,6 +220,7 @@ fn handle_key_event(ctx: &InputContext, key: KeyEvent) {
             handle_navigation(ctx, NavigationAction::DirectFocus(ch as u32 - '0' as u32))
         }
         KeyCode::Char('p') => handle_toggle_preview(ctx),
+        KeyCode::Char('i') => handle_input_overlay_key(ctx),
         KeyCode::Up => handle_scroll(ctx, -1),
         KeyCode::Down => handle_scroll(ctx, 1),
         KeyCode::Left => handle_scroll_home(ctx),
@@ -269,7 +308,10 @@ fn handle_navigation(ctx: &InputContext, action: NavigationAction) {
     ctx.cancel_quit_pending();
 
     // Lock active_worker_ids to read the current active set
-    let active_ids = ctx.active_worker_ids.lock().unwrap();
+    let active_ids = ctx
+        .active_worker_ids
+        .lock()
+        .expect("active_worker_ids: mutex poisoned");
 
     let next = match action {
         NavigationAction::TabForward => {
@@ -404,7 +446,10 @@ fn handle_restart_key(ctx: &InputContext) {
     }
 
     // Task 21.3: Ignore if focused worker is not in active set
-    let active_ids = ctx.active_worker_ids.lock().unwrap();
+    let active_ids = ctx
+        .active_worker_ids
+        .lock()
+        .expect("active_worker_ids: mutex poisoned");
     if !active_ids.contains(&focused) {
         return;
     }
@@ -440,6 +485,115 @@ fn handle_cancel_restart(ctx: &InputContext) {
     }
 }
 
+/// Handle keyboard events when text input overlay is active.
+///
+/// Routes keys to the shared overlay instance via TextInputOverlay::handle_key().
+/// - Ctrl+Enter: Send message to worker via user_message_tx channel
+/// - Esc: Cancel and hide overlay
+/// - Other keys: Forward to overlay for text editing
+fn handle_overlay_key(ctx: &InputContext, key: KeyEvent) {
+    let mut overlay_guard = ctx
+        .shared_overlay
+        .lock()
+        .expect("shared_overlay: mutex poisoned");
+
+    if let Some(ref mut overlay) = *overlay_guard {
+        let action = overlay.handle_key(key);
+
+        match action {
+            InputAction::Send(message) => {
+                let worker_id = overlay.target_worker_id();
+
+                // Send message to run_loop via channel
+                // Note: We use blocking_send here because we're in a std::thread, not tokio::task
+                let tx = ctx.user_message_tx.clone();
+                drop(overlay_guard); // Release lock before async operation
+
+                // Spawn a tokio task to send the message (can't use blocking_send in std::thread)
+                if let Err(e) = tx.try_send((worker_id, message)) {
+                    diag_warn!("Failed to send user message: {}", e);
+                }
+
+                // Hide overlay and deactivate flag
+                ctx.overlay_active.store(false, Ordering::SeqCst);
+                *ctx.shared_overlay
+                    .lock()
+                    .expect("shared_overlay: mutex poisoned") = None;
+                ctx.render_notify.notify_one();
+            }
+            InputAction::Cancel => {
+                // Hide overlay without sending message
+                ctx.overlay_active.store(false, Ordering::SeqCst);
+                drop(overlay_guard);
+                *ctx.shared_overlay
+                    .lock()
+                    .expect("shared_overlay: mutex poisoned") = None;
+                ctx.render_notify.notify_one();
+            }
+            InputAction::Continue => {
+                // Key handled by overlay — trigger re-render
+                ctx.render_notify.notify_one();
+            }
+        }
+    } else {
+        // Overlay should be active but instance is missing — deactivate flag
+        ctx.overlay_active.store(false, Ordering::SeqCst);
+        ctx.render_notify.notify_one();
+    }
+}
+
+/// Handle 'i' key: show text input overlay for focused worker.
+///
+/// Validates:
+/// - Worker must be focused (focused_worker != 0)
+/// - Worker must be active (in active_worker_ids)
+/// - Worker must be in a Claude phase (Implement or ReviewFix)
+///
+/// If validation passes, activates overlay (sets overlay_active flag).
+/// Otherwise, ignored (no-op).
+fn handle_input_overlay_key(ctx: &InputContext) {
+    let focused = ctx.focused_worker.load(Ordering::Relaxed);
+
+    // Guard: no worker focused
+    if focused == 0 {
+        return;
+    }
+
+    // Guard: focused worker not in active set
+    let active_ids = ctx
+        .active_worker_ids
+        .lock()
+        .expect("active_worker_ids: mutex poisoned");
+    if !active_ids.contains(&focused) {
+        return;
+    }
+    drop(active_ids); // Release lock
+
+    // Guard: focused worker not in Claude phase (Implement or ReviewFix)
+    let phases = ctx
+        .worker_phases
+        .lock()
+        .expect("worker_phases: mutex poisoned");
+    let phase_opt = phases.get(&focused);
+    let is_claude_phase = matches!(
+        phase_opt,
+        Some(Some(WorkerPhase::Implement)) | Some(Some(WorkerPhase::ReviewFix))
+    );
+    drop(phases); // Release lock
+
+    if !is_claude_phase {
+        // Worker is not in a Claude phase — ignore
+        return;
+    }
+
+    // All guards passed — create overlay instance and activate flag
+    *ctx.shared_overlay
+        .lock()
+        .expect("shared_overlay: mutex poisoned") = Some(TextInputOverlay::new(focused));
+    ctx.overlay_active.store(true, Ordering::SeqCst);
+    ctx.render_notify.notify_one();
+}
+
 /// Handle terminal resize event.
 fn handle_resize(ctx: &InputContext) {
     ctx.resize_flag.store(true, Ordering::SeqCst);
@@ -455,6 +609,7 @@ mod tests {
     /// Test helper: create minimal DashboardInputParams for testing.
     /// By default, all workers (1-3) are considered active.
     fn setup_test_params() -> DashboardInputParams {
+        let (user_message_tx, _user_message_rx) = tokio::sync::mpsc::channel(16);
         DashboardInputParams {
             shutdown: Arc::new(AtomicBool::new(false)),
             graceful_shutdown: Arc::new(AtomicBool::new(false)),
@@ -468,6 +623,10 @@ mod tests {
             restart_worker_id: Arc::new(AtomicU32::new(0)),
             restart_confirmed: Arc::new(AtomicBool::new(false)),
             active_worker_ids: Arc::new(Mutex::new(vec![1, 2, 3])),
+            overlay_active: Arc::new(AtomicBool::new(false)),
+            worker_phases: Arc::new(Mutex::new(HashMap::new())),
+            user_message_tx,
+            shared_overlay: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -486,6 +645,10 @@ mod tests {
             restart_worker_id: params.restart_worker_id.clone(),
             restart_confirmed: params.restart_confirmed.clone(),
             active_worker_ids: params.active_worker_ids.clone(),
+            overlay_active: params.overlay_active.clone(),
+            worker_phases: params.worker_phases.clone(),
+            user_message_tx: params.user_message_tx.clone(),
+            shared_overlay: params.shared_overlay.clone(),
         }
     }
 
@@ -1575,5 +1738,496 @@ mod tests {
         // restart_worker_id should be set to 3
         assert_eq!(ctx.restart_worker_id.load(Ordering::SeqCst), 3);
         assert!(ctx.is_restart_pending());
+    }
+
+    // ── Task 25.3.3: Text input overlay tests ──────────────────────────
+
+    #[test]
+    fn test_input_overlay_key_no_focus_ignored() {
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // No focus (focused_worker == 0)
+        ctx.focused_worker.store(0, Ordering::Relaxed);
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // overlay_active should remain false
+        assert!(!ctx.overlay_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_input_overlay_key_not_active_worker_ignored() {
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Active workers: [1, 3]
+        *ctx.active_worker_ids.lock().unwrap() = vec![1, 3];
+
+        // Focus on worker 2 (not in active set)
+        ctx.focused_worker.store(2, Ordering::Relaxed);
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // overlay_active should remain false
+        assert!(!ctx.overlay_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_input_overlay_key_not_claude_phase_ignored() {
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Active workers: [1]
+        *ctx.active_worker_ids.lock().unwrap() = vec![1];
+
+        // Focus on worker 1
+        ctx.focused_worker.store(1, Ordering::Relaxed);
+
+        // Set worker 1 to Setup phase (not a Claude phase)
+        ctx.worker_phases
+            .lock()
+            .unwrap()
+            .insert(1, Some(WorkerPhase::Setup));
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // overlay_active should remain false
+        assert!(!ctx.overlay_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_input_overlay_key_verify_phase_ignored() {
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Active workers: [1]
+        *ctx.active_worker_ids.lock().unwrap() = vec![1];
+
+        // Focus on worker 1
+        ctx.focused_worker.store(1, Ordering::Relaxed);
+
+        // Set worker 1 to Verify phase (not a Claude phase)
+        ctx.worker_phases
+            .lock()
+            .unwrap()
+            .insert(1, Some(WorkerPhase::Verify));
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // overlay_active should remain false
+        assert!(!ctx.overlay_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_input_overlay_key_implement_phase_activates() {
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Active workers: [2]
+        *ctx.active_worker_ids.lock().unwrap() = vec![2];
+
+        // Focus on worker 2
+        ctx.focused_worker.store(2, Ordering::Relaxed);
+
+        // Set worker 2 to Implement phase (Claude phase)
+        ctx.worker_phases
+            .lock()
+            .unwrap()
+            .insert(2, Some(WorkerPhase::Implement));
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // overlay_active should be true
+        assert!(ctx.overlay_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_input_overlay_key_review_fix_phase_activates() {
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Active workers: [3]
+        *ctx.active_worker_ids.lock().unwrap() = vec![3];
+
+        // Focus on worker 3
+        ctx.focused_worker.store(3, Ordering::Relaxed);
+
+        // Set worker 3 to ReviewFix phase (Claude phase)
+        ctx.worker_phases
+            .lock()
+            .unwrap()
+            .insert(3, Some(WorkerPhase::ReviewFix));
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // overlay_active should be true
+        assert!(ctx.overlay_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_input_overlay_key_no_phase_entry_ignored() {
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Active workers: [1]
+        *ctx.active_worker_ids.lock().unwrap() = vec![1];
+
+        // Focus on worker 1
+        ctx.focused_worker.store(1, Ordering::Relaxed);
+
+        // No phase entry for worker 1 (empty HashMap)
+        // worker_phases is already empty from setup_test_params
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // overlay_active should remain false
+        assert!(!ctx.overlay_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_input_overlay_key_none_phase_ignored() {
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Active workers: [1]
+        *ctx.active_worker_ids.lock().unwrap() = vec![1];
+
+        // Focus on worker 1
+        ctx.focused_worker.store(1, Ordering::Relaxed);
+
+        // Set worker 1 phase to None (idle worker)
+        ctx.worker_phases.lock().unwrap().insert(1, None);
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // overlay_active should remain false
+        assert!(!ctx.overlay_active.load(Ordering::SeqCst));
+    }
+
+    // ── Task 28.4: Overlay population and message pipeline tests ───────
+
+    #[test]
+    fn test_input_overlay_key_populates_shared_overlay() {
+        // Test: handle_input_overlay_key should populate shared_overlay when all guards pass
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Setup: worker 2 is active and in Implement phase
+        *ctx.active_worker_ids.lock().unwrap() = vec![2];
+        ctx.focused_worker.store(2, Ordering::Relaxed);
+        ctx.worker_phases
+            .lock()
+            .unwrap()
+            .insert(2, Some(WorkerPhase::Implement));
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // Verify overlay_active flag is set
+        assert!(
+            ctx.overlay_active.load(Ordering::SeqCst),
+            "overlay_active should be true after 'i' key"
+        );
+
+        // Verify shared_overlay is populated
+        let overlay_guard = ctx.shared_overlay.lock().unwrap();
+        assert!(
+            overlay_guard.is_some(),
+            "shared_overlay should contain overlay instance"
+        );
+
+        // Verify overlay targets correct worker
+        if let Some(ref overlay) = *overlay_guard {
+            assert_eq!(
+                overlay.target_worker_id(),
+                2,
+                "Overlay should target worker 2"
+            );
+        }
+    }
+
+    #[test]
+    fn test_input_overlay_key_review_fix_phase_populates_shared_overlay() {
+        // Test: ReviewFix phase also allows overlay creation
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Setup: worker 3 is active and in ReviewFix phase
+        *ctx.active_worker_ids.lock().unwrap() = vec![3];
+        ctx.focused_worker.store(3, Ordering::Relaxed);
+        ctx.worker_phases
+            .lock()
+            .unwrap()
+            .insert(3, Some(WorkerPhase::ReviewFix));
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // Verify overlay is created
+        assert!(ctx.overlay_active.load(Ordering::SeqCst));
+        assert!(ctx.shared_overlay.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_input_overlay_key_does_not_populate_when_idle() {
+        // Test: 'i' key should NOT populate overlay when worker is idle
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Setup: worker 1 is NOT in active set (idle)
+        *ctx.active_worker_ids.lock().unwrap() = vec![2, 3]; // Worker 1 NOT active
+        ctx.focused_worker.store(1, Ordering::Relaxed);
+        ctx.worker_phases
+            .lock()
+            .unwrap()
+            .insert(1, Some(WorkerPhase::Implement));
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // Verify overlay is NOT created
+        assert!(
+            !ctx.overlay_active.load(Ordering::SeqCst),
+            "overlay_active should remain false for idle worker"
+        );
+        assert!(
+            ctx.shared_overlay.lock().unwrap().is_none(),
+            "shared_overlay should remain None for idle worker"
+        );
+    }
+
+    #[test]
+    fn test_input_overlay_key_does_not_populate_when_setup_phase() {
+        // Test: 'i' key should NOT populate overlay when worker is in Setup phase
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Setup: worker 1 is active but in Setup phase (not a Claude phase)
+        *ctx.active_worker_ids.lock().unwrap() = vec![1];
+        ctx.focused_worker.store(1, Ordering::Relaxed);
+        ctx.worker_phases
+            .lock()
+            .unwrap()
+            .insert(1, Some(WorkerPhase::Setup));
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // Verify overlay is NOT created
+        assert!(!ctx.overlay_active.load(Ordering::SeqCst));
+        assert!(ctx.shared_overlay.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_input_overlay_key_does_not_populate_when_verify_phase() {
+        // Test: 'i' key should NOT populate overlay when worker is in Verify phase
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // Setup: worker 1 is active but in Verify phase (not a Claude phase)
+        *ctx.active_worker_ids.lock().unwrap() = vec![1];
+        ctx.focused_worker.store(1, Ordering::Relaxed);
+        ctx.worker_phases
+            .lock()
+            .unwrap()
+            .insert(1, Some(WorkerPhase::Verify));
+
+        // Press 'i'
+        handle_input_overlay_key(&ctx);
+
+        // Verify overlay is NOT created
+        assert!(!ctx.overlay_active.load(Ordering::SeqCst));
+        assert!(ctx.shared_overlay.lock().unwrap().is_none());
+    }
+
+    // ── Task 74.5: Focus cycling edge cases with different worker counts ──
+
+    #[test]
+    fn test_focus_cycling_0_workers_stays_unfocused() {
+        // Edge case: no active workers → Tab/Shift+Tab keep focus at 0
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        *ctx.active_worker_ids.lock().unwrap() = vec![];
+        ctx.focused_worker.store(0, Ordering::Relaxed);
+
+        handle_navigation(&ctx, NavigationAction::TabForward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 0);
+
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_focus_cycling_1_worker_tab_stays_on_worker() {
+        // 1 worker: Tab/Shift+Tab always land on the same worker
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        *ctx.active_worker_ids.lock().unwrap() = vec![1];
+        ctx.focused_worker.store(0, Ordering::Relaxed);
+
+        // Tab → jump to worker 1
+        handle_navigation(&ctx, NavigationAction::TabForward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 1);
+
+        // Tab again → wraps to itself
+        handle_navigation(&ctx, NavigationAction::TabForward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 1);
+
+        // Shift+Tab → still worker 1 (single element wrap)
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_focus_cycling_2_workers_tab_ping_pong() {
+        // Test: 2 workery, Tab→Tab → focus 0→1→2→1→2
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // 2 active workers
+        *ctx.active_worker_ids.lock().unwrap() = vec![1, 2];
+
+        // Start unfocused
+        ctx.focused_worker.store(0, Ordering::Relaxed);
+
+        // Tab → jump to worker 1
+        handle_navigation(&ctx, NavigationAction::TabForward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 1);
+
+        // Tab → move to worker 2
+        handle_navigation(&ctx, NavigationAction::TabForward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 2);
+
+        // Tab → wrap back to worker 1
+        handle_navigation(&ctx, NavigationAction::TabForward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 1);
+
+        // Tab → back to worker 2 (ping-pong)
+        handle_navigation(&ctx, NavigationAction::TabForward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_focus_cycling_3_workers_shift_tab_wrap_around() {
+        // 3 workery: Shift+Tab z focus=1 → wrap do 3, potem pełny cykl wstecz
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // 3 active workers: [1, 2, 3]
+        *ctx.active_worker_ids.lock().unwrap() = vec![1, 2, 3];
+
+        // Start at worker 1
+        ctx.focused_worker.store(1, Ordering::Relaxed);
+
+        // Shift+Tab → should wrap to worker 3 (last)
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 3);
+
+        // Shift+Tab → move to worker 2
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 2);
+
+        // Shift+Tab → move to worker 1
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 1);
+
+        // Shift+Tab → wrap to worker 3 again
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_focus_cycling_3_workers_shift_tab_from_unfocused() {
+        // Test: 3 workery, Shift+Tab z focus=0 → jump to last (3)
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // 3 active workers: [1, 2, 3]
+        *ctx.active_worker_ids.lock().unwrap() = vec![1, 2, 3];
+
+        // Start unfocused
+        ctx.focused_worker.store(0, Ordering::Relaxed);
+
+        // Shift+Tab → should jump to last active worker (3)
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_focus_cycling_5_workers_10x_tab_full_loop() {
+        // Test: 5 workerów, 10x Tab → focus loops 0→1→2→3→4→5→1→2→3→4→5
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // 5 active workers: [1, 2, 3, 4, 5]
+        *ctx.active_worker_ids.lock().unwrap() = vec![1, 2, 3, 4, 5];
+
+        // Start unfocused
+        ctx.focused_worker.store(0, Ordering::Relaxed);
+
+        // Expected sequence after each Tab press
+        let expected = [1, 2, 3, 4, 5, 1, 2, 3, 4, 5];
+
+        for &expected_focus in &expected {
+            handle_navigation(&ctx, NavigationAction::TabForward);
+            assert_eq!(
+                ctx.focused_worker.load(Ordering::Relaxed),
+                expected_focus,
+                "Focus should cycle through workers correctly"
+            );
+        }
+
+        // After 10 Tabs, we should be at worker 5 again
+        // One more Tab should wrap to worker 1
+        handle_navigation(&ctx, NavigationAction::TabForward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_focus_cycling_5_workers_backward_loop() {
+        // Test: 5 workerów, Shift+Tab cycling backward
+        let params = setup_test_params();
+        let ctx = ctx_from_params(&params);
+
+        // 5 active workers: [1, 2, 3, 4, 5]
+        *ctx.active_worker_ids.lock().unwrap() = vec![1, 2, 3, 4, 5];
+
+        // Start at worker 1
+        ctx.focused_worker.store(1, Ordering::Relaxed);
+
+        // Shift+Tab → wrap to worker 5
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 5);
+
+        // Shift+Tab → move to worker 4
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 4);
+
+        // Shift+Tab → move to worker 3
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 3);
+
+        // Shift+Tab → move to worker 2
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 2);
+
+        // Shift+Tab → move to worker 1
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 1);
+
+        // Shift+Tab → wrap to worker 5 again
+        handle_navigation(&ctx, NavigationAction::TabBackward);
+        assert_eq!(ctx.focused_worker.load(Ordering::Relaxed), 5);
     }
 }

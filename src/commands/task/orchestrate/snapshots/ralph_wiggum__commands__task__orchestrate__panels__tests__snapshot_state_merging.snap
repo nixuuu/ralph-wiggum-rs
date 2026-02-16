@@ -1,0 +1,9 @@
+---
+source: src/commands/task/orchestrate/panels.rs
+expression: snapshot
+---
+╭ W3 [12.1] ─────────────────────────────────────╮
+│⊕ merging                                       │
+│                                                │
+│                                                │
+╰ $0.0000 │ ↓0 ↑0 ───────────────────────────────╯

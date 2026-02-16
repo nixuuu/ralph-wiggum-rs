@@ -1,0 +1,15 @@
+---
+source: src/commands/task/orchestrate/worker_status.rs
+expression: format_worker_status(&status)
+---
+WorkerStatus {
+│ state: Verifying
+│ task_id: Some("42.1")
+│ component: Some("core")
+│ phase: Some(Verify)
+│ model: Some("claude-opus-4-6")
+│ cost_usd: $0.5678
+│ input_tokens: 12000
+│ output_tokens: 8500
+│ verify_profiles: [("lint", Some(true)), ("test", Some(false)), ("build", None)]
+}

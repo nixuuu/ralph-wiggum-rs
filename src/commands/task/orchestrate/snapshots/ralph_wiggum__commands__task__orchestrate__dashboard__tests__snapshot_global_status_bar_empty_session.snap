@@ -1,0 +1,7 @@
+---
+source: src/commands/task/orchestrate/dashboard.rs
+expression: snapshot
+---
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ [                    ] 0/0 (0%) │ $0.0000 │ $0.0000/task │ ⏱ 5s │ W 0/0
+ Queue: 0 ready │ 0 wip │ 0 blocked │ 0 pending  │  No focus    q Tab ↑↓ Esc p=tasks r=reload R=rest

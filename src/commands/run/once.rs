@@ -18,10 +18,6 @@ use super::output::OutputFormatter;
 use super::runner::ClaudeRunner;
 use super::ui::StatusTerminal;
 
-/// Readonly built-in tools for codebase exploration (no Write, Edit, Bash).
-#[allow(dead_code)] // Used in tests; kept for future use if allowlist approach is needed
-pub(crate) const READONLY_TOOLS: &str = "Read,Glob,Grep,LS,WebFetch,WebSearch";
-
 /// Built-in tools to block when Claude should only read + use MCP.
 /// Used with disallowed_tools (denylist approach) to avoid blocking MCP tools.
 pub(crate) const DANGEROUS_TOOLS: &str = "Write,Edit,Bash,NotebookEdit,TodoWrite";
@@ -52,6 +48,18 @@ pub(crate) struct RunOnceOptions {
     pub tasks_path: Option<PathBuf>,
 }
 
+/// Shared state created during setup phase of run_once().
+struct RunOnceState {
+    shutdown: Arc<AtomicBool>,
+    formatter: Arc<Mutex<OutputFormatter>>,
+    status_terminal: Arc<Mutex<StatusTerminal>>,
+    input_thread: InputThread,
+    input_paused: Arc<AtomicBool>,
+    resize_flag: Arc<AtomicBool>,
+    question_handle: Option<tokio::task::JoinHandle<()>>,
+    _server_guard: Option<ServerGuard>,
+}
+
 /// Run Claude CLI once with full streaming output (same UX as `run` command).
 /// Sets up OutputFormatter + StatusTerminal + InputThread for rich display,
 /// then runs a single ClaudeRunner invocation.
@@ -64,162 +72,41 @@ pub(crate) struct RunOnceOptions {
 /// clears the status bar, renders TUI question widgets, collects answers,
 /// then resumes normal display.
 pub(crate) async fn run_once(options: RunOnceOptions) -> Result<()> {
-    // Setup Ctrl+C handler
-    let shutdown = Arc::new(AtomicBool::new(false));
-    {
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            let _ = signal::ctrl_c().await;
-            shutdown.store(true, Ordering::SeqCst);
-        });
-    }
-
-    // Auto-start MCP server if tasks_path is set and no custom mcp_config provided.
-    // Destructure immediately: _server_guard keeps the server alive until run_once exits.
-    let (auto_mcp_config, auto_question_rx, _server_guard) =
-        match (&options.tasks_path, &options.mcp_config) {
-            (Some(tasks_path), None) => {
-                let started = start_mcp_server(tasks_path.clone()).await?;
-                (
-                    Some(started.mcp_config),
-                    Some(started.question_rx),
-                    Some(started.guard),
-                )
-            }
-            _ => (None, None, None),
-        };
-
-    // Resolve mcp_config and question_rx: auto-started server or caller-provided
-    let mcp_config = options.mcp_config.or(auto_mcp_config);
-    let question_rx = options.question_rx.or(auto_question_rx);
-
-    // Initialize output formatter (iteration=0 signals one-shot mode to status bar)
-    let formatter = Arc::new(Mutex::new(OutputFormatter::new(options.use_nerd_font)));
-    formatter.lock().unwrap().start_iteration();
-
-    // Initialize status terminal (enables raw mode)
-    let status_terminal = Arc::new(Mutex::new(StatusTerminal::new(options.use_nerd_font)?));
-
-    // Flags required by InputThread (update-related ones are unused for one-shot)
-    let resize_flag = Arc::new(AtomicBool::new(false));
-    let update_state = Arc::new(AtomicU8::new(0));
-    let update_trigger = Arc::new(AtomicBool::new(false));
-    let refresh_flag = Arc::new(AtomicBool::new(false));
-
-    // Spawn keyboard input thread (handles Ctrl+C/q in raw mode)
-    let input_thread = InputThread::spawn(
-        shutdown.clone(),
-        resize_flag.clone(),
-        update_state.clone(),
-        update_trigger.clone(),
-        refresh_flag.clone(),
-    );
-    let input_paused = input_thread.paused_flag();
-
-    // Spawn background task for handling ask_user questions from MCP
-    let input_paused_for_callbacks = input_paused.clone();
-    let question_handle = spawn_question_handler(
+    // Split options to extract question_rx
+    let RunOnceOptions {
+        prompt,
+        model,
+        output_dir,
+        use_nerd_font,
+        allowed_tools,
+        disallowed_tools,
+        mcp_config,
         question_rx,
-        input_paused,
-        status_terminal.clone(),
-        formatter.clone(),
-        shutdown.clone(),
-    );
+        tasks_path,
+    } = options;
 
-    // Create and run ClaudeRunner
-    let mut runner = ClaudeRunner::oneshot(options.prompt, options.model, options.output_dir);
-    if let Some(tools) = options.allowed_tools {
-        runner = runner.with_allowed_tools(tools);
-    }
-    if let Some(tools) = options.disallowed_tools {
-        runner = runner.with_disallowed_tools(tools);
-    }
-    if let Some(mcp_config) = mcp_config {
-        runner = runner.with_mcp_config(mcp_config);
-    }
+    let options_ref = RunOnceOptions {
+        prompt,
+        model,
+        output_dir,
+        use_nerd_font,
+        allowed_tools,
+        disallowed_tools,
+        mcp_config,
+        question_rx: None,
+        tasks_path,
+    };
 
-    let formatter_event = formatter.clone();
-    let status_terminal_event = status_terminal.clone();
-    let shutdown_event = shutdown.clone();
-    let resize_flag_event = resize_flag.clone();
-    let input_paused_event = input_paused_for_callbacks.clone();
+    // Setup: initialize all components (terminal, MCP, input thread)
+    let (state, resolved_mcp_config) = setup_run_once(&options_ref, question_rx).await?;
 
-    let formatter_idle = formatter.clone();
-    let status_terminal_idle = status_terminal.clone();
-    let resize_flag_idle = resize_flag.clone();
-    let input_paused_idle = input_paused_for_callbacks.clone();
+    // Run: execute Claude with streaming output
+    let run_result = run_claude_process(&options_ref, &state, resolved_mcp_config).await;
 
-    let run_result = runner
-        .run(
-            shutdown.clone(),
-            |event| {
-                let (lines, status) = {
-                    let mut fmt = formatter_event.lock().unwrap();
-                    let lines = fmt.format_event(event);
-                    let status = fmt.get_status();
-                    (lines, status)
-                };
-                // Skip terminal rendering while TUI question widgets are active.
-                // The question handler owns the terminal during this time.
-                if input_paused_event.load(Ordering::Relaxed) {
-                    return;
-                }
-                let mut term = status_terminal_event.lock().unwrap();
-                if resize_flag_event.swap(false, Ordering::SeqCst) {
-                    let _ = term.handle_resize(&status);
-                }
-                for line in &lines {
-                    let _ = term.print_line(line);
-                }
-                if shutdown_event.load(Ordering::SeqCst) {
-                    let _ = term.show_shutting_down();
-                } else {
-                    let _ = term.update(&status);
-                }
-            },
-            || {
-                // Skip idle updates while TUI question widgets are active.
-                if input_paused_idle.load(Ordering::Relaxed) {
-                    return;
-                }
-                let status = formatter_idle.lock().unwrap().get_status();
-                let mut term = status_terminal_idle.lock().unwrap();
-                if resize_flag_idle.swap(false, Ordering::SeqCst) {
-                    let _ = term.handle_resize(&status);
-                }
-                let _ = term.update(&status);
-            },
-        )
-        .await;
+    // Cleanup: shutdown handlers and terminal
+    cleanup_run_once(state).await?;
 
-    // Question handler will exit gracefully via shutdown flag or channel close.
-    // We do NOT use .abort() because:
-    // 1. spawn_blocking tasks cannot be aborted (they're not async)
-    // 2. PauseGuard drop must complete to resume InputThread
-    // Instead, we rely on:
-    // - shutdown flag check in spawn_question_handler loop (line 254)
-    // - question_rx channel closure (when tx is dropped by server shutdown)
-    //
-    // IMPORTANT: Drop _server_guard BEFORE awaiting question_handle to ensure
-    // the MCP server shuts down and closes question_tx, allowing question_rx
-    // to detect channel closure and exit cleanly.
-    drop(_server_guard);
-
-    if let Some(handle) = question_handle {
-        // Wait for graceful shutdown with timeout (should be fast now that channel is closed)
-        let timeout = tokio::time::Duration::from_secs(2);
-        let _ = tokio::time::timeout(timeout, handle).await;
-    }
-
-    // Cleanup terminal (disable raw mode, clear status bar)
-    {
-        let mut term = status_terminal.lock().unwrap();
-        term.cleanup()?;
-    }
-    input_thread.stop();
-
-    run_result?;
-    Ok(())
+    run_result
 }
 
 /// Data returned by auto-starting an MCP server inside run_once().
@@ -349,7 +236,9 @@ async fn handle_question_envelope(
 
     // Clear status bar to make room for question rendering
     {
-        let mut term = status_terminal.lock().unwrap();
+        let mut term = status_terminal
+            .lock()
+            .expect("status_terminal: mutex poisoned");
         let _ = term.cleanup();
     }
 
@@ -361,8 +250,13 @@ async fn handle_question_envelope(
 
     // Re-enable raw mode and restore status bar after questions are done
     {
-        let status = formatter.lock().unwrap().get_status();
-        let mut term = status_terminal.lock().unwrap();
+        let status = formatter
+            .lock()
+            .expect("formatter: mutex poisoned")
+            .get_status();
+        let mut term = status_terminal
+            .lock()
+            .expect("status_terminal: mutex poisoned");
         let _ = term.reinit();
         let _ = term.update(&status);
     }
@@ -394,6 +288,235 @@ fn collect_answers(questions: &[ask_user::Question]) -> Vec<Answer> {
     }
 
     answers
+}
+
+/// Resolve MCP configuration from options or auto-start server.
+/// Returns (mcp_config, question_rx, server_guard).
+async fn resolve_mcp_config(
+    options: &RunOnceOptions,
+    external_question_rx: Option<mpsc::Receiver<QuestionEnvelope>>,
+) -> Result<(
+    Option<serde_json::Value>,
+    Option<mpsc::Receiver<QuestionEnvelope>>,
+    Option<ServerGuard>,
+)> {
+    let (auto_mcp_config, auto_question_rx, server_guard) =
+        match (&options.tasks_path, &options.mcp_config) {
+            (Some(tasks_path), None) => {
+                let started = start_mcp_server(tasks_path.clone()).await?;
+                (
+                    Some(started.mcp_config),
+                    Some(started.question_rx),
+                    Some(started.guard),
+                )
+            }
+            _ => (None, None, None),
+        };
+
+    let mcp_config = options.mcp_config.clone().or(auto_mcp_config);
+    let question_rx = external_question_rx.or(auto_question_rx);
+
+    Ok((mcp_config, question_rx, server_guard))
+}
+
+/// Type alias for output components tuple.
+type OutputComponents = (Arc<Mutex<OutputFormatter>>, Arc<Mutex<StatusTerminal>>);
+
+/// Initialize formatter and terminal for streaming output.
+/// Returns (formatter, status_terminal).
+fn init_output_components(use_nerd_font: bool) -> Result<OutputComponents> {
+    let formatter = Arc::new(Mutex::new(OutputFormatter::new(use_nerd_font)));
+    formatter.lock().unwrap().start_iteration();
+
+    let status_terminal = Arc::new(Mutex::new(StatusTerminal::new(use_nerd_font)?));
+
+    Ok((formatter, status_terminal))
+}
+
+/// Spawn input thread with required flags.
+/// Returns (input_thread, resize_flag).
+fn spawn_input_thread(shutdown: Arc<AtomicBool>) -> (InputThread, Arc<AtomicBool>) {
+    let resize_flag = Arc::new(AtomicBool::new(false));
+    let update_state = Arc::new(AtomicU8::new(0));
+    let update_trigger = Arc::new(AtomicBool::new(false));
+    let refresh_flag = Arc::new(AtomicBool::new(false));
+
+    let input_thread = InputThread::spawn(
+        shutdown.clone(),
+        resize_flag.clone(),
+        update_state,
+        update_trigger,
+        refresh_flag,
+    );
+
+    (input_thread, resize_flag)
+}
+
+/// Setup phase: initialize shutdown handler, MCP server, formatter, terminal, and input thread.
+/// Returns state needed for run and cleanup phases.
+async fn setup_run_once(
+    options: &RunOnceOptions,
+    external_question_rx: Option<mpsc::Receiver<QuestionEnvelope>>,
+) -> Result<(RunOnceState, Option<serde_json::Value>)> {
+    // Setup Ctrl+C handler
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let _ = signal::ctrl_c().await;
+            shutdown.store(true, Ordering::SeqCst);
+        });
+    }
+
+    // Resolve MCP config (auto-start or caller-provided)
+    let (mcp_config, question_rx, _server_guard) =
+        resolve_mcp_config(options, external_question_rx).await?;
+
+    // Initialize formatter and terminal
+    let (formatter, status_terminal) = init_output_components(options.use_nerd_font)?;
+
+    // Spawn keyboard input thread
+    let (input_thread, resize_flag) = spawn_input_thread(shutdown.clone());
+    let input_paused = input_thread.paused_flag();
+
+    // Spawn background task for handling ask_user questions from MCP
+    let question_handle = spawn_question_handler(
+        question_rx,
+        input_paused.clone(),
+        status_terminal.clone(),
+        formatter.clone(),
+        shutdown.clone(),
+    );
+
+    let state = RunOnceState {
+        shutdown,
+        formatter,
+        status_terminal,
+        input_thread,
+        input_paused,
+        resize_flag,
+        question_handle,
+        _server_guard,
+    };
+
+    Ok((state, mcp_config))
+}
+
+/// Configure ClaudeRunner with options and MCP config.
+fn configure_runner(
+    options: &RunOnceOptions,
+    mcp_config: Option<serde_json::Value>,
+) -> ClaudeRunner {
+    let mut runner = ClaudeRunner::oneshot(
+        options.prompt.clone(),
+        options.model.clone(),
+        options.output_dir.clone(),
+    );
+    if let Some(tools) = &options.allowed_tools {
+        runner = runner.with_allowed_tools(tools.clone());
+    }
+    if let Some(tools) = &options.disallowed_tools {
+        runner = runner.with_disallowed_tools(tools.clone());
+    }
+    if let Some(mcp_config) = mcp_config {
+        runner = runner.with_mcp_config(mcp_config);
+    }
+    runner
+}
+
+/// Callback state for event and idle handlers.
+#[derive(Clone)]
+struct CallbackState {
+    formatter: Arc<Mutex<OutputFormatter>>,
+    terminal: Arc<Mutex<StatusTerminal>>,
+    shutdown: Arc<AtomicBool>,
+    resize_flag: Arc<AtomicBool>,
+    input_paused: Arc<AtomicBool>,
+}
+
+impl CallbackState {
+    fn from_run_state(state: &RunOnceState) -> Self {
+        Self {
+            formatter: state.formatter.clone(),
+            terminal: state.status_terminal.clone(),
+            shutdown: state.shutdown.clone(),
+            resize_flag: state.resize_flag.clone(),
+            input_paused: state.input_paused.clone(),
+        }
+    }
+}
+
+/// Run phase: execute ClaudeRunner with event callbacks for streaming output.
+/// Returns the run result.
+async fn run_claude_process(
+    options: &RunOnceOptions,
+    state: &RunOnceState,
+    mcp_config: Option<serde_json::Value>,
+) -> Result<()> {
+    let runner = configure_runner(options, mcp_config);
+    let cb_ev = CallbackState::from_run_state(state);
+    let cb_idle = CallbackState::from_run_state(state);
+
+    runner
+        .run(
+            state.shutdown.clone(),
+            |event| {
+                let (lines, status) = {
+                    let mut fmt = cb_ev.formatter.lock().unwrap();
+                    (fmt.format_event(event), fmt.get_status())
+                };
+                if cb_ev.input_paused.load(Ordering::Relaxed) {
+                    return;
+                }
+                let mut term = cb_ev.terminal.lock().unwrap();
+                if cb_ev.resize_flag.swap(false, Ordering::SeqCst) {
+                    let _ = term.handle_resize(&status);
+                }
+                for line in &lines {
+                    let _ = term.print_line(line);
+                }
+                if cb_ev.shutdown.load(Ordering::SeqCst) {
+                    let _ = term.show_shutting_down();
+                } else {
+                    let _ = term.update(&status);
+                }
+            },
+            || {
+                if cb_idle.input_paused.load(Ordering::Relaxed) {
+                    return;
+                }
+                let status = cb_idle.formatter.lock().unwrap().get_status();
+                let mut term = cb_idle.terminal.lock().unwrap();
+                if cb_idle.resize_flag.swap(false, Ordering::SeqCst) {
+                    let _ = term.handle_resize(&status);
+                }
+                let _ = term.update(&status);
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Cleanup phase: shutdown question handler, cleanup terminal, stop input thread.
+async fn cleanup_run_once(state: RunOnceState) -> Result<()> {
+    // Drop server guard BEFORE awaiting question_handle to ensure
+    // the MCP server shuts down and closes question_tx
+    drop(state._server_guard);
+
+    // Wait for graceful question handler shutdown
+    if let Some(handle) = state.question_handle {
+        let timeout = tokio::time::Duration::from_secs(2);
+        let _ = tokio::time::timeout(timeout, handle).await;
+    }
+
+    // Cleanup terminal (disable raw mode, clear status bar)
+    {
+        let mut term = state.status_terminal.lock().unwrap();
+        term.cleanup()?;
+    }
+    state.input_thread.stop();
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -534,15 +657,6 @@ mod tests {
 
         // Receiver should get an error (sender dropped without sending)
         assert!(response_rx.await.is_err());
-    }
-
-    #[test]
-    fn test_readonly_tools_constant() {
-        assert!(READONLY_TOOLS.contains("Read"));
-        assert!(READONLY_TOOLS.contains("Glob"));
-        assert!(READONLY_TOOLS.contains("Grep"));
-        assert!(!READONLY_TOOLS.contains("Write"));
-        assert!(!READONLY_TOOLS.contains("Bash"));
     }
 
     #[test]
