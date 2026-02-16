@@ -164,9 +164,7 @@ pub fn render(question: &Question, header: &str) -> Result<String> {
                                 // text_input już skolapsował swój viewport.
                                 // Ponownie włącz raw mode (text_input's guard go wyłączył)
                                 enable_raw_mode().map_err(|e| {
-                                    RalphError::Mcp(format!(
-                                        "Failed to enable raw mode: {e}"
-                                    ))
+                                    RalphError::Mcp(format!("Failed to enable raw mode: {e}"))
                                 })?;
                                 let backend = CrosstermBackend::new(io::stdout());
                                 terminal = Terminal::with_options(
@@ -176,12 +174,9 @@ pub fn render(question: &Question, header: &str) -> Result<String> {
                                     },
                                 )
                                 .map_err(|e| {
-                                    RalphError::Mcp(format!(
-                                        "Failed to create terminal: {e}"
-                                    ))
+                                    RalphError::Mcp(format!("Failed to create terminal: {e}"))
                                 })?;
-                                state =
-                                    ListState::default().with_selected(Some(selected));
+                                state = ListState::default().with_selected(Some(selected));
                                 // continue loop → redraw
                             }
                             Err(e) => return Err(e),

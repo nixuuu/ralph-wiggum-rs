@@ -3432,8 +3432,7 @@ mod tests {
         // cursor_x powinien uwzględniać "> " prefix (+2)
         let buffer = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm";
         let state = TextInputState::new(Some(buffer));
-        let (cursor_x, cursor_row) =
-            calculate_cursor_position(&state.buffer, state.cursor_pos, 80);
+        let (cursor_x, cursor_row) = calculate_cursor_position(&state.buffer, state.cursor_pos, 80);
 
         // Kursor na końcu "m" — row=12, x=1
         assert_eq!(cursor_row, 12);
@@ -3494,8 +3493,7 @@ mod tests {
         assert_eq!(content_lines, 1);
 
         // Kursor na wierszu 0 — "> " jest naturalnie na row_idx == 0
-        let (cursor_x, cursor_row) =
-            calculate_cursor_position(&state.buffer, state.cursor_pos, 80);
+        let (cursor_x, cursor_row) = calculate_cursor_position(&state.buffer, state.cursor_pos, 80);
         assert_eq!(cursor_row, 0);
         assert_eq!(cursor_x, 2); // ">" prefix na wierszu 0
     }
@@ -3576,7 +3574,10 @@ mod tests {
         state.cursor_pos = 0;
         let key = KeyEvent::new(KeyCode::Right, KeyModifiers::ALT);
         let _ = handle_key_event(key, &mut state, false);
-        assert_eq!(state.cursor_pos, 6, "Alt+Right powinien przeskoczyć za 'hello '");
+        assert_eq!(
+            state.cursor_pos, 6,
+            "Alt+Right powinien przeskoczyć za 'hello '"
+        );
     }
 
     #[test]
