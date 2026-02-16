@@ -63,6 +63,7 @@ ralph-wiggum --prompt "Your task description here"
 | `--config` | `-c` | `.ralph.toml` | Path to config file |
 | `--continue-session` | | | Continue conversation from previous iteration |
 | `--no-nf` | | | Disable Nerd Font icons (use ASCII fallback) |
+| `--debug` | | | Enable diagnostic logging to `.ralph/logs/` |
 
 ### Examples
 
@@ -120,6 +121,26 @@ nerd_font = false  # Set to false for ASCII-only icons
 | Field | Default | Description |
 |-------|---------|-------------|
 | `nerd_font` | `true` | Use Nerd Font icons in status bar. Set `false` for plain ASCII fallback |
+
+### `[logging]` — Diagnostic logging
+
+```toml
+[logging]
+log_dir = ".ralph/logs"
+max_log_files = 10
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `log_dir` | `.ralph/logs` | Directory for diagnostic log files |
+| `max_log_files` | `10` | Maximum number of log files to keep. Oldest are removed automatically. `0` = unlimited |
+
+Log files are named `ralph-YYYYMMDD-HHMMSS.log` and created when `--debug` is enabled. Use `--debug` on any command:
+
+```bash
+ralph-wiggum --debug --prompt "Debug this task"
+ralph-wiggum task --debug orchestrate --workers 3
+```
 
 ### `[task]` — Task management
 
@@ -219,6 +240,38 @@ Available template variables in setup commands:
 | `{TASK_ID}` | ID of the task assigned to the worker |
 | `{WORKER_ID}` | Numeric worker ID (0-based) |
 
+#### Verification profiles
+
+Profiles enable targeted verification — only relevant commands run based on which files a worker changed. Each profile defines glob patterns to match changed files and the commands to run when matched.
+
+```toml
+[[task.orchestrate.profiles]]
+name = "backend"
+description = "Backend Rust tests"
+paths = ["src/api/**/*.rs", "src/lib.rs"]
+working_dir = "api"
+verify_commands = ["cargo test", "cargo clippy --all-targets -- -D warnings"]
+setup_commands = ["cargo build"]
+
+[[task.orchestrate.profiles]]
+name = "frontend"
+description = "Frontend TypeScript checks"
+paths = ["src/ui/**/*.ts", "src/ui/**/*.tsx"]
+verify_commands = ["npm test", "npm run lint"]
+setup_commands = ["npm install"]
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Profile identifier |
+| `description` | no | Human-readable description |
+| `paths` | yes | Glob patterns to match changed files. Empty list = always runs |
+| `working_dir` | no | Working directory for commands (relative to worktree) |
+| `verify_commands` | yes | Commands to run in verify phase (strings or objects, same format as global `verify_commands`) |
+| `setup_commands` | no | Commands to run before verification (strings or objects, same format as global `setup_commands`) |
+
+When profiles are configured, the orchestrator compares each worker's `git diff` against profile paths. Only matching profiles' commands are executed. Tasks can also declare which profiles apply to them via the `profiles` field in `tasks.yml`.
+
 ### Full example
 
 ```toml
@@ -229,6 +282,10 @@ suffix = "Run tests after changes."
 [ui]
 nerd_font = true
 
+[logging]
+log_dir = ".ralph/logs"
+max_log_files = 10
+
 [task]
 tasks_file = ".ralph/tasks.yml"
 default_model = "claude-sonnet-4-5-20250929"
@@ -237,11 +294,21 @@ default_model = "claude-sonnet-4-5-20250929"
 workers = 3
 max_retries = 2
 review_model = "opus"
-verify_commands = ["cargo test", "cargo clippy -- -D warnings"]
 
 [[task.orchestrate.setup_commands]]
 run = "cp {ROOT_DIR}/.env {WORKTREE_DIR}/.env"
 name = "Copy env"
+
+[[task.orchestrate.profiles]]
+name = "backend"
+paths = ["src/**/*.rs"]
+verify_commands = ["cargo test", "cargo clippy -- -D warnings"]
+
+[[task.orchestrate.profiles]]
+name = "frontend"
+paths = ["web/**/*.ts", "web/**/*.tsx"]
+verify_commands = ["npm test", "npm run lint"]
+setup_commands = ["npm install"]
 ```
 
 ## Task-Based Development
@@ -266,12 +333,14 @@ tasks:
     status: done
     model: sonnet
     description: Implement JWT validation middleware
+    profiles: [backend]
     related_files:
     - src/middleware/auth.rs
   - id: '1.2'
     name: Add role-based access control
     status: todo
     deps: ['1.1']
+    profiles: [backend, frontend]
     model: opus
 ```
 
@@ -283,6 +352,7 @@ tasks:
 | `component` | no | Component/module tag |
 | `deps` | no | List of task IDs this depends on |
 | `model` | no | Override default model for this task |
+| `profiles` | no | Verification profiles to apply (must match names from `.ralph.toml`) |
 | `description` | no | Detailed description |
 | `related_files` | no | Files relevant to this task |
 | `subtasks` | no | Nested child tasks |
@@ -317,7 +387,7 @@ ralph-wiggum task prd --file requirements.md --output-dir ./project --model clau
 **Generated files:**
 - `.ralph/tasks.yml` — hierarchical task list with statuses and dependencies
 
-Input priority: `--file` > `--prompt` > stdin.
+Input priority: `--file` > `--prompt` > stdin > interactive TUI editor.
 
 #### `task continue` — Run the development loop
 
@@ -374,10 +444,13 @@ ralph-wiggum task orchestrate --max-cost 5.0 --timeout 2h
 | `1`-`9` | Jump to worker N |
 | `Esc` | Unfocus current panel |
 | `Up` / `Down` | Scroll focused worker output |
+| `i` | Send message to focused worker (opens text input overlay) |
 | `p` | Toggle task preview overlay |
 | `r` | Reload tasks.yml |
 | `R` | Restart a failed/blocked worker (with confirmation) |
 | `q` | Quit (with confirmation — press twice to force) |
+
+The `i` key opens a text input overlay for sending real-time messages to the focused worker during its Implement or ReviewFix phase. Type your message and press Enter to send, or Esc to cancel. This lets you provide mid-task guidance without stopping the worker.
 
 After completion, a summary table is printed with per-task status, cost, duration, and retry count.
 
@@ -413,6 +486,9 @@ Appends new tasks to `.ralph/tasks.yml`, preserving existing numbering and state
 ralph-wiggum task add --file new-requirements.md
 ralph-wiggum task add --prompt "Add WebSocket support and real-time notifications"
 echo "Add logging middleware" | ralph-wiggum task add
+
+# No arguments — opens interactive TUI text editor
+ralph-wiggum task add
 ```
 
 | Option | Short | Description |
@@ -428,6 +504,9 @@ Modifies existing tasks — change descriptions, statuses, reorder, remove, spli
 ```bash
 ralph-wiggum task edit --file edit-instructions.md
 ralph-wiggum task edit --prompt "Remove task 2.3 and split task 3.1 into frontend and backend parts"
+
+# No arguments — opens interactive TUI text editor (supports multiline with Shift+Enter)
+ralph-wiggum task edit
 ```
 
 | Option | Short | Description |
@@ -471,7 +550,9 @@ ralph-wiggum task clean
 
 #### MCP server (internal)
 
-Ralph Wiggum runs an HTTP MCP server (Streamable HTTP transport) automatically during `task add`, `task edit`, `task plan`, and `task orchestrate`. The server exposes tasks.yml CRUD operations as MCP tools, giving Claude direct access to read and modify the task tree. No manual setup is needed.
+Ralph Wiggum runs an HTTP MCP server (Streamable HTTP transport) automatically during `task add`, `task edit`, `task plan`, and `task orchestrate`. The server exposes tasks.yml CRUD operations as MCP tools, giving Claude direct access to read and modify the task tree. Available tools include `list_profiles` for querying configured verification profiles. No manual setup is needed.
+
+All task commands auto-initialize `.ralph/tasks.yml` if the file doesn't exist yet — no need to run `task prd` first.
 
 ### Quick Start
 
