@@ -537,7 +537,7 @@ mod tests {
         };
 
         let buffer = render_status_to_buffer(&status, 80, 1, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 1 │ [t] 0.0s │ ↓ 0 ↑ 0 │ $0.0000");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 │ Iter 1 │ [t] 0.0s │ ↓ 0 ↑ 0 │ $0.0000");
     }
 
     /// Test snapshot: status bar z aktywnymi metrykami (iteracja 5, 15k tokenów, $0.42)
@@ -559,7 +559,7 @@ mod tests {
         };
 
         let buffer = render_status_to_buffer(&status, 80, 1, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 5 │ [t] 42.7s │ ↓ 15.2k ↑ 9.0k │ $0.4231");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 │ Iter 5 │ [t] 42.7s │ ↓ 15.2k ↑ 9.0k │ $0.4231");
     }
 
     /// Test snapshot: status bar z UpdateState::Completed (update gotowy do użycia)
@@ -584,7 +584,7 @@ mod tests {
         };
 
         let buffer = render_status_to_buffer(&status, 100, 1, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 -> 0.2.0 restart to apply │ Iter 3 │ [t] 12.3s │ ↓ 5.0k ↑ 3.0k │ $0.1500");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 -> 0.2.0 restart to apply │ Iter 3 │ [t] 12.3s │ ↓ 5.0k ↑ 3.0k │ $0.1500");
     }
 
     /// Test snapshot: status bar z UpdateState::Failed (błąd podczas update)
@@ -609,7 +609,7 @@ mod tests {
         };
 
         let buffer = render_status_to_buffer(&status, 100, 1, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 -> 0.3.0 update failed [Ctrl+U] │ Iter 2 │ [t] 8.5s │ ↓ 2.0k ↑ 1.5k │ $0.0800");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 -> 0.3.0 update failed [Ctrl+U] │ Iter 2 │ [t] 8.5s │ ↓ 2.0k ↑ 1.5k │ $0.0800");
     }
 
     /// Test snapshot: status bar z UpdateState::Downloading (pobieranie aktualizacji)
@@ -634,7 +634,7 @@ mod tests {
         };
 
         let buffer = render_status_to_buffer(&status, 100, 1, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 -> 0.4.0 downloading... │ Iter 1 │ [t] 3.2s │ ↓ 1.0k ↑ 500 │ $0.0300");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 -> 0.4.0 downloading... │ Iter 1 │ [t] 3.2s │ ↓ 1.0k ↑ 500 │ $0.0300");
     }
 
     /// Test snapshot: status bar z gauge postępu (50%) i task progress
@@ -666,7 +666,7 @@ mod tests {
 
         let buffer = render_status_to_buffer(&status, 80, 3, false);
         insta::assert_snapshot!(snap(&buffer), @"
-        v0.9.0 │ Iter 4 │ [t] 25.6s │ ↓ 10.0k ↑ 6.0k │ $0.2500
+        v0.10.0 │ Iter 4 │ [t] 25.6s │ ↓ 10.0k ↑ 6.0k │ $0.2500
         ▶ 1.2 [tests] Test task │ ✓5 ~0 !0 ○5 │ ^ 1.2/h ETA ~23m
         █████████████████████████████5/10 (50%) | ETA ~23m
         ");
@@ -701,7 +701,7 @@ mod tests {
 
         let buffer = render_status_to_buffer(&status, 80, 3, false);
         insta::assert_snapshot!(snap(&buffer), @"
-        v0.9.0 │ Iter 1 │ [t] 5.2s │ ↓ 2.0k ↑ 1.0k │ $0.0500
+        v0.10.0 │ Iter 1 │ [t] 5.2s │ ↓ 2.0k ↑ 1.0k │ $0.0500
         ▶ 1.1 [core] First task │ ✓0 ~1 !0 ○9
                                            0/10 (0%)
         ");
@@ -736,7 +736,7 @@ mod tests {
 
         let buffer = render_status_to_buffer(&status, 80, 3, false);
         insta::assert_snapshot!(snap(&buffer), @"
-        v0.9.0 │ Iter 12 │ [t] 120.5s │ ↓ 50.0k ↑ 30.0k │ $1.2500
+        v0.10.0 │ Iter 12 │ [t] 120.5s │ ↓ 50.0k ↑ 30.0k │ $1.2500
         ▶ 10.5 [finalize] Final task │ ✓10 ~0 !0 ○0
         ██████████████████████████████████10/10 (100%) █████████████████████████████████
         ");
@@ -765,7 +765,7 @@ mod tests {
 
         // height=3 ale brak task_progress → single-line fallback, speed/eta pominięte
         let buffer = render_status_to_buffer(&status, 80, 3, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 3 │ [t] 18.3s │ ↓ 8.0k ↑ 4.5k │ $0.1800");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 │ Iter 3 │ [t] 18.3s │ ↓ 8.0k ↑ 4.5k │ $0.1800");
     }
 
     /// Test snapshot: status bar z task_progress + speed_text + eta_text (wszystkie pola)
@@ -797,7 +797,7 @@ mod tests {
 
         let buffer = render_status_to_buffer(&status, 100, 3, false);
         insta::assert_snapshot!(snap(&buffer), @"
-        v0.9.0 │ Iter 8 │ [t] 65.4s │ ↓ 25.0k ↑ 15.0k │ $0.5500
+        v0.10.0 │ Iter 8 │ [t] 65.4s │ ↓ 25.0k ↑ 15.0k │ $0.5500
         ▶ 5.3 [integration] Complex integration test │ ✓7 ~1 !1 ○3 │ ^ 3.8/h ETA ~1h 15m
         ██████████████████████████████████████7/12 (58%) | ETA ~1h 15m
         ");
@@ -832,7 +832,7 @@ mod tests {
 
         let buffer = render_status_to_buffer(&status, 80, 3, false);
         insta::assert_snapshot!(snap(&buffer), @"
-        v0.9.0 │ Iter 1 │ [t] 0.5s │ ↓ 100 ↑ 50 │ $0.0100
+        v0.10.0 │ Iter 1 │ [t] 0.5s │ ↓ 100 ↑ 50 │ $0.0100
          │ ✓0 ~0 !0 ○0
                                             0/0 (0%)
         ");
@@ -885,7 +885,7 @@ mod tests {
         };
 
         let buffer = render_status_to_buffer(&status, 80, 1, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 3 (5..10) │ [t] 15.2s │ ↓ 8.0k ↑ 4.0k │ $0.1800");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 │ Iter 3 (5..10) │ [t] 15.2s │ ↓ 8.0k ↑ 4.0k │ $0.1800");
     }
 
     /// Test snapshot: status bar z min_iterations=0, max_iterations=1 (single shot)
@@ -908,7 +908,7 @@ mod tests {
         };
 
         let buffer = render_status_to_buffer(&status, 80, 1, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 1/1 │ [t] 5.7s │ ↓ 3.0k ↑ 1.5k │ $0.0700");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 │ Iter 1/1 │ [t] 5.7s │ ↓ 3.0k ↑ 1.5k │ $0.0700");
     }
 
     /// Test snapshot: status bar z iteration=999 (duża liczba iteracji)
@@ -931,7 +931,7 @@ mod tests {
         };
 
         let buffer = render_status_to_buffer(&status, 100, 1, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 999 │ [t] 1234.5s │ ↓ 500.0k ↑ 250.0k │ $12.3400");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 │ Iter 999 │ [t] 1234.5s │ ↓ 500.0k ↑ 250.0k │ $12.3400");
     }
 
     /// Test snapshot: status bar z min_iterations=5 bez max (tylko minimum)
@@ -954,7 +954,7 @@ mod tests {
         };
 
         let buffer = render_status_to_buffer(&status, 80, 1, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 3 (min 5) │ [t] 10.0s │ ↓ 5.0k ↑ 2.5k │ $0.1200");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 │ Iter 3 (min 5) │ [t] 10.0s │ ↓ 5.0k ↑ 2.5k │ $0.1200");
     }
 
     /// Test snapshot: status bar z max_iterations=20 bez min (tylko maximum)
@@ -977,6 +977,6 @@ mod tests {
         };
 
         let buffer = render_status_to_buffer(&status, 80, 1, false);
-        insta::assert_snapshot!(snap(&buffer), @"v0.9.0 │ Iter 15/20 │ [t] 67.3s │ ↓ 45.0k ↑ 23.0k │ $1.1500");
+        insta::assert_snapshot!(snap(&buffer), @"v0.10.0 │ Iter 15/20 │ [t] 67.3s │ ↓ 45.0k ↑ 23.0k │ $1.1500");
     }
 }
