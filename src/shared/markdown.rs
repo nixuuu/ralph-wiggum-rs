@@ -1,13 +1,18 @@
 use std::sync::LazyLock;
 
+#[cfg(not(test))]
 use crossterm::terminal;
 use termimad::{FmtText, MadSkin, crossterm::style::Color::*};
 
 /// Cached MadSkin — created once, reused for all markdown rendering.
 static SKIN: LazyLock<MadSkin> = LazyLock::new(create_skin);
 
-/// Get terminal width using crossterm (more reliable in raw mode)
+/// Get terminal width using crossterm (more reliable in raw mode).
+/// Returns a fixed value in test mode for deterministic snapshot tests.
 fn get_terminal_width() -> usize {
+    #[cfg(test)]
+    return 80;
+    #[cfg(not(test))]
     terminal::size().map(|(w, _)| w as usize).unwrap_or(120) // fallback to 120 columns
 }
 

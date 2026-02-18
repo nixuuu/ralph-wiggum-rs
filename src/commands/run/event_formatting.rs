@@ -1239,7 +1239,7 @@ mod tests {
                     name: "Read".to_string(),
                     id: Some("toolu_01".to_string()),
                     input: serde_json::json!({
-                        "file_path": "/Users/nix/project/src/main.rs"
+                        "file_path": "~/project/src/main.rs"
                     }),
                 }],
                 usage: None,
@@ -1301,7 +1301,7 @@ mod tests {
                     id: Some("toolu_04".to_string()),
                     input: serde_json::json!({
                         "pattern": "TODO|FIXME",
-                        "path": "/Users/nix/project/src"
+                        "path": "~/project/src"
                     }),
                 }],
                 usage: None,

@@ -881,7 +881,7 @@ mod tests {
     #[test]
     fn test_snapshot_format_tool_details_read() {
         let input = serde_json::json!({
-            "file_path": "/Users/nix/project/src/main.rs"
+            "file_path": "~/project/src/main.rs"
         });
         let spans = format_tool_details("Read", &input);
         let output: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
@@ -891,7 +891,7 @@ mod tests {
     #[test]
     fn test_snapshot_format_tool_details_edit_small_diff() {
         let input = serde_json::json!({
-            "file_path": "/Users/nix/project/test.txt",
+            "file_path": "~/project/test.txt",
             "old_string": "old line 1\nold line 2",
             "new_string": "new line 1\nnew line 2"
         });
@@ -924,7 +924,7 @@ mod tests {
     fn test_snapshot_format_tool_details_grep() {
         let input = serde_json::json!({
             "pattern": "TODO|FIXME",
-            "path": "/Users/nix/project/src"
+            "path": "~/project/src"
         });
         let spans = format_tool_details("Grep", &input);
         let output: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
