@@ -1,5 +1,5 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::shared::file_config::FileConfig;

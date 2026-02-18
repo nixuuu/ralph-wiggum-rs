@@ -883,10 +883,7 @@ tasks:
         // Verify file was created and task was added
         let tf = TasksFile::load(&path).unwrap();
         assert!(tf.find_node("1").is_some());
-        assert_eq!(
-            tf.default_model.as_deref(),
-            Some("sonnet")
-        );
+        assert_eq!(tf.default_model.as_deref(), Some("sonnet"));
     }
 
     #[test]
@@ -907,10 +904,7 @@ tasks:
         assert!(path.exists());
         let tf = TasksFile::load(&path).unwrap();
         assert_eq!(tf.tasks.len(), 0);
-        assert_eq!(
-            tf.default_model.as_deref(),
-            Some("sonnet")
-        );
+        assert_eq!(tf.default_model.as_deref(), Some("sonnet"));
     }
 
     #[test]

@@ -230,18 +230,17 @@ async fn resolve_mcp_config(
     Option<mpsc::Receiver<QuestionEnvelope>>,
     Option<ServerGuard>,
 )> {
-    let (auto_mcp_config, auto_question_rx, server_guard) =
-        match (tasks_path, &explicit_config) {
-            (Some(tasks_path), None) => {
-                let started = start_mcp_server(tasks_path.to_path_buf()).await?;
-                (
-                    Some(started.mcp_config),
-                    Some(started.question_rx),
-                    Some(started.guard),
-                )
-            }
-            _ => (None, None, None),
-        };
+    let (auto_mcp_config, auto_question_rx, server_guard) = match (tasks_path, &explicit_config) {
+        (Some(tasks_path), None) => {
+            let started = start_mcp_server(tasks_path.to_path_buf()).await?;
+            (
+                Some(started.mcp_config),
+                Some(started.question_rx),
+                Some(started.guard),
+            )
+        }
+        _ => (None, None, None),
+    };
 
     let mcp_config = explicit_config.or(auto_mcp_config);
     let question_rx = external_question_rx.or(auto_question_rx);
@@ -576,13 +575,19 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_mcp_config_explicit_takes_precedence() {
         let explicit = serde_json::json!({"mcpServers": {"custom": {}}});
-        let (config, _rx, _guard) =
-            resolve_mcp_config(Some(explicit.clone()), None, Some(std::path::Path::new("/tmp/t.yml")))
-                .await
-                .unwrap();
+        let (config, _rx, _guard) = resolve_mcp_config(
+            Some(explicit.clone()),
+            None,
+            Some(std::path::Path::new("/tmp/t.yml")),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(config.unwrap(), explicit);
-        assert!(_guard.is_none(), "Should not auto-start server when explicit config provided");
+        assert!(
+            _guard.is_none(),
+            "Should not auto-start server when explicit config provided"
+        );
     }
 
     #[tokio::test]

@@ -817,19 +817,13 @@ tasks:
 
         // Verify empty TasksFile with default model
         assert_eq!(tf.tasks.len(), 0);
-        assert_eq!(
-            tf.default_model.as_deref(),
-            Some("sonnet")
-        );
+        assert_eq!(tf.default_model.as_deref(), Some("sonnet"));
 
         // Verify file was created on disk
         assert!(path.exists());
         let loaded = TasksFile::load(&path).unwrap();
         assert_eq!(loaded.tasks.len(), 0);
-        assert_eq!(
-            loaded.default_model.as_deref(),
-            Some("sonnet")
-        );
+        assert_eq!(loaded.default_model.as_deref(), Some("sonnet"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -892,17 +886,11 @@ tasks:
         let tf = TasksFile::load_or_init(&path).unwrap();
 
         // Verify default_model is set correctly
-        assert_eq!(
-            tf.default_model.as_deref(),
-            Some("sonnet")
-        );
+        assert_eq!(tf.default_model.as_deref(), Some("sonnet"));
 
         // Verify it persists to disk
         let loaded = TasksFile::load(&path).unwrap();
-        assert_eq!(
-            loaded.default_model.as_deref(),
-            Some("sonnet")
-        );
+        assert_eq!(loaded.default_model.as_deref(), Some("sonnet"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -11,9 +11,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use ansi_to_tui::IntoText;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ansi_to_tui::IntoText;
 use ratatui::text::Line;
 
 use crate::commands::task::orchestrate::app_render::{
@@ -497,7 +497,8 @@ impl AppState for OrchestrateApp {
             .split(content_area);
 
             // Render sidebar
-            TaskSidebar::new(&mut self.sidebar_state, self.sidebar_focused).render(horizontal[0], frame.buffer_mut());
+            TaskSidebar::new(&mut self.sidebar_state, self.sidebar_focused)
+                .render(horizontal[0], frame.buffer_mut());
 
             horizontal[1]
         } else {

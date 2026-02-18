@@ -179,17 +179,17 @@ mod tests {
         assert_eq!(DEFAULT_THEME.primary, Color::Rgb(137, 180, 250)); // Blue
         assert_eq!(DEFAULT_THEME.success, Color::Rgb(166, 227, 161)); // Green
         assert_eq!(DEFAULT_THEME.warning, Color::Rgb(250, 179, 135)); // Peach
-        assert_eq!(DEFAULT_THEME.error, Color::Rgb(243, 139, 168));   // Red
+        assert_eq!(DEFAULT_THEME.error, Color::Rgb(243, 139, 168)); // Red
         assert_eq!(DEFAULT_THEME.secondary, Color::Rgb(203, 166, 247)); // Mauve
-        assert_eq!(DEFAULT_THEME.muted, Color::Rgb(108, 112, 134));   // Overlay0
+        assert_eq!(DEFAULT_THEME.muted, Color::Rgb(108, 112, 134)); // Overlay0
         assert_eq!(DEFAULT_THEME.border_focused, Color::Rgb(137, 180, 250)); // Blue
-        assert_eq!(DEFAULT_THEME.border_normal, Color::Rgb(69, 71, 90));     // Surface1
-        assert_eq!(DEFAULT_THEME.header_bg, Color::Rgb(49, 50, 68));         // Surface0
-        assert_eq!(DEFAULT_THEME.status_bar_bg, Color::Rgb(24, 24, 37));     // Mantle
-        assert_eq!(DEFAULT_THEME.sidebar_bg, Color::Rgb(24, 24, 37));        // Mantle
-        assert_eq!(DEFAULT_THEME.panel_bg, Color::Rgb(30, 30, 46));          // Base
-        assert_eq!(DEFAULT_THEME.panel_bg_focused, Color::Rgb(49, 50, 68));  // Surface0
-        assert_eq!(DEFAULT_THEME.text, Color::Rgb(205, 214, 244));            // Text
+        assert_eq!(DEFAULT_THEME.border_normal, Color::Rgb(69, 71, 90)); // Surface1
+        assert_eq!(DEFAULT_THEME.header_bg, Color::Rgb(49, 50, 68)); // Surface0
+        assert_eq!(DEFAULT_THEME.status_bar_bg, Color::Rgb(24, 24, 37)); // Mantle
+        assert_eq!(DEFAULT_THEME.sidebar_bg, Color::Rgb(24, 24, 37)); // Mantle
+        assert_eq!(DEFAULT_THEME.panel_bg, Color::Rgb(30, 30, 46)); // Base
+        assert_eq!(DEFAULT_THEME.panel_bg_focused, Color::Rgb(49, 50, 68)); // Surface0
+        assert_eq!(DEFAULT_THEME.text, Color::Rgb(205, 214, 244)); // Text
     }
 
     #[test]
@@ -215,18 +215,42 @@ mod tests {
 
     #[test]
     fn style_methods_return_correct_colors() {
-        assert_eq!(DEFAULT_THEME.success_style().fg, Some(Color::Rgb(166, 227, 161))); // Green
-        assert_eq!(DEFAULT_THEME.warning_style().fg, Some(Color::Rgb(250, 179, 135))); // Peach
-        assert_eq!(DEFAULT_THEME.error_style().fg, Some(Color::Rgb(243, 139, 168)));   // Red
-        assert_eq!(DEFAULT_THEME.muted_style().fg, Some(Color::Rgb(108, 112, 134)));   // Overlay0
+        assert_eq!(
+            DEFAULT_THEME.success_style().fg,
+            Some(Color::Rgb(166, 227, 161))
+        ); // Green
+        assert_eq!(
+            DEFAULT_THEME.warning_style().fg,
+            Some(Color::Rgb(250, 179, 135))
+        ); // Peach
+        assert_eq!(
+            DEFAULT_THEME.error_style().fg,
+            Some(Color::Rgb(243, 139, 168))
+        ); // Red
+        assert_eq!(
+            DEFAULT_THEME.muted_style().fg,
+            Some(Color::Rgb(108, 112, 134))
+        ); // Overlay0
     }
 
     #[test]
     fn state_color_maps_all_task_statuses() {
-        assert_eq!(DEFAULT_THEME.state_color(&TaskStatus::Done), Color::Rgb(166, 227, 161));
-        assert_eq!(DEFAULT_THEME.state_color(&TaskStatus::InProgress), Color::Rgb(250, 179, 135));
-        assert_eq!(DEFAULT_THEME.state_color(&TaskStatus::Todo), Color::Rgb(108, 112, 134));
-        assert_eq!(DEFAULT_THEME.state_color(&TaskStatus::Blocked), Color::Rgb(243, 139, 168));
+        assert_eq!(
+            DEFAULT_THEME.state_color(&TaskStatus::Done),
+            Color::Rgb(166, 227, 161)
+        );
+        assert_eq!(
+            DEFAULT_THEME.state_color(&TaskStatus::InProgress),
+            Color::Rgb(250, 179, 135)
+        );
+        assert_eq!(
+            DEFAULT_THEME.state_color(&TaskStatus::Todo),
+            Color::Rgb(108, 112, 134)
+        );
+        assert_eq!(
+            DEFAULT_THEME.state_color(&TaskStatus::Blocked),
+            Color::Rgb(243, 139, 168)
+        );
     }
 
     #[test]

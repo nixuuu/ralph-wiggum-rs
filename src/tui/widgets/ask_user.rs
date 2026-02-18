@@ -21,7 +21,7 @@ use ratatui::{
     widgets::{Block, Padding, Widget},
 };
 
-use crate::shared::markdown::{render_markdown_for_width};
+use crate::shared::markdown::render_markdown_for_width;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::ask_user_choice::QuestionOption;
 use crate::tui::widgets::{

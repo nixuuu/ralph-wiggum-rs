@@ -117,9 +117,7 @@ fn build_worker_status(p: WorkerStatusParams) -> WorkerStatus {
         task_id: Some(p.task_id.to_string()),
         component: p.component,
         phase: p.phase,
-        model: p
-            .model
-            .map(|m| crate::shared::tasks::shorten_model_name(m)),
+        model: p.model.map(|m| crate::shared::tasks::shorten_model_name(m)),
         cost_usd: p.cost_usd,
         input_tokens: p.input_tokens,
         output_tokens: p.output_tokens,

@@ -279,7 +279,11 @@ pub(super) fn render_global_bar<'a>(
             theme.muted_style(),
         ));
     } else {
-        let idle_hint = if show_idle { "h=hide-idle" } else { "h=show-idle" };
+        let idle_hint = if show_idle {
+            "h=hide-idle"
+        } else {
+            "h=show-idle"
+        };
         queue_line_spans.push(Span::styled(
             format!("q Tab ↑↓ Esc p=tasks t=sidebar {idle_hint} r=reload R=restart"),
             theme.muted_style(),

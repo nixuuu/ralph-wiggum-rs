@@ -391,10 +391,7 @@ mod tests {
             prettify_tool_name("mcp__context7__resolve-library-id"),
             "resolve-library-id"
         );
-        assert_eq!(
-            prettify_tool_name("mcp__ralph-tasks__ask_user"),
-            "ask user"
-        );
+        assert_eq!(prettify_tool_name("mcp__ralph-tasks__ask_user"), "ask user");
     }
 
     #[test]

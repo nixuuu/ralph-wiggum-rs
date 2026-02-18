@@ -133,10 +133,7 @@ fn format_assistant_message(
 
                     let mut spans = vec![
                         border_span(muted),
-                        Span::styled(
-                            display_name,
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
+                        Span::styled(display_name, Style::default().add_modifier(Modifier::BOLD)),
                     ];
 
                     if !detail_spans.is_empty() {
@@ -155,9 +152,7 @@ fn format_assistant_message(
                 *last_block_type = BlockType::Thinking;
 
                 // Thinking → bordered block z italic (muted border + italic text)
-                let italic_style = Style::default()
-                    .fg(muted)
-                    .add_modifier(Modifier::ITALIC);
+                let italic_style = Style::default().fg(muted).add_modifier(Modifier::ITALIC);
 
                 for line in thinking.lines() {
                     let trimmed = line.trim();
@@ -639,7 +634,8 @@ mod tests {
 
     #[test]
     fn test_extract_answer_only_multiline_with_blank_lines() {
-        let text = "**Cześć! Co chcesz?\n\n1. Opcja A\n2. Opcja B\n\nCo Cię interesuje?**\nOdpowiedź";
+        let text =
+            "**Cześć! Co chcesz?\n\n1. Opcja A\n2. Opcja B\n\nCo Cię interesuje?**\nOdpowiedź";
         assert_eq!(extract_answer_only(text), "Odpowiedź");
     }
 
@@ -1417,8 +1413,13 @@ mod tests {
             model_costs: &mut model_costs,
         };
 
-        let ask_lines =
-            format_event(&ask_event, &mut block_type, &mut tool_names, false, &mut tokens);
+        let ask_lines = format_event(
+            &ask_event,
+            &mut block_type,
+            &mut tool_names,
+            false,
+            &mut tokens,
+        );
 
         // 2. User odpowiada — ToolResult z format build_answer_markdown
         let answer_event = ClaudeEvent::User {

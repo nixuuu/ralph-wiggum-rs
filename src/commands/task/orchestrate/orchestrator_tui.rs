@@ -55,8 +55,7 @@ impl Orchestrator {
 
             // Ctrl+C bypasses OrchestrateApp — goes straight to shutdown logic
             if is_ctrl_c(key) {
-                let should_break =
-                    self.handle_ctrl_c(ctx, graceful_shutdown_started);
+                let should_break = self.handle_ctrl_c(ctx, graceful_shutdown_started);
                 self.render_dashboard(ctx, started_at, *graceful_shutdown_started)?;
                 return Ok(should_break);
             }
@@ -147,19 +146,18 @@ impl Orchestrator {
         };
 
         // Build status snapshot — read quit/restart state from OrchestrateApp
-        let quit_pending = ctx.tui.app.quit_state == crate::commands::task::orchestrate::app::QuitState::Pending;
+        let quit_pending =
+            ctx.tui.app.quit_state == crate::commands::task::orchestrate::app::QuitState::Pending;
         let completed = ctx.flags.completed.load(Ordering::Relaxed);
 
         // Check for pending worker restart from app state
         let restart_pending = match ctx.tui.app.restart_state() {
             RestartState::Pending { worker_id } => {
                 let wid = *worker_id;
-                ctx.worker_slots
-                    .get(&wid)
-                    .and_then(|slot| match slot {
-                        WorkerSlot::Busy { task_id, .. } => Some((wid, task_id.clone())),
-                        _ => None,
-                    })
+                ctx.worker_slots.get(&wid).and_then(|slot| match slot {
+                    WorkerSlot::Busy { task_id, .. } => Some((wid, task_id.clone())),
+                    _ => None,
+                })
             }
             _ => None,
         };
