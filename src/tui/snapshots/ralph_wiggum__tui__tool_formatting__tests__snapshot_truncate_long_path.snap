@@ -1,0 +1,5 @@
+---
+source: src/tui/tool_formatting.rs
+expression: result
+---
+/Users/nix/very/deep/nested/directory/structure/with/many/levels/that/exceeds/max/width/file.rs

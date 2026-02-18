@@ -1,0 +1,9 @@
+---
+source: src/tui/widgets/task_detail.rs
+expression: snap(&buffer)
+---
+ Task Details
+
+ 1.1 — Minimal task
+
+ Status: Todo

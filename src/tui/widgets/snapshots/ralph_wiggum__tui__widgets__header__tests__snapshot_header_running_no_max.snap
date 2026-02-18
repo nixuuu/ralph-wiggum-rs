@@ -1,0 +1,5 @@
+---
+source: src/tui/widgets/header.rs
+expression: snap(&buffer)
+---
+test | haiku-4 Iter 7 | 2m5s ⠋

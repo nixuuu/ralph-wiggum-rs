@@ -1,0 +1,9 @@
+---
+source: src/tui/widgets/output_view.rs
+expression: snapshot
+---
+┌ Empty ───────────────────────────────┐
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘

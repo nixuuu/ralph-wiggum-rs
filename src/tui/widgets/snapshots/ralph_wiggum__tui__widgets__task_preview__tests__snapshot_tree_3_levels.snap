@@ -1,0 +1,10 @@
+---
+source: src/tui/widgets/task_preview.rs
+expression: snapshot
+---
+ Task List (p to close, ↑↓ to scroll)
+
+ 1 Project: E-commerce
+   1.1 Module: Auth
+     ✓ 1.1.1: Login form [ui]
+     ● 1.1.2: JWT validation [api] deps: 1.1.1

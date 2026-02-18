@@ -1,0 +1,15 @@
+---
+source: src/tui/widgets/text_input_overlay.rs
+expression: snapshot
+---
+
+           Message to Worker 10
+
+           Testing hints|
+
+
+
+
+
+
+           Ctrl+Enter=send | Esc=cancel

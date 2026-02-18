@@ -1,0 +1,14 @@
+---
+source: src/commands/task/command_app.rs
+expression: snap(&buffer)
+---
+ralph task prd │ model: sonnet
+Testing narrow terminal layout.
+
+
+
+
+
+
+
+Working │ 75%

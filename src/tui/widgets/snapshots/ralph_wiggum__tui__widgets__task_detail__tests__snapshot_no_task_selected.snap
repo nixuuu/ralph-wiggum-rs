@@ -1,0 +1,7 @@
+---
+source: src/tui/widgets/task_detail.rs
+expression: snap(&buffer)
+---
+ Task Details
+
+ No task selected

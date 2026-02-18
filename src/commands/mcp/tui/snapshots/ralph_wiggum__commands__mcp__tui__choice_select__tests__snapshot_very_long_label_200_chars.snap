@@ -1,8 +1,0 @@
----
-source: src/commands/mcp/tui/choice_select.rs
-expression: snapshot
----
-  Short
-> AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-  Another short
-  Other  type your answer

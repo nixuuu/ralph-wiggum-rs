@@ -1,0 +1,7 @@
+---
+source: src/tui/widgets/ask_user_choice.rs
+expression: snapshot
+---
+● Option Alpha
+○ Option Beta
+○ Option Gamma

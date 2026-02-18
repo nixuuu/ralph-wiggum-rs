@@ -1,0 +1,34 @@
+---
+source: src/commands/run/app.rs
+expression: snapshot
+---
+   Medium output 0
+   Medium output 1
+   Medium output 2
+   Medium output 3
+   Medium output 4
+   Medium output 5
+   Medium output 6
+   Medium output 7
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[t] 0.0s │ ↓ 0 ↑ 0 │ $0.0000 │ q Quit t Sidebar ↑↓ Scroll Tab Focus

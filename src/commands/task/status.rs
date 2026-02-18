@@ -1,137 +1,55 @@
-use crossterm::style::Stylize;
+use std::path::Path;
+use std::time::Duration;
 
+use crate::commands::task::explorer::TaskExplorerApp;
 use crate::shared::error::Result;
 use crate::shared::file_config::FileConfig;
-use crate::shared::progress::TaskStatus;
 use crate::shared::tasks::TasksFile;
+use crate::tui::app::App;
 
 pub fn execute(file_config: &FileConfig) -> Result<()> {
     let tasks_path = &file_config.task.tasks_file;
 
-    // Auto-initialize if file doesn't exist (instead of returning error)
+    // Auto-initialize if file doesn't exist
     let tasks_file = TasksFile::load_or_init(tasks_path)?;
 
-    // If file was just initialized (empty), show friendly message
     if tasks_file.tasks.is_empty() {
-        println!();
-        println!("{}", "━".repeat(60).dark_grey());
-        println!("{} No tasks yet.", "ℹ".cyan().bold());
-        println!(
-            "  Run {} or {} to get started.",
-            "task add".cyan(),
-            "task plan".cyan()
-        );
-        println!("{}", "━".repeat(60).dark_grey());
-        println!();
-        return Ok(());
+        return print_empty_state();
     }
 
-    let summary = tasks_file.to_summary();
-    let total = summary.total();
+    launch_explorer(tasks_path)
+}
 
+/// Wyświetl komunikat gdy brak tasków.
+fn print_empty_state() -> Result<()> {
     println!();
-    println!("{}", "━".repeat(60).dark_grey());
-    println!("  Task Progress");
-    println!("{}", "━".repeat(60).dark_grey());
-
-    // Breakdown
-    println!(
-        "  {}  {}  {}  {}  {}  {}  {}  {}",
-        "Done:".dark_grey(),
-        summary.done.to_string().green().bold(),
-        "In Progress:".dark_grey(),
-        summary.in_progress.to_string().cyan().bold(),
-        "Blocked:".dark_grey(),
-        summary.blocked.to_string().red().bold(),
-        "Todo:".dark_grey(),
-        summary.todo.to_string().white().bold(),
-    );
-
-    // Current task
-    if let Some(current) = tasks_file.current_task() {
-        let status_marker = match current.status {
-            TaskStatus::InProgress => "~".cyan().bold().to_string(),
-            TaskStatus::Todo => " ".to_string(),
-            _ => "?".to_string(),
-        };
-        println!();
-        println!(
-            "  {} [{}] {} [{}] {}",
-            "▶".cyan(),
-            status_marker,
-            current.id.as_str().cyan().bold(),
-            current.component.as_str().yellow(),
-            current.name.as_str().bold()
-        );
-    }
-
-    // Progress bar (ASCII gauge)
-    if total > 0 {
-        let ratio = summary.done as f64 / total as f64;
-        let bar_width = 40;
-        let filled = (ratio * bar_width as f64).round() as usize;
-        let empty = bar_width - filled;
-        let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty),);
-
-        println!();
-        println!(
-            "  [{}] {}/{} ({}%)",
-            bar.green(),
-            summary.done.to_string().green().bold(),
-            total,
-            (ratio * 100.0).round() as u32,
-        );
-    }
-
-    println!("{}", "━".repeat(60).dark_grey());
-
-    // Display verification profiles if configured
-    if !file_config.task.orchestrate.profiles.is_empty() {
-        let profile_count = file_config.task.orchestrate.profiles.len();
-        println!();
-        println!(
-            "  {} Profile weryfikacji: {} skonfigurowanych",
-            "ⓘ".cyan(),
-            profile_count.to_string().bold()
-        );
-        for profile in &file_config.task.orchestrate.profiles {
-            let paths_str = if profile.paths.is_empty() {
-                "brak ścieżek".dark_grey().to_string()
-            } else {
-                profile.paths.join(", ")
-            };
-            println!(
-                "    {} {} ({})",
-                "-".dark_grey(),
-                profile.name.as_str().bold(),
-                paths_str
-            );
-        }
-        println!("{}", "━".repeat(60).dark_grey());
-    }
-
+    println!("{}", "━".repeat(60));
+    println!("ℹ No tasks yet.");
+    println!("  Run 'task add' or 'task plan' to get started.");
+    println!("{}", "━".repeat(60));
     println!();
+    Ok(())
+}
 
+/// Uruchom fullscreen TUI explorer.
+fn launch_explorer(tasks_path: &Path) -> Result<()> {
+    let mut explorer = TaskExplorerApp::load(tasks_path)?;
+    let mut tui_app = App::new(Duration::from_millis(100))?;
+    tui_app.run(&mut explorer)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::file_config::{OrchestrateConfig, TaskConfig, VerifyProfile};
+    use crate::shared::file_config::TaskConfig;
     use tempfile::TempDir;
 
-    /// Creates a test config with given profiles and a valid temp tasks file.
-    fn create_test_config(temp_dir: &TempDir, profiles: Vec<VerifyProfile>) -> FileConfig {
+    fn make_config(temp_dir: &TempDir, tasks_content: &str) -> FileConfig {
         let tasks_file = temp_dir.path().join("tasks.yml");
-        std::fs::write(&tasks_file, "tasks: []").unwrap();
-
+        std::fs::write(&tasks_file, tasks_content).unwrap();
         FileConfig {
             task: TaskConfig {
-                orchestrate: OrchestrateConfig {
-                    profiles,
-                    ..Default::default()
-                },
                 tasks_file,
                 ..Default::default()
             },
@@ -140,78 +58,291 @@ mod tests {
     }
 
     #[test]
-    fn test_status_without_profiles() {
+    fn test_execute_empty_tasks_prints_message() {
         let temp_dir = TempDir::new().unwrap();
-        let config = create_test_config(&temp_dir, vec![]);
-
-        let result = execute(&config);
-        assert!(result.is_ok(), "Should succeed without profiles");
+        let config = make_config(&temp_dir, "tasks: []");
+        // Puste taski → print_empty_state, nie uruchamia TUI
+        assert!(execute(&config).is_ok());
     }
 
     #[test]
-    fn test_status_with_single_profile() {
+    fn test_execute_auto_inits_missing_file() {
         let temp_dir = TempDir::new().unwrap();
-        let config = create_test_config(
-            &temp_dir,
-            vec![VerifyProfile {
-                name: "frontend".to_string(),
-                description: Some("Frontend tests".to_string()),
-                paths: vec!["src/ui/**/*.rs".to_string(), "assets/**/*".to_string()],
-                working_dir: None,
-                verify_commands: vec![],
-                setup_commands: vec![],
-            }],
-        );
-
-        let result = execute(&config);
-        assert!(result.is_ok(), "Should succeed with single profile");
+        let tasks_path = temp_dir.path().join("nonexistent.yml");
+        let config = FileConfig {
+            task: TaskConfig {
+                tasks_file: tasks_path.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Plik nie istnieje → auto-init → puste taski → empty state
+        assert!(execute(&config).is_ok());
+        assert!(tasks_path.exists(), "Auto-init powinien stworzyć plik");
     }
 
     #[test]
-    fn test_status_with_multiple_profiles() {
+    fn test_explorer_loads_single_task() {
         let temp_dir = TempDir::new().unwrap();
-        let config = create_test_config(
-            &temp_dir,
-            vec![
-                VerifyProfile {
-                    name: "backend".to_string(),
-                    description: None,
-                    paths: vec!["src/api/**/*.rs".to_string()],
-                    working_dir: None,
-                    verify_commands: vec![],
-                    setup_commands: vec![],
-                },
-                VerifyProfile {
-                    name: "database".to_string(),
-                    description: Some("Database migrations".to_string()),
-                    paths: vec!["migrations/**/*.sql".to_string()],
-                    working_dir: Some("db".to_string()),
-                    verify_commands: vec![],
-                    setup_commands: vec![],
-                },
-            ],
-        );
+        let tasks_file = temp_dir.path().join("tasks.yml");
+        std::fs::write(
+            &tasks_file,
+            "tasks:\n  - id: '1'\n    name: Test\n    component: core\n    status: todo\n",
+        )
+        .unwrap();
 
-        let result = execute(&config);
-        assert!(result.is_ok(), "Should succeed with multiple profiles");
+        let explorer = TaskExplorerApp::load(&tasks_file).unwrap();
+        assert_eq!(explorer.tasks.tasks.len(), 1);
     }
 
     #[test]
-    fn test_status_with_profile_without_paths() {
+    fn test_explorer_loads_multiple_tasks_with_statuses() {
         let temp_dir = TempDir::new().unwrap();
-        let config = create_test_config(
-            &temp_dir,
-            vec![VerifyProfile {
-                name: "global-checks".to_string(),
-                description: Some("Global checks".to_string()),
-                paths: vec![],
-                working_dir: None,
-                verify_commands: vec![],
-                setup_commands: vec![],
-            }],
-        );
+        let tasks_file = temp_dir.path().join("tasks.yml");
+        let yaml = r#"tasks:
+  - id: "1"
+    name: "Done task"
+    component: "core"
+    status: done
+  - id: "2"
+    name: "WIP task"
+    component: "ui"
+    status: in_progress
+  - id: "3"
+    name: "Todo task"
+    component: "api"
+    status: todo
+"#;
+        std::fs::write(&tasks_file, yaml).unwrap();
 
-        let result = execute(&config);
-        assert!(result.is_ok(), "Should succeed with profile without paths");
+        let explorer = TaskExplorerApp::load(&tasks_file).unwrap();
+        assert_eq!(explorer.tasks.tasks.len(), 3);
+        // Pierwszy task powinien być zaznaczony domyślnie
+        assert_eq!(explorer.selected_id.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn test_print_empty_state() {
+        assert!(print_empty_state().is_ok());
+    }
+
+    // ── Integration tests: Task Explorer Navigation ──────────────────────
+
+    use crate::tui::test_helpers::{TestApp, make_key};
+    use crossterm::event::KeyCode;
+
+    fn sample_explorer_yaml() -> &'static str {
+        r#"
+default_model: claude-sonnet-4-5-20250929
+
+tasks:
+  - id: "1"
+    name: "Epic One"
+    component: parser
+    subtasks:
+      - id: "1.1"
+        name: "Subtask A"
+        status: done
+        component: parser
+      - id: "1.2"
+        name: "Subtask B"
+        status: in_progress
+        component: parser
+  - id: "2"
+    name: "Epic Two"
+    component: api
+    subtasks:
+      - id: "2.1"
+        name: "API feature"
+        status: todo
+        component: api
+      - id: "2.2"
+        name: "API tests"
+        status: todo
+        component: api
+"#
+    }
+
+    fn make_test_explorer() -> TaskExplorerApp {
+        use crate::shared::tasks::TasksFile;
+        use crate::tui::widgets::task_tree::TreeState;
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        let tasks: TasksFile = serde_yaml::from_str(sample_explorer_yaml()).unwrap();
+
+        // Rozwiń root nodes (epiki)
+        let mut expanded = HashSet::new();
+        for node in &tasks.tasks {
+            expanded.insert(node.id.clone());
+        }
+
+        let tree_state = TreeState {
+            expanded,
+            selected: 0,
+            scroll_offset: 0,
+        };
+
+        let rows =
+            crate::tui::widgets::task_tree::flatten_nodes(&tasks.tasks, &tree_state.expanded);
+        let selected_id = rows.first().map(|r| r.id.clone());
+
+        TaskExplorerApp {
+            tasks,
+            tasks_path: PathBuf::from(".ralph/tasks.yml"),
+            tree_state,
+            selected_id,
+            focus: crate::commands::task::explorer::state::Panel::Tree,
+            input_mode: crate::commands::task::explorer::state::InputMode::Normal,
+            filter: String::new(),
+            sort_mode: crate::commands::task::explorer::state::SortMode::Id,
+            detail_scroll: 0,
+        }
+    }
+
+    #[test]
+    fn test_navigation_down_3_times_selects_4th_item() {
+        let explorer = make_test_explorer();
+        let mut app = TestApp::new(explorer, 80, 24);
+
+        // Stan początkowy: zaznaczony "1" (Epic One)
+        app.assert_state(|s| s.selected_id.as_deref() == Some("1"));
+
+        // ↓ 1 raz → "1.1" (Subtask A)
+        app.inject_key(make_key(KeyCode::Down));
+        app.step();
+        app.assert_state(|s| s.selected_id.as_deref() == Some("1.1"));
+
+        // ↓ 2 raz → "1.2" (Subtask B)
+        app.inject_key(make_key(KeyCode::Down));
+        app.step();
+        app.assert_state(|s| s.selected_id.as_deref() == Some("1.2"));
+
+        // ↓ 3 raz → "2" (Epic Two) — 4ty element
+        app.inject_key(make_key(KeyCode::Down));
+        app.step();
+        app.assert_state(|s| s.selected_id.as_deref() == Some("2"));
+    }
+
+    #[test]
+    fn test_enter_on_parent_toggles_expand_collapse() {
+        let mut explorer = make_test_explorer();
+        // Zacznij ze zwiniętym drzewem
+        explorer.tree_state.expanded.clear();
+
+        let mut app = TestApp::new(explorer, 80, 24);
+
+        // Stan początkowy: zaznaczony "1", brak rozszerzonych children
+        app.assert_state(|s| s.tree_state.expanded.is_empty());
+        app.assert_state(|s| s.selected_id.as_deref() == Some("1"));
+
+        // Enter → expand "1"
+        app.inject_key(make_key(KeyCode::Enter));
+        app.step();
+        app.assert_state(|s| s.tree_state.expanded.contains("1"));
+
+        // Widoczne children: "1.1" i "1.2"
+        app.assert_state(|s| {
+            let rows = s.visible_rows();
+            rows.len() > 2 && rows.iter().any(|r| r.id == "1.1")
+        });
+
+        // Enter ponownie → collapse "1"
+        app.inject_key(make_key(KeyCode::Enter));
+        app.step();
+        app.assert_state(|s| !s.tree_state.expanded.contains("1"));
+
+        // Children schowane
+        app.assert_state(|s| {
+            let rows = s.visible_rows();
+            rows.iter().all(|r| r.id != "1.1")
+        });
+    }
+
+    #[test]
+    fn test_filter_by_api_component() {
+        let mut explorer = make_test_explorer();
+        // Ustaw filtr na "api"
+        explorer.filter = "api".to_string();
+
+        let app = TestApp::new(explorer, 80, 24);
+
+        // Widoczne tylko taski z komponentem "api" (node "2" też ma component=api)
+        app.assert_state(|s| {
+            let rows = s.visible_rows();
+            !rows.is_empty() && rows.iter().all(|r| r.component.as_deref() == Some("api"))
+        });
+
+        // "1" i "1.1", "1.2" (parser) powinny być odfiltrowane
+        app.assert_state(|s| {
+            let rows = s.visible_rows();
+            !rows.iter().any(|r| r.id == "1" || r.id == "1.1")
+        });
+    }
+
+    #[test]
+    fn test_sort_by_component_2_times() {
+        let explorer = make_test_explorer();
+        let mut app = TestApp::new(explorer, 80, 24);
+
+        // Stan początkowy: SortMode::Id
+        app.assert_state(|s| {
+            matches!(
+                s.sort_mode,
+                crate::commands::task::explorer::state::SortMode::Id
+            )
+        });
+
+        // 's' 1 raz → SortMode::Status
+        app.inject_key(make_key(KeyCode::Char('s')));
+        app.step();
+        app.assert_state(|s| {
+            matches!(
+                s.sort_mode,
+                crate::commands::task::explorer::state::SortMode::Status
+            )
+        });
+
+        // 's' 2 raz → SortMode::Component
+        app.inject_key(make_key(KeyCode::Char('s')));
+        app.step();
+        app.assert_state(|s| {
+            matches!(
+                s.sort_mode,
+                crate::commands::task::explorer::state::SortMode::Component
+            )
+        });
+
+        // Sprawdź czy sortowanie działa: "api" przed "parser" (alfabetycznie)
+        app.assert_state(|s| {
+            let rows = s.visible_rows();
+            let depth0: Vec<_> = rows.iter().filter(|r| r.depth == 0).collect();
+            if depth0.len() >= 2 {
+                // Epic Two (api) powinien być przed Epic One (parser)
+                depth0[0].component.as_deref() == Some("api")
+                    && depth0[1].component.as_deref() == Some("parser")
+            } else {
+                false
+            }
+        });
+    }
+
+    #[test]
+    fn test_tab_switches_focus_to_detail_panel() {
+        let explorer = make_test_explorer();
+        let mut app = TestApp::new(explorer, 80, 24);
+
+        // Stan początkowy: focus na Tree
+        app.assert_state(|s| s.focus == crate::commands::task::explorer::state::Panel::Tree);
+
+        // Tab → switch to Detail
+        app.inject_key(make_key(KeyCode::Tab));
+        app.step();
+        app.assert_state(|s| s.focus == crate::commands::task::explorer::state::Panel::Detail);
+
+        // Tab ponownie → switch back to Tree
+        app.inject_key(make_key(KeyCode::Tab));
+        app.step();
+        app.assert_state(|s| s.focus == crate::commands::task::explorer::state::Panel::Tree);
     }
 }

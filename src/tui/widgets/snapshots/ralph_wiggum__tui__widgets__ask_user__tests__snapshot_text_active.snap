@@ -1,0 +1,9 @@
+---
+source: src/tui/widgets/ask_user.rs
+expression: snap(&buffer)
+---
+ ❓ Question
+
+ What is your name?
+
+ > █ohn Doe

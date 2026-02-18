@@ -1,0 +1,5 @@
+---
+source: src/tui/widgets/header.rs
+expression: snap(&buffer)
+---
+cmd | m 0.5s

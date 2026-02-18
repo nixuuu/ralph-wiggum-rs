@@ -1,0 +1,7 @@
+---
+source: src/tui/ring_buffer.rs
+expression: snapshot
+---
+Line 3 - stays
+Line 4 - stays
+Line 5 - stays (newest)

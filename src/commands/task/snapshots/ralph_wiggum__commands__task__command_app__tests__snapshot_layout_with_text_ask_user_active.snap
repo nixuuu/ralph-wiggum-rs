@@ -1,0 +1,19 @@
+---
+source: src/commands/task/command_app.rs
+expression: snap(&buffer)
+---
+ralph task prd │ model: sonnet-4-5
+Please provide additional context.
+
+
+
+
+
+
+ ❓ Question
+
+ What is the project name?
+
+ > █
+
+Waiting for user input

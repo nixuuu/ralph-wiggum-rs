@@ -2,6 +2,7 @@
 // Exposes shared module for integration tests (tests/ directory)
 
 pub mod shared;
+pub mod tui;
 
 // Required by lib-scoped tests in shared/ that reference commands::task::orchestrate::verify.
 // commands depends on cli, templates, and updater — all must be present.

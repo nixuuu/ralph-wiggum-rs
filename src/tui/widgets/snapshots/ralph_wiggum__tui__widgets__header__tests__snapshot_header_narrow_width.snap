@@ -1,0 +1,5 @@
+---
+source: src/tui/widgets/header.rs
+expression: snap(&buffer)
+---
+orchestrate | claude-sonnet-4-5-20250929

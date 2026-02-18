@@ -1,0 +1,5 @@
+---
+source: src/tui/tool_formatting.rs
+expression: "output.join(\"\")"
+---
+Run tests: cargo test --all

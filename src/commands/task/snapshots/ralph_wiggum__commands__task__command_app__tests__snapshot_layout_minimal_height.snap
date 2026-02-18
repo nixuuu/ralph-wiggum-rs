@@ -1,0 +1,7 @@
+---
+source: src/commands/task/command_app.rs
+expression: snap(&buffer)
+---
+ralph task
+
+Minimal

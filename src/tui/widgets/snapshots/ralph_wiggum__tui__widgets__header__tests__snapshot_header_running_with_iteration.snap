@@ -1,0 +1,5 @@
+---
+source: src/tui/widgets/header.rs
+expression: snap(&buffer)
+---
+task orchestrate | claude-sonnet-4-5 3/10 | 42.0s ⠋

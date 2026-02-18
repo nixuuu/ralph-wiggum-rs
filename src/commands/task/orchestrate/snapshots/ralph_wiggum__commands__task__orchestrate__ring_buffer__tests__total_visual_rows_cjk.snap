@@ -1,7 +1,0 @@
----
-source: src/commands/task/orchestrate/ring_buffer.rs
-expression: snapshot
----
-你好
-你好世界啊
-你好世界啊

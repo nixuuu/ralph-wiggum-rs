@@ -1,0 +1,9 @@
+---
+source: src/commands/task/orchestrate/worker_panel.rs
+expression: snapshot
+---
+┌ W3 [7.1] ───────────────────────────────────────
+│ ◉ verify
+│
+│
+│ $0.0000 │ ↓0 ↑0

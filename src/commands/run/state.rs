@@ -136,6 +136,10 @@ impl StateManager {
         self.state.min_iterations
     }
 
+    pub fn max_iterations(&self) -> u32 {
+        self.state.max_iterations
+    }
+
     pub fn iteration(&self) -> u32 {
         self.state.iteration
     }

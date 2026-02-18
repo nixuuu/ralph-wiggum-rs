@@ -1,8 +1,0 @@
----
-source: src/commands/mcp/tui/choice_select.rs
-expression: snapshot
----
-  Normal option  Short description
-> Option with very long description  Lorem ipsum dolor sit amet, consectetur adi
-  Another normal
-  Other  type your answer

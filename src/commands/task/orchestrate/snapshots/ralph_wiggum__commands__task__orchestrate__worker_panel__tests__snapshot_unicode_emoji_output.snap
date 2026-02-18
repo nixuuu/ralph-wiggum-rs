@@ -1,0 +1,14 @@
+---
+source: src/commands/task/orchestrate/worker_panel.rs
+expression: snapshot
+---
+┌ W1 [18.1: core] ──────────────────────────────────────────
+│ ● implementing
+│ 🚀 Starting build process
+│ ✅ Tests passed successfully
+│ ❌ Linter found issues
+│ ⚠️  Warning: deprecated API
+│
+│
+│
+│ $0.0000 │ ↓0 ↑0

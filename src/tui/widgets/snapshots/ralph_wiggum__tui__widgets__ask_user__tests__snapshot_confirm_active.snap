@@ -1,0 +1,7 @@
+---
+source: src/tui/widgets/ask_user.rs
+expression: snap(&buffer)
+---
+ ❓ Question
+
+ Are you sure?

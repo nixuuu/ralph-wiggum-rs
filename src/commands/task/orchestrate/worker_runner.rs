@@ -352,8 +352,14 @@ impl WorkerRunner {
             let _ = tx.try_send(cost_event);
         }
 
-        let lines = formatter.format_event(event);
-        if !lines.is_empty() {
+        let ratatui_lines = formatter.format_event(event);
+        if !ratatui_lines.is_empty() {
+            // Konwersja Line<'static> → ANSI-encoded String.
+            // Ring buffer parsuje ANSI z powrotem na styled Line via ansi_to_tui.
+            let lines: Vec<String> = ratatui_lines
+                .iter()
+                .map(crate::tui::formatter::line_to_ansi)
+                .collect();
             let _ = tx_output.try_send(WorkerEvent::new(WorkerEventKind::OutputLines {
                 worker_id,
                 lines,

@@ -1,0 +1,10 @@
+---
+source: src/commands/task/orchestrate/worker_panel.rs
+expression: snapshot
+---
+┌ ▶ W3 [15: ui] ────
+│ ◎ reviewing
+│
+│
+│
+│ $0.0010 │ ↓100 ↑50

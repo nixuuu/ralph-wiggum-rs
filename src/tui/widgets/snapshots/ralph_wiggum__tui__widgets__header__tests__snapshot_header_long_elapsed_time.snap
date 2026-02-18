@@ -1,0 +1,5 @@
+---
+source: src/tui/widgets/header.rs
+expression: snap(&buffer)
+---
+task plan | sonnet 1/5 | 61m5s

@@ -91,7 +91,7 @@ impl Orchestrator {
                 worker_id,
                 &format!("Assigned: {task_id} → {}", worktree.branch),
             );
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
 
             // Mark task as started in scheduler
             ctx.scheduler.mark_started(&task_id);
@@ -106,13 +106,13 @@ impl Orchestrator {
                 phase: Some(WorkerPhase::Implement),
                 model: model
                     .as_ref()
-                    .map(|m| crate::shared::tasks::reverse_model_alias(m)),
+                    .map(|m| crate::shared::tasks::shorten_model_name(m)),
                 cost_usd: 0.0,
                 input_tokens: 0,
                 output_tokens: 0,
                 verify_profiles: Vec::new(),
             };
-            ctx.tui.dashboard.update_worker_status(worker_id, ws);
+            ctx.tui.app.update_worker_status(worker_id, ws);
             ctx.tui
                 .task_start_times
                 .insert(task_id.clone(), Instant::now());
@@ -145,7 +145,7 @@ impl Orchestrator {
                     worker_id,
                     &format!("⚠ Task {task_id}: nieznany profil \"{profile_name}\" — pomijam"),
                 );
-                ctx.tui.dashboard.push_log_line(&msg);
+                ctx.tui.app.push_log_line(&msg);
             }
 
             // Append profile-specific setup commands (only for valid profiles, in TOML order)
@@ -273,7 +273,7 @@ impl Orchestrator {
                     status.in_progress,
                     status.blocked,
                 ));
-                ctx.tui.dashboard.push_log_line(&msg);
+                ctx.tui.app.push_log_line(&msg);
             }
         }
 
@@ -287,7 +287,7 @@ impl Orchestrator {
                 let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                     "Warning: tasks.yml batch update failed: {e}"
                 ));
-                ctx.tui.dashboard.push_log_line(&msg);
+                ctx.tui.app.push_log_line(&msg);
             } else if let Some(mt) = get_mtime(&self.tasks_path) {
                 ctx.progress_mtime = Some(mt);
                 // Sync cached TasksFile for all started tasks

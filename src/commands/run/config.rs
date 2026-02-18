@@ -21,6 +21,10 @@ pub struct Config {
     pub use_nerd_font: bool,
     /// Path to PROGRESS.md for adaptive iterations (set by task continue)
     pub progress_file: Option<std::path::PathBuf>,
+    /// Skip splash screen on startup (--no-splash)
+    pub no_splash: bool,
+    /// Command name for TUI header (default: "run")
+    pub command_name: String,
 }
 
 impl Config {
@@ -76,6 +80,8 @@ impl Config {
                 system_prompt_template: file_config.prompt.system.clone(),
                 use_nerd_font,
                 progress_file: args.progress_file,
+                no_splash: args.no_splash,
+                command_name: args.command_name.unwrap_or_else(|| "run".to_string()),
             });
         }
 
@@ -100,6 +106,94 @@ impl Config {
             system_prompt_template: file_config.prompt.system.clone(),
             use_nerd_font,
             progress_file: args.progress_file,
+            no_splash: args.no_splash,
+            command_name: args.command_name.unwrap_or_else(|| "run".to_string()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: create RunArgs with defaults, pointing config to a non-existent .ralph.toml
+    /// so FileConfig::load_from_path returns defaults.
+    fn make_args(tmp: &std::path::Path) -> RunArgs {
+        RunArgs {
+            prompt: Some("test prompt".to_string()),
+            min_iterations: 1,
+            max_iterations: 0,
+            promise: "done".to_string(),
+            resume: false,
+            state_file: tmp.join("ralph-loop.local.md"),
+            config: tmp.join(".ralph.toml"), // nie istnieje → FileConfig::default()
+            continue_session: false,
+            no_nf: false,
+            debug: false,
+            no_splash: false,
+            progress_file: None,
+            command_name: None,
+        }
+    }
+
+    #[test]
+    fn test_command_name_defaults_to_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = make_args(tmp.path());
+        let config = Config::build(args).unwrap();
+        assert_eq!(config.command_name, "run");
+    }
+
+    #[test]
+    fn test_command_name_custom_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut args = make_args(tmp.path());
+        args.command_name = Some("task continue".to_string());
+        let config = Config::build(args).unwrap();
+        assert_eq!(config.command_name, "task continue");
+    }
+
+    #[test]
+    fn test_no_splash_false_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = make_args(tmp.path());
+        let config = Config::build(args).unwrap();
+        assert!(!config.no_splash);
+    }
+
+    #[test]
+    fn test_no_splash_true_when_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut args = make_args(tmp.path());
+        args.no_splash = true;
+        let config = Config::build(args).unwrap();
+        assert!(config.no_splash);
+    }
+
+    #[test]
+    fn test_progress_file_none_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = make_args(tmp.path());
+        let config = Config::build(args).unwrap();
+        assert!(config.progress_file.is_none());
+    }
+
+    #[test]
+    fn test_progress_file_passed_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut args = make_args(tmp.path());
+        let tasks_path = tmp.path().join("tasks.yml");
+        args.progress_file = Some(tasks_path.clone());
+        let config = Config::build(args).unwrap();
+        assert_eq!(config.progress_file, Some(tasks_path));
+    }
+
+    #[test]
+    fn test_prompt_required_when_not_resuming() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut args = make_args(tmp.path());
+        args.prompt = None;
+        let result = Config::build(args);
+        assert!(result.is_err());
     }
 }

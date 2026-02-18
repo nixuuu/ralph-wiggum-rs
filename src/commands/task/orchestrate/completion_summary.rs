@@ -5,7 +5,7 @@ use std::time::Duration;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 
 use crate::commands::task::orchestrate::shared_types::format_duration;
 use crate::commands::task::orchestrate::summary::TaskSummaryEntry;
@@ -86,16 +86,14 @@ fn add_footer(lines: &mut Vec<Line<'static>>) {
     ]));
 }
 
-/// Build block with green border.
+/// Build block with green title and panel background.
 fn build_summary_block() -> Block<'static> {
+    use crate::tui::theme::DEFAULT_THEME;
+    let theme = &DEFAULT_THEME;
+
     Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )
+        .padding(Padding::uniform(1))
+        .style(Style::default().bg(theme.panel_bg_focused))
         .title(Span::styled(
             " Completion Summary ",
             Style::default()

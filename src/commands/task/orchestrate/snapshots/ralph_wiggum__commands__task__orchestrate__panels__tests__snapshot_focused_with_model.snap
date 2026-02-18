@@ -1,9 +1,0 @@
----
-source: src/commands/task/orchestrate/panels.rs
-expression: snapshot
----
-╔ ▶ W1 [4.1: cli] (sonnet) ══════════════════════╗
-║● implementing                                  ║
-║                                                ║
-║                                                ║
-╚ $0.0250 │ ↓3.0k ↑1.2k ═════════════════════════╝

@@ -1,7 +1,0 @@
----
-source: src/commands/task/orchestrate/dashboard.rs
-expression: snapshot
----
- ✓ Completed — 10/10 tasks done | q=exit p=tasks
- [████████████████████] 10/10 (100%) │ $2.4567 │ $0.2457/task │ ⏱ 12m0s │ W 0/3
- Queue: 0 ready │ 0 wip │ 0 blocked │ 0 pending  │  No focus    q Tab ↑↓ Esc p=tasks r=reload R=restart

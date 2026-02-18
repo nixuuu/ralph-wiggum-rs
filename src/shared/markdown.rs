@@ -69,6 +69,16 @@ pub fn render_markdown(text: &str) -> String {
     formatted.to_string()
 }
 
+/// Render markdown text with an explicit width (for widgets that know their area).
+///
+/// Unlike `render_markdown()`, this respects the actual available width
+/// instead of using terminal width. Minimum 20 columns to avoid degenerate output.
+pub fn render_markdown_for_width(text: &str, width: usize) -> String {
+    let width = width.max(20);
+    let formatted = FmtText::from(&SKIN, text, Some(width));
+    formatted.to_string()
+}
+
 /// Render a single line of markdown (inline formatting only)
 #[cfg(test)]
 fn render_inline(text: &str) -> String {

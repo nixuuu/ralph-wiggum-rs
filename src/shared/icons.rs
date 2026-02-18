@@ -1,3 +1,4 @@
+#[allow(dead_code)] // API — ikony mogą być potrzebne w przyszłych widokach
 /// Get icon for a tool name
 pub fn tool_icon(name: &str, nerd_font: bool) -> &'static str {
     if nerd_font {
@@ -78,6 +79,7 @@ pub fn status_speed(nerd_font: bool) -> &'static str {
     }
 }
 
+#[allow(dead_code)] // API — ikony mogą być potrzebne w przyszłych widokach
 /// Answer/reply icon for user responses (ask_user tool results)
 pub fn answer_icon(nerd_font: bool) -> &'static str {
     if nerd_font {

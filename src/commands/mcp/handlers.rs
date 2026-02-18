@@ -885,7 +885,7 @@ tasks:
         assert!(tf.find_node("1").is_some());
         assert_eq!(
             tf.default_model.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("sonnet")
         );
     }
 
@@ -909,7 +909,7 @@ tasks:
         assert_eq!(tf.tasks.len(), 0);
         assert_eq!(
             tf.default_model.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("sonnet")
         );
     }
 
@@ -933,7 +933,7 @@ tasks:
         assert_eq!(result["blocked"], 0);
         assert_eq!(result["progress_percent"], 0.0);
         assert!(result["current_task"].is_null());
-        assert_eq!(result["default_model"], "claude-sonnet-4-5-20250929");
+        assert_eq!(result["default_model"], "sonnet");
 
         // Verify file was created
         assert!(path.exists());

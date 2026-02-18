@@ -1,0 +1,10 @@
+---
+source: src/commands/task/orchestrate/worker_panel.rs
+expression: snapshot
+---
+┌ W1 [feature.authentication.oauth2.implementation.backend.a
+│ ◎ reviewing
+│
+│
+│
+│ $12.3456 │ ↓50.0k ↑25.0k

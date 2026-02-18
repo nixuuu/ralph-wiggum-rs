@@ -13,6 +13,7 @@ const CHECK_INTERVAL_SECS: u64 = 300;
 /// State of the in-app update process, shared via `Arc<AtomicU8>`
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)] // Legacy: używane przez StatusTerminal (inline mode), nie fullscreen TUI
 pub enum UpdateState {
     /// No update available or not yet checked
     #[default]
@@ -27,6 +28,7 @@ pub enum UpdateState {
     Failed = 4,
 }
 
+#[allow(dead_code)] // Legacy: używane przez StatusTerminal (inline mode), nie fullscreen TUI
 impl UpdateState {
     pub fn from_u8(v: u8) -> Self {
         match v {
@@ -75,17 +77,20 @@ pub fn is_newer(current: &str, latest: &str) -> Result<bool> {
 }
 
 /// Manages background version checking
+#[allow(dead_code)] // Legacy: używane przez StatusTerminal (inline mode), nie fullscreen TUI
 pub struct VersionChecker {
     update_info: Arc<Mutex<Option<UpdateInfo>>>,
     update_state: Arc<AtomicU8>,
 }
 
+#[allow(dead_code)] // Legacy: używane przez StatusTerminal (inline mode), nie fullscreen TUI
 impl Default for VersionChecker {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[allow(dead_code)] // Legacy: używane przez StatusTerminal (inline mode), nie fullscreen TUI
 impl VersionChecker {
     pub fn new() -> Self {
         Self {
@@ -147,6 +152,7 @@ impl VersionChecker {
 }
 
 /// Async version check against GitHub releases API
+#[allow(dead_code)] // Legacy: używane przez VersionChecker (inline mode), nie fullscreen TUI
 async fn check_latest_version() -> Result<UpdateInfo> {
     let client = reqwest::Client::new();
     let url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest");

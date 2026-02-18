@@ -37,7 +37,7 @@ crossterm = "0.29"
 # Markdown rendering in terminal
 termimad = "0.34"
 
-# Convert ANSI escape codes to ratatui Text
+# ANSI escape code → ratatui styled text conversion
 ansi-to-tui = "8"
 
 # HTTP client for update checking and self-update

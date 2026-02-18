@@ -1,0 +1,29 @@
+---
+source: src/commands/task/explorer/drawing.rs
+expression: snapshot
+---
+ Tasks [sort: Component]                 Detail
+
+ ▾ 3 Alpha epic [alpha]                  1 Zebra epic
+   ◎ 3.1 A-child [alpha]                 Component: zebra
+ ▾ 2 Beta epic [beta]
+   ✓ 2.1 B-child [beta]                  Subtasks: 1
+ ▾ 1 Zebra epic [zebra]
+   ○ 1.1 Z-child [zebra]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+█████████████████████████████████          1/3 done (33%)

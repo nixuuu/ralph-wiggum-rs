@@ -1,0 +1,9 @@
+---
+source: src/tui/tool_formatting.rs
+expression: "output.join(\"\")"
+---
+~/project/test.txt
+    [Rgb(243, 139, 168)]- old line 1
+    [Rgb(243, 139, 168)]- old line 2
+    [Rgb(166, 227, 161)]+ new line 1
+    [Rgb(166, 227, 161)]+ new line 2

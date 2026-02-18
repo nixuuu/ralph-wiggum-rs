@@ -1,0 +1,5 @@
+---
+source: src/tui/ring_buffer.rs
+expression: snapshot
+---
+你好世

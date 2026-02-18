@@ -1,7 +1,8 @@
 use std::io::{self, IsTerminal, Write};
 use std::sync::LazyLock;
 
-const ART: &str = "\
+/// Raw ASCII art banner (Braille Unicode) — shared with splash widget
+pub const ART: &str = "\
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣠⣤⣴⣶⣾⣿⢿⣿⣿⣿⣿⣿⣿⣿⣷⣶⣶⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣴⡾⢟⣿⢿⣿⠟⢁⣠⠞⢉⡼⠋⢠⠏⠉⣿⠙⣏⠻⣟⠻⣿⣷⣦⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⡿⢋⡴⠋⣠⡞⠁⣴⠟⢁⣴⠋⠀⣠⡟⠀⢰⡇⠀⢻⡄⠘⣧⠈⠻⣿⡿⣿⣷⣤⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀

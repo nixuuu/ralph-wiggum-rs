@@ -30,6 +30,7 @@ pub async fn execute(args: GenerateDepsArgs, file_config: &FileConfig) -> Result
         model,
         output_dir: None,
         use_nerd_font: file_config.ui.nerd_font,
+        command_name: Some("task generate-deps".to_string()),
         allowed_tools: None,
         disallowed_tools: None,
         mcp_config: None,

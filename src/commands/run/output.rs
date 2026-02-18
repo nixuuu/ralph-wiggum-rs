@@ -1,4 +1,5 @@
-use crossterm::style::Stylize;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -7,6 +8,8 @@ use super::formatting_helpers::{format_duration_short, format_tokens};
 use super::runner::ClaudeEvent;
 use super::ui::StatusData;
 use crate::shared::icons;
+use crate::tui::formatter::RatuiFormatter;
+use crate::tui::theme::DEFAULT_THEME;
 
 pub struct OutputFormatter {
     iteration: u32,
@@ -143,6 +146,36 @@ impl OutputFormatter {
         Some(format_duration_short(eta_secs))
     }
 
+    /// Get total elapsed time in seconds (for summary printing)
+    pub fn get_elapsed_secs(&self) -> f64 {
+        self.start_time.elapsed().as_secs_f64()
+    }
+
+    /// Get total input tokens (for summary printing)
+    pub fn get_total_input_tokens(&self) -> u64 {
+        self.display_input_tokens()
+    }
+
+    /// Get total output tokens (for summary printing)
+    pub fn get_total_output_tokens(&self) -> u64 {
+        self.display_output_tokens()
+    }
+
+    /// Get total cost in USD (for summary printing)
+    pub fn get_total_cost(&self) -> f64 {
+        self.total_cost_usd
+    }
+
+    /// Get speed text (tasks/hour) if available
+    pub fn get_speed_text(&self) -> Option<String> {
+        self.compute_speed_text()
+    }
+
+    /// Get ETA text if available
+    pub fn get_eta_text(&self) -> Option<String> {
+        self.compute_eta_text()
+    }
+
     /// Average iteration duration in seconds, or None if no iterations recorded
     fn avg_iteration_secs(&self) -> Option<f64> {
         if self.iteration_durations.is_empty() {
@@ -170,25 +203,25 @@ impl OutputFormatter {
     }
 
     /// Format token summary lines for stats display
-    fn format_token_lines(&self) -> Vec<String> {
+    fn format_token_lines(&self) -> Vec<Line<'static>> {
         let input = self.display_input_tokens();
         let output = self.display_output_tokens();
         if input > 0 || output > 0 {
-            vec![format!(
-                "  {}    {} {} {} {}",
-                "Tokens:".dark_grey(),
-                format_tokens(input).green(),
-                "in /".dark_grey(),
-                format_tokens(output).magenta(),
-                "out".dark_grey()
-            )]
+            vec![Line::from(vec![
+                Span::styled("  Tokens:", Style::default().fg(DEFAULT_THEME.muted)),
+                Span::raw("    "),
+                Span::styled(format_tokens(input), Style::default().fg(Color::Green)),
+                Span::styled(" in / ", Style::default().fg(DEFAULT_THEME.muted)),
+                Span::styled(format_tokens(output), Style::default().fg(Color::Magenta)),
+                Span::styled(" out", Style::default().fg(DEFAULT_THEME.muted)),
+            ])]
         } else {
             vec![]
         }
     }
 
     /// Format speed/throughput lines for stats display
-    fn format_speed_lines(&self) -> Vec<String> {
+    fn format_speed_lines(&self) -> Vec<Line<'static>> {
         let completed = self.tasks_completed_this_session();
         if completed == 0 {
             return vec![];
@@ -199,69 +232,92 @@ impl OutputFormatter {
         } else {
             "—".to_string()
         };
-        let mut lines = vec![format!(
-            "  {}     {} {} {}",
-            "Speed:".dark_grey(),
-            completed.to_string().green(),
-            "tasks |".dark_grey(),
-            rate
-        )];
+        let mut lines = vec![Line::from(vec![
+            Span::styled("  Speed:", Style::default().fg(DEFAULT_THEME.muted)),
+            Span::raw("     "),
+            Span::styled(completed.to_string(), Style::default().fg(Color::Green)),
+            Span::styled(" tasks | ", Style::default().fg(DEFAULT_THEME.muted)),
+            Span::raw(rate),
+        ])];
         if let Some(avg) = self.avg_iteration_secs() {
-            lines.push(format!("  {}   {:.0}s", "Avg iter:".dark_grey(), avg));
+            lines.push(Line::from(vec![
+                Span::styled("  Avg iter:", Style::default().fg(DEFAULT_THEME.muted)),
+                Span::raw(format!("   {:.0}s", avg)),
+            ]));
         }
         lines
     }
 
     /// Format cost lines with per-model breakdown for stats display
-    fn format_cost_lines(&self) -> Vec<String> {
+    fn format_cost_lines(&self) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         if self.total_cost_usd > 0.0 {
-            lines.push(format!(
-                "  {}      {}",
-                "Cost:".dark_grey(),
-                format!("${:.4}", self.total_cost_usd).yellow()
-            ));
+            lines.push(Line::from(vec![
+                Span::styled("  Cost:", Style::default().fg(DEFAULT_THEME.muted)),
+                Span::raw("      "),
+                Span::styled(
+                    format!("${:.4}", self.total_cost_usd),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]));
             if !self.model_costs.is_empty() {
                 let mut sorted: Vec<_> = self.model_costs.iter().collect();
                 sorted.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
                 for (model, cost) in &sorted {
-                    lines.push(format!(
-                        "            {} {}",
-                        format!("${:.4}", cost).dark_grey(),
-                        model.as_str().dark_grey()
-                    ));
+                    lines.push(Line::from(vec![
+                        Span::raw("            "),
+                        Span::styled(
+                            format!("${:.4}", cost),
+                            Style::default().fg(DEFAULT_THEME.muted),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(model.to_string(), Style::default().fg(DEFAULT_THEME.muted)),
+                    ]));
                 }
             }
         }
         lines
     }
 
-    /// Format iteration header and return lines
-    pub fn format_iteration_header(&self) -> Vec<String> {
+    /// Format iteration header and return styled lines
+    pub fn format_iteration_header(&self) -> Vec<Line<'static>> {
         let elapsed = self.start_time.elapsed();
-        let mut header = format!(
-            "{} {} {} {} {:.1}s",
-            "▶".cyan(),
-            "Iteration".bold(),
-            self.iteration.to_string().cyan().bold(),
-            "│ Elapsed:".dark_grey(),
-            elapsed.as_secs_f64()
-        );
+        let separator = Line::from(Span::styled(
+            "━".repeat(60),
+            Style::default().fg(DEFAULT_THEME.muted),
+        ));
+
+        let mut header_spans = vec![
+            Span::styled("▶", Style::default().fg(Color::Cyan)),
+            Span::raw(" "),
+            Span::styled("Iteration", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(
+                self.iteration.to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled("│ Elapsed:", Style::default().fg(DEFAULT_THEME.muted)),
+            Span::raw(format!(" {:.1}s", elapsed.as_secs_f64())),
+        ];
 
         if let Some(avg) = self.avg_iteration_secs() {
-            header.push_str(&format!(" {} {:.0}s/iter", "│".dark_grey(), avg));
+            header_spans.push(Span::styled(" │", Style::default().fg(DEFAULT_THEME.muted)));
+            header_spans.push(Span::raw(format!(" {:.0}s/iter", avg)));
         }
 
         vec![
-            String::new(),
-            format!("{}", "━".repeat(60).dark_grey()),
-            header,
-            format!("{}", "━".repeat(60).dark_grey()),
+            Line::default(),
+            separator.clone(),
+            Line::from(header_spans),
+            separator,
         ]
     }
 
-    /// Format a claude event and return lines to print
-    pub fn format_event(&mut self, event: &ClaudeEvent) -> Vec<String> {
+    /// Format a claude event and return styled ratatui Lines.
+    pub fn format_event(&mut self, event: &ClaudeEvent) -> Vec<Line<'static>> {
         let mut tokens = TokenState {
             finalized_input_tokens: &mut self.finalized_input_tokens,
             finalized_output_tokens: &mut self.finalized_output_tokens,
@@ -279,87 +335,144 @@ impl OutputFormatter {
         )
     }
 
-    /// Format final statistics and return lines
-    pub fn format_stats(&self, iterations: u32, found_promise: bool, promise: &str) -> Vec<String> {
+    /// Format final statistics and return styled lines
+    pub fn format_stats(
+        &self,
+        iterations: u32,
+        found_promise: bool,
+        promise: &str,
+    ) -> Vec<Line<'static>> {
         let elapsed = self.start_time.elapsed();
-        let mut lines = vec![String::new(), format!("{}", "━".repeat(60).dark_grey())];
+        let separator = Line::from(Span::styled(
+            "━".repeat(60),
+            Style::default().fg(DEFAULT_THEME.muted),
+        ));
+
+        let mut lines = vec![Line::default(), separator.clone()];
 
         if found_promise {
-            lines.push(format!(
-                "{} {} {}",
-                icons::status_check(self.use_nerd_font).green().bold(),
-                "COMPLETED".green().bold(),
-                format!("- Promise found: <promise>{}</promise>", promise).dark_grey()
-            ));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    icons::status_check(self.use_nerd_font).to_string(),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    "COMPLETED",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("- Promise found: <promise>{}</promise>", promise),
+                    Style::default().fg(DEFAULT_THEME.muted),
+                ),
+            ]));
         } else {
-            lines.push(format!(
-                "{} {}",
-                icons::status_fail(self.use_nerd_font).red().bold(),
-                "STOPPED - Promise not found".red()
-            ));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    icons::status_fail(self.use_nerd_font).to_string(),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    "STOPPED - Promise not found",
+                    Style::default().fg(Color::Red),
+                ),
+            ]));
         }
 
-        lines.push(format!("{}", "━".repeat(60).dark_grey()));
-        lines.push(format!(
-            "  {} {}",
-            "Iterations:".dark_grey(),
-            iterations.to_string().white().bold()
-        ));
-        lines.push(format!(
-            "  {}      {:.2}s",
-            "Time:".dark_grey(),
-            elapsed.as_secs_f64()
-        ));
+        lines.push(separator.clone());
+        lines.push(Line::from(vec![
+            Span::styled("  Iterations:", Style::default().fg(DEFAULT_THEME.muted)),
+            Span::raw(" "),
+            Span::styled(
+                iterations.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  Time:", Style::default().fg(DEFAULT_THEME.muted)),
+            Span::raw(format!("      {:.2}s", elapsed.as_secs_f64())),
+        ]));
 
         lines.extend(self.format_speed_lines());
         lines.extend(self.format_token_lines());
         lines.extend(self.format_cost_lines());
 
-        lines.push(format!("{}", "━".repeat(60).dark_grey()));
+        lines.push(separator);
         lines
     }
 
-    /// Format interruption message and return lines
-    pub fn format_interrupted(&self, iterations: u32) -> Vec<String> {
+    /// Format interruption message and return styled lines
+    pub fn format_interrupted(&self, iterations: u32) -> Vec<Line<'static>> {
         let elapsed = self.start_time.elapsed();
+        let separator = Line::from(Span::styled(
+            "━".repeat(60),
+            Style::default().fg(DEFAULT_THEME.muted),
+        ));
+
         let mut lines = vec![
-            String::new(),
-            format!("{}", "━".repeat(60).dark_grey()),
-            format!(
-                "{} {} {}",
-                icons::status_pause(self.use_nerd_font).yellow().bold(),
-                "INTERRUPTED".yellow().bold(),
-                "- State saved".dark_grey()
-            ),
-            format!("{}", "━".repeat(60).dark_grey()),
-            format!(
-                "  {} {}",
-                "Iterations:".dark_grey(),
-                iterations.to_string().white().bold()
-            ),
-            format!(
-                "  {}      {:.2}s",
-                "Time:".dark_grey(),
-                elapsed.as_secs_f64()
-            ),
+            Line::default(),
+            separator.clone(),
+            Line::from(vec![
+                Span::styled(
+                    icons::status_pause(self.use_nerd_font).to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    "INTERRUPTED",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled("- State saved", Style::default().fg(DEFAULT_THEME.muted)),
+            ]),
+            separator.clone(),
+            Line::from(vec![
+                Span::styled("  Iterations:", Style::default().fg(DEFAULT_THEME.muted)),
+                Span::raw(" "),
+                Span::styled(
+                    iterations.to_string(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  Time:", Style::default().fg(DEFAULT_THEME.muted)),
+                Span::raw(format!("      {:.2}s", elapsed.as_secs_f64())),
+            ]),
         ];
 
         lines.extend(self.format_speed_lines());
         lines.extend(self.format_token_lines());
         lines.extend(self.format_cost_lines());
 
-        lines.push(String::new());
-        lines.push(format!(
-            "  {} {}",
-            "Resume:".dark_grey(),
-            "ralph-wiggum --resume".cyan()
-        ));
-        lines.push(format!("{}", "━".repeat(60).dark_grey()));
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled("  Resume:", Style::default().fg(DEFAULT_THEME.muted)),
+            Span::raw(" "),
+            Span::styled("ralph-wiggum --resume", Style::default().fg(Color::Cyan)),
+        ]));
+        lines.push(separator);
         lines
     }
 }
 
-/// Task progress data for enhanced status bar
+/// Task progress data for enhanced status bar.
+///
+/// Legacy: used by StatusTerminal (inline mode). Kept for tests and potential reuse.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct TaskProgress {
     pub total: usize,
@@ -372,6 +485,7 @@ pub struct TaskProgress {
     pub current_task_component: Option<String>,
 }
 
+#[allow(dead_code)]
 impl TaskProgress {
     /// Build a ratatui Line for the status bar (line 2 of 3)
     pub fn to_status_line(&self) -> ratatui::text::Line<'static> {
@@ -425,6 +539,32 @@ impl TaskProgress {
     }
 }
 
+/// RatuiFormatter implementation — deleguje do istniejących metod.
+///
+/// format_event() → pełna obsługa eventów z token tracking
+/// format_iteration_header() → separator + numer iteracji + elapsed
+/// format_stats() → bazowe statystyki (tokeny, koszt, speed) — bez parametrów completion
+impl RatuiFormatter<ClaudeEvent> for OutputFormatter {
+    fn format_event(&mut self, event: &ClaudeEvent) -> Vec<Line<'static>> {
+        // Deleguje do istniejącej metody inherent
+        OutputFormatter::format_event(self, event)
+    }
+
+    fn format_iteration_header(&self) -> Vec<Line<'static>> {
+        OutputFormatter::format_iteration_header(self)
+    }
+
+    /// Bazowe statystyki sesji (tokeny, koszt, speed).
+    /// Dla pełnych statystyk z wynikiem completion użyj `format_stats(iterations, found_promise, promise)`.
+    fn format_stats(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        lines.extend(self.format_speed_lines());
+        lines.extend(self.format_token_lines());
+        lines.extend(self.format_cost_lines());
+        lines
+    }
+}
+
 impl Default for OutputFormatter {
     fn default() -> Self {
         Self::new(true)
@@ -435,50 +575,72 @@ impl Default for OutputFormatter {
 mod tests {
     use super::*;
 
+    /// Helper: konwertuje Vec<Line> na plain text (span content bez stylów)
+    fn lines_to_text(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Normalize elapsed time values in stats output for deterministic snapshots.
+    /// Replaces "Time: Xs" and "Elapsed: Xs" with fixed values.
+    fn normalize_elapsed_time(s: &str) -> String {
+        s.lines()
+            .map(|line| {
+                if let Some(pos) = line.find("Time:") {
+                    let prefix = &line[..pos];
+                    return format!("{}Time:      0.00s", prefix);
+                }
+                if let Some(pos) = line.find("Elapsed:") {
+                    let before = &line[..pos];
+                    let after = &line[pos + "Elapsed:".len()..];
+                    let rest = after.trim_start();
+                    let time_end = rest
+                        .find(|c: char| !c.is_ascii_digit() && c != '.' && c != 's')
+                        .unwrap_or(rest.len());
+                    let suffix = &rest[time_end..];
+                    return format!("{}Elapsed: 0.0s{}", before, suffix);
+                }
+                line.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn test_output_formatter_zero_values() {
-        // Create OutputFormatter without any updates (0 tokens, 0 cost)
         let formatter = OutputFormatter::new(true);
 
-        // Verify zero token counts
         assert_eq!(formatter.display_input_tokens(), 0);
         assert_eq!(formatter.display_output_tokens(), 0);
-
-        // Verify zero cost
         assert_eq!(formatter.total_cost_usd, 0.0);
 
-        // Format token lines with zero values
-        let token_lines = formatter.format_token_lines();
-        // With zero tokens, should return empty vec (no lines)
-        assert_eq!(token_lines.len(), 0);
-
-        // Format cost lines with zero cost
-        let cost_lines = formatter.format_cost_lines();
-        // With zero cost, should return empty vec (no lines)
-        assert_eq!(cost_lines.len(), 0);
-
-        // Format speed lines with zero completed tasks
-        let speed_lines = formatter.format_speed_lines();
-        // With zero tasks completed, should return empty vec (no lines)
-        assert_eq!(speed_lines.len(), 0);
+        // Format token lines with zero values → empty vec
+        assert_eq!(formatter.format_token_lines().len(), 0);
+        assert_eq!(formatter.format_cost_lines().len(), 0);
+        assert_eq!(formatter.format_speed_lines().len(), 0);
 
         // Check iteration header formatting (should not contain NaN or Inf)
-        let header = formatter.format_iteration_header();
-        let header_text = header.join("\n");
+        let header_text = lines_to_text(&formatter.format_iteration_header());
         assert!(!header_text.contains("NaN"));
         assert!(!header_text.contains("Inf"));
         assert!(!header_text.contains("inf"));
 
-        // Check stats formatting with zero values (should not contain NaN or Inf)
-        let stats = formatter.format_stats(0, false, "");
-        let stats_text = stats.join("\n");
+        // Check stats formatting with zero values
+        let stats_text = lines_to_text(&formatter.format_stats(0, false, ""));
         assert!(!stats_text.contains("NaN"));
         assert!(!stats_text.contains("Inf"));
         assert!(!stats_text.contains("inf"));
 
-        // Check interrupted formatting with zero values (should not contain NaN or Inf)
-        let interrupted = formatter.format_interrupted(0);
-        let interrupted_text = interrupted.join("\n");
+        // Check interrupted formatting with zero values
+        let interrupted_text = lines_to_text(&formatter.format_interrupted(0));
         assert!(!interrupted_text.contains("NaN"));
         assert!(!interrupted_text.contains("Inf"));
         assert!(!interrupted_text.contains("inf"));
@@ -488,24 +650,16 @@ mod tests {
     fn test_output_formatter_zero_division_protection() {
         let formatter = OutputFormatter::new(true);
 
-        // avg_iteration_secs should return None for empty duration list
         assert_eq!(formatter.avg_iteration_secs(), None);
-
-        // compute_speed_text should return None for zero completed tasks
         assert_eq!(formatter.compute_speed_text(), None);
-
-        // compute_eta_text should return None for zero completed tasks
         assert_eq!(formatter.compute_eta_text(), None);
-
-        // Verify model_costs map is empty
         assert!(formatter.model_costs.is_empty());
     }
 
     #[test]
     fn test_output_formatter_zero_task_progress() {
-        let mut formatter = OutputFormatter::new(false); // use ASCII mode
+        let mut formatter = OutputFormatter::new(false);
 
-        // Set task progress with all zeros
         let progress = TaskProgress {
             total: 0,
             done: 0,
@@ -520,97 +674,92 @@ mod tests {
         formatter.set_task_progress(Some(progress));
         formatter.set_initial_done_count(0);
 
-        // Format stats with zero task progress
-        let stats = formatter.format_stats(0, false, "");
-        let stats_text = stats.join("\n");
-
-        // Verify no division by zero errors (no NaN or Inf)
+        let stats_text = lines_to_text(&formatter.format_stats(0, false, ""));
         assert!(!stats_text.contains("NaN"));
         assert!(!stats_text.contains("Inf"));
-
-        // Verify iterations count is displayed correctly
         assert!(stats_text.contains("Iterations") || stats_text.contains("Iteration"));
     }
 
     #[test]
     fn test_format_tokens_zero_sanity() {
-        // Verify format_tokens handles zero correctly
         let zero_tokens = format_tokens(0);
         assert_eq!(zero_tokens, "0");
-        assert!(!zero_tokens.contains("NaN"));
-        assert!(!zero_tokens.contains("Inf"));
     }
 
     #[test]
     fn test_format_duration_short_zero_sanity() {
-        // Verify format_duration_short handles zero correctly
         let zero_duration = format_duration_short(0);
         assert_eq!(zero_duration, "~0s");
-        assert!(!zero_duration.contains("NaN"));
-        assert!(!zero_duration.contains("Inf"));
     }
 
-    /// Snapshot test: Format stats with zero tokens and zero cost
+    /// Test: RatuiFormatter trait implementation works correctly
+    #[test]
+    fn test_ratatui_formatter_trait_impl() {
+        let mut formatter = OutputFormatter::new(false);
+        formatter.finalized_input_tokens = 1000;
+        formatter.finalized_output_tokens = 500;
+        formatter.total_cost_usd = 0.05;
+
+        // format_iteration_header via trait
+        let header: Vec<Line<'static>> =
+            RatuiFormatter::<ClaudeEvent>::format_iteration_header(&formatter);
+        assert_eq!(header.len(), 4); // empty line, separator, header, separator
+
+        // format_stats via trait (bazowe statystyki)
+        let stats: Vec<Line<'static>> = RatuiFormatter::<ClaudeEvent>::format_stats(&formatter);
+        // Powinny być token lines + cost lines (speed lines = 0 bo brak completed tasks)
+        assert!(!stats.is_empty());
+        let stats_text = lines_to_text(&stats);
+        assert!(stats_text.contains("Tokens:"));
+        assert!(stats_text.contains("Cost:"));
+    }
+
+    // -- Snapshot tests --
+
     #[test]
     fn snapshot_format_stats_zero_values() {
-        let formatter = OutputFormatter::new(false); // ASCII mode for consistent snapshots
+        let formatter = OutputFormatter::new(false);
         let stats = formatter.format_stats(5, true, "done");
-
-        // Join lines, strip ANSI codes, and normalize elapsed time for deterministic snapshots
-        let output = strip_ansi_codes(&stats.join("\n"));
-        let output = normalize_elapsed_time(&output);
+        let output = normalize_elapsed_time(&lines_to_text(&stats));
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format token lines with 999 tokens (boundary before 'k')
     #[test]
     fn snapshot_format_tokens_999() {
         let mut formatter = OutputFormatter::new(false);
         formatter.finalized_input_tokens = 999;
         formatter.finalized_output_tokens = 999;
-
-        let lines = formatter.format_token_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_token_lines());
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format token lines with 1000 tokens (exactly 1.0k)
     #[test]
     fn snapshot_format_tokens_1000() {
         let mut formatter = OutputFormatter::new(false);
         formatter.finalized_input_tokens = 1000;
         formatter.finalized_output_tokens = 1000;
-
-        let lines = formatter.format_token_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_token_lines());
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format token lines with 999999 tokens (boundary before 'M')
     #[test]
     fn snapshot_format_tokens_999999() {
         let mut formatter = OutputFormatter::new(false);
         formatter.finalized_input_tokens = 999_999;
         formatter.finalized_output_tokens = 999_999;
-
-        let lines = formatter.format_token_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_token_lines());
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format token lines with 1000000 tokens (exactly 1.0M)
     #[test]
     fn snapshot_format_tokens_1000000() {
         let mut formatter = OutputFormatter::new(false);
         formatter.finalized_input_tokens = 1_000_000;
         formatter.finalized_output_tokens = 1_000_000;
-
-        let lines = formatter.format_token_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_token_lines());
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format cost lines with various amounts
     #[test]
     fn snapshot_format_cost_small() {
         let mut formatter = OutputFormatter::new(false);
@@ -618,13 +767,10 @@ mod tests {
         formatter
             .model_costs
             .insert("claude-sonnet-4-5".to_string(), 0.0001);
-
-        let lines = formatter.format_cost_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_cost_lines());
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format cost lines with medium amount
     #[test]
     fn snapshot_format_cost_medium() {
         let mut formatter = OutputFormatter::new(false);
@@ -635,13 +781,10 @@ mod tests {
         formatter
             .model_costs
             .insert("claude-haiku-4-5".to_string(), 0.38);
-
-        let lines = formatter.format_cost_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_cost_lines());
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format cost lines with large amount
     #[test]
     fn snapshot_format_cost_large() {
         let mut formatter = OutputFormatter::new(false);
@@ -649,14 +792,10 @@ mod tests {
         formatter
             .model_costs
             .insert("claude-opus-4-6".to_string(), 99.99);
-
-        let lines = formatter.format_cost_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_cost_lines());
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format cost lines with very small amount (rounding boundary).
-    /// Tests edge case: $0.00005 should round to $0.0001 with .4f precision.
     #[test]
     fn snapshot_format_cost_rounding_boundary() {
         let mut formatter = OutputFormatter::new(false);
@@ -664,14 +803,10 @@ mod tests {
         formatter
             .model_costs
             .insert("claude-haiku-4-5".to_string(), 0.00005);
-
-        let lines = formatter.format_cost_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_cost_lines());
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format cost lines with 3-digit dollar amount.
-    /// Tests boundary: Cost display with $100+ (3-digit whole number).
     #[test]
     fn snapshot_format_cost_three_digit() {
         let mut formatter = OutputFormatter::new(false);
@@ -679,14 +814,10 @@ mod tests {
         formatter
             .model_costs
             .insert("claude-opus-4-6".to_string(), 100.00);
-
-        let lines = formatter.format_cost_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_cost_lines());
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format cost lines with very large amount.
-    /// Tests extreme boundary: $999.9999 with .4f precision.
     #[test]
     fn snapshot_format_cost_very_large() {
         let mut formatter = OutputFormatter::new(false);
@@ -694,13 +825,10 @@ mod tests {
         formatter
             .model_costs
             .insert("claude-opus-4-6".to_string(), 999.9999);
-
-        let lines = formatter.format_cost_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_cost_lines());
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Format complete stats with mixed token counts
     #[test]
     fn snapshot_format_stats_mixed_tokens() {
         let mut formatter = OutputFormatter::new(false);
@@ -710,48 +838,31 @@ mod tests {
         formatter
             .model_costs
             .insert("claude-sonnet-4-5".to_string(), 0.5432);
-
         let stats = formatter.format_stats(3, true, "done");
-        let output = strip_ansi_codes(&stats.join("\n"));
-        let output = normalize_elapsed_time(&output);
+        let output = normalize_elapsed_time(&lines_to_text(&stats));
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Duration boundary - iteration header with avg close to 60s (below).
-    /// Tests display of iteration average just below the minute boundary (59s).
-    /// Average should display as "59s/iter", not switch to minute format yet.
     #[test]
     fn snapshot_iteration_header_duration_59s() {
         let mut formatter = OutputFormatter::new(false);
         formatter.set_iteration(3);
-        // Simulate 3 iterations with avg ~59s (58+59+60)/3 = 59
         formatter.iteration_durations = vec![58.0, 59.0, 60.0];
-
         let header = formatter.format_iteration_header();
-        let output = strip_ansi_codes(&header.join("\n"));
-        let output = normalize_elapsed_time(&output);
+        let output = normalize_elapsed_time(&lines_to_text(&header));
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Duration boundary - iteration header with avg close to 60s (above).
-    /// Tests display of iteration average just above the minute boundary (61s).
-    /// Average should display as "61s/iter" (integer rounded).
     #[test]
     fn snapshot_iteration_header_duration_61s() {
         let mut formatter = OutputFormatter::new(false);
         formatter.set_iteration(5);
-        // Simulate 5 iterations with avg ~61s (60+61+62+60.5+61.5)/5 = 61
         formatter.iteration_durations = vec![60.0, 61.0, 62.0, 60.5, 61.5];
-
         let header = formatter.format_iteration_header();
-        let output = strip_ansi_codes(&header.join("\n"));
-        let output = normalize_elapsed_time(&output);
+        let output = normalize_elapsed_time(&lines_to_text(&header));
         insta::assert_snapshot!(output);
     }
 
-    /// Snapshot test: Speed lines with completed tasks and duration boundary.
-    /// Tests that avg iteration duration is properly formatted when crossing 60s boundary.
-    /// Expected display: "Avg iter: 60s" (rounded to nearest second).
     #[test]
     fn snapshot_speed_lines_duration_boundary() {
         let mut formatter = OutputFormatter::new(false);
@@ -768,61 +879,9 @@ mod tests {
             current_task_component: Some("tests".to_string()),
         };
         formatter.set_task_progress(Some(progress));
-
-        // Simulate iterations with avg near 60s boundary (59.5+60.2+59.8)/3 = 59.83
         formatter.iteration_durations = vec![59.5, 60.2, 59.8];
 
-        let lines = formatter.format_speed_lines();
-        let output = strip_ansi_codes(&lines.join("\n"));
+        let output = lines_to_text(&formatter.format_speed_lines());
         insta::assert_snapshot!(output);
-    }
-
-    /// Normalize elapsed time values in stats output for deterministic snapshots.
-    /// Replaces "Time: Xs" and "Elapsed: Xs" with fixed values.
-    fn normalize_elapsed_time(s: &str) -> String {
-        s.lines()
-            .map(|line| {
-                if let Some(pos) = line.find("Time:") {
-                    let prefix = &line[..pos];
-                    return format!("{}Time:      0.00s", prefix);
-                }
-                if let Some(pos) = line.find("Elapsed:") {
-                    let before = &line[..pos];
-                    let after = &line[pos + "Elapsed:".len()..];
-                    let rest = after.trim_start();
-                    // Skip the time value (e.g., "0.0s")
-                    let time_end = rest
-                        .find(|c: char| !c.is_ascii_digit() && c != '.' && c != 's')
-                        .unwrap_or(rest.len());
-                    let suffix = &rest[time_end..];
-                    return format!("{}Elapsed: 0.0s{}", before, suffix);
-                }
-                line.to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// Helper function to strip ANSI color codes for snapshot testing
-    fn strip_ansi_codes(s: &str) -> String {
-        // Simple regex-free ANSI stripper for tests
-        let mut result = String::new();
-        let mut chars = s.chars();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                // Skip ESC sequence
-                if chars.next() == Some('[') {
-                    // Skip until 'm' (end of color code)
-                    for ch in chars.by_ref() {
-                        if ch == 'm' {
-                            break;
-                        }
-                    }
-                }
-            } else {
-                result.push(c);
-            }
-        }
-        result
     }
 }

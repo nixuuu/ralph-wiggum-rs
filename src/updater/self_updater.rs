@@ -101,6 +101,7 @@ pub fn update_self() -> Result<()> {
 /// Perform update in background (no stdout output, TUI-safe).
 /// Sets update_state to Completed or Failed when done.
 /// Designed for tokio::task::spawn_blocking.
+#[allow(dead_code)] // Legacy: używane przez StatusTerminal (inline mode), nie fullscreen TUI
 pub fn update_in_background(update_state: Arc<AtomicU8>) {
     match do_background_update() {
         Ok(()) => {
@@ -112,6 +113,7 @@ pub fn update_in_background(update_state: Arc<AtomicU8>) {
     }
 }
 
+#[allow(dead_code)] // Legacy: używane przez update_in_background (inline mode), nie fullscreen TUI
 fn do_background_update() -> Result<()> {
     let client = reqwest::blocking::Client::new();
     let url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest");

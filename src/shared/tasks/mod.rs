@@ -3,7 +3,7 @@ mod node;
 mod tree_ops;
 mod validation;
 
-pub use helpers::{format_task_prompt, resolve_model_alias, reverse_model_alias};
+pub use helpers::{format_task_prompt, shorten_model_name};
 pub use node::{LeafTask, TaskNode};
 
 use std::collections::{HashMap, HashSet};
@@ -68,7 +68,7 @@ impl TasksFile {
 
         // File doesn't exist, create empty TasksFile
         let empty = Self {
-            default_model: Some("claude-sonnet-4-5-20250929".to_string()),
+            default_model: Some("sonnet".to_string()),
             tasks: vec![],
         };
 
@@ -819,7 +819,7 @@ tasks:
         assert_eq!(tf.tasks.len(), 0);
         assert_eq!(
             tf.default_model.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("sonnet")
         );
 
         // Verify file was created on disk
@@ -828,7 +828,7 @@ tasks:
         assert_eq!(loaded.tasks.len(), 0);
         assert_eq!(
             loaded.default_model.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("sonnet")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -894,14 +894,14 @@ tasks:
         // Verify default_model is set correctly
         assert_eq!(
             tf.default_model.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("sonnet")
         );
 
         // Verify it persists to disk
         let loaded = TasksFile::load(&path).unwrap();
         assert_eq!(
             loaded.default_model.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("sonnet")
         );
 
         let _ = std::fs::remove_dir_all(&dir);

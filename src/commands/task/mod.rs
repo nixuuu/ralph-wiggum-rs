@@ -1,8 +1,12 @@
 mod add;
 pub mod args;
 mod clean;
+#[allow(dead_code)] // Public API — shared state for task commands with TUI
+pub mod command_app;
 mod continue_cmd;
 mod edit;
+#[allow(dead_code)] // Public API — będzie użyte przez task explorer command
+pub mod explorer;
 mod generate_deps_cmd;
 mod input;
 mod migrate;
@@ -11,6 +15,7 @@ mod plan;
 mod prd;
 mod state_helper;
 mod status;
+mod task_runner;
 
 pub use args::TaskCommands;
 

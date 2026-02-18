@@ -1,0 +1,9 @@
+---
+source: src/commands/task/orchestrate/worker_panel.rs
+expression: snapshot
+---
+┌ W1 [3.2: frontend] (sonnet) ────────────────────
+│ ● implementing
+│
+│
+│ $0.0150 │ ↓800 ↑400

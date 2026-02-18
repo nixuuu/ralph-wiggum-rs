@@ -1,0 +1,22 @@
+---
+source: src/commands/task/command_app.rs
+expression: snap(&buffer)
+---
+ralph task plan
+Planning phase complete.
+
+
+
+
+
+
+
+
+ ❓ Question
+
+ Select authentication method
+
+ ● JWT  Token-based auth
+ ○ Session  Cookie-based auth
+
+Awaiting selection

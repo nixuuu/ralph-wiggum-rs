@@ -1,0 +1,9 @@
+---
+source: src/commands/task/orchestrate/worker_panel.rs
+expression: snapshot
+---
+┌ W1 [6.1] (opus) ────────────────────────────────
+│ ⚡ resolving conflicts
+│
+│
+│ $0.0000 │ ↓0 ↑0

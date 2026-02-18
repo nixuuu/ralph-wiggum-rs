@@ -1,0 +1,10 @@
+---
+source: src/commands/task/orchestrate/worker_panel.rs
+expression: snapshot
+---
+┌ W2 [42.1] ──────────────────────────────────────
+│ ● implementing
+│
+│
+│
+│ $0.0000 │ ↓0 ↑0

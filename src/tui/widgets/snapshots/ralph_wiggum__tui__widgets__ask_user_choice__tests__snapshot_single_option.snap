@@ -1,0 +1,8 @@
+---
+source: src/tui/widgets/ask_user_choice.rs
+expression: snapshot
+---
+Select one
+
+● Only choice
+  This is the only option

@@ -1,0 +1,22 @@
+---
+source: src/tui/widgets/text_input_overlay.rs
+expression: snap(&buffer)
+---
+
+
+
+
+
+
+                 Message to Worker 1
+
+                 |
+
+
+
+
+
+
+
+
+                 Ctrl+Enter=send | Esc=cancel

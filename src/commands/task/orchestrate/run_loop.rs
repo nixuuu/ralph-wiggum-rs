@@ -11,13 +11,13 @@ use crate::commands::mcp::session::SessionRegistry;
 use crate::commands::task::orchestrate::events::{EventLogger, WorkerEvent, WorkerEventKind};
 use crate::commands::task::orchestrate::output::MultiplexedOutput;
 use crate::commands::task::orchestrate::scheduler::TaskScheduler;
-use crate::commands::task::orchestrate::shutdown_types::{OrchestratorStatus, ShutdownState};
 use crate::commands::task::orchestrate::state::{Lockfile, OrchestrateState};
 use crate::commands::task::orchestrate::worker::TaskResult;
 use crate::commands::task::orchestrate::worktree::WorktreeManager;
 use crate::shared::dag::TaskDag;
 use crate::shared::error::Result;
 use crate::shared::tasks::TasksFile;
+use crate::tui::events::AppEvent;
 
 use super::assignment::{WorkerSlot, get_mtime};
 use super::config::InputFlags;
@@ -58,8 +58,8 @@ pub(super) struct RunLoopContext<'a> {
     pub(super) mcp_cancel_token: CancellationToken,
     /// JoinHandle for the MCP server task.
     pub(super) mcp_server_handle: tokio::task::JoinHandle<()>,
-    /// Receiver for user messages from the TUI overlay (keyboard input thread → run_loop).
-    pub(super) user_message_rx: mpsc::Receiver<(u32, String)>,
+    /// Receiver for TUI events from EventDispatcher (via bridge thread).
+    pub(super) key_event_rx: mpsc::Receiver<AppEvent>,
 }
 
 impl RunLoopContext<'_> {
@@ -151,14 +151,15 @@ impl Orchestrator {
                     self.handle_worker_event(&event, ctx, started_at, graceful_shutdown_started).await?;
                 }
 
-                Some((worker_id, message)) = ctx.user_message_rx.recv() => {
-                    self.handle_user_message(ctx, worker_id, message).await?;
-                }
-
-                _ = tokio::signal::ctrl_c() => {
-                    if self.handle_ctrl_c(ctx, &mut graceful_shutdown_started) {
-                        break;
+                Some(tui_event) = ctx.key_event_rx.recv() => {
+                    let should_break = self.handle_tui_event(
+                        ctx, tui_event, started_at, &mut graceful_shutdown_started
+                    )?;
+                    // Drain pending user messages from OrchestrateApp overlay
+                    for (worker_id, message) in ctx.tui.app.take_pending_messages() {
+                        self.handle_user_message(ctx, worker_id, message).await?;
                     }
+                    if should_break { break; }
                 }
 
                 _ = async {
@@ -168,10 +169,6 @@ impl Orchestrator {
                 } => {
                     self.handle_sigterm(ctx);
                     break;
-                }
-
-                _ = ctx.flags.render_notify.notified() => {
-                    self.handle_render_notify(ctx, started_at, graceful_shutdown_started)?;
                 }
 
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
@@ -206,14 +203,14 @@ impl Orchestrator {
             progress.done,
             progress.remaining()
         ));
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
 
         if self.verify_commands.is_empty() {
             let warn = MultiplexedOutput::format_orchestrator_line(
                 "⚠ No verify_commands configured — skipping verify phase. \
                  Set verify_commands in [task.orchestrate] in .ralph.toml",
             );
-            ctx.tui.dashboard.push_log_line(&warn);
+            ctx.tui.app.push_log_line(&warn);
         }
     }
 
@@ -222,36 +219,7 @@ impl Orchestrator {
         ctx: &mut RunLoopContext<'_>,
         started_at: Instant,
     ) -> Result<()> {
-        let quit_pending = ctx.flags.quit_state.load(Ordering::Relaxed) == 1;
-        let completed = ctx.flags.completed.load(Ordering::Relaxed);
-
-        // Count active and idle workers
-        let (active_workers, idle_workers) =
-            ctx.worker_slots
-                .iter()
-                .fold((0u32, 0u32), |(active, idle), (_, slot)| match slot {
-                    super::assignment::WorkerSlot::Busy { .. } => (active + 1, idle),
-                    super::assignment::WorkerSlot::Idle => (active, idle + 1),
-                });
-
-        let orch_status = OrchestratorStatus {
-            scheduler: ctx.scheduler.status(),
-            total_cost: ctx.tui.mux_output.total_cost(),
-            elapsed: started_at.elapsed(),
-            shutdown_state: ShutdownState::Running,
-            shutdown_remaining: None,
-            quit_pending,
-            completed,
-            restart_pending: None, // Initial render: no restart pending
-            active_workers,
-            idle_workers,
-        };
-        ctx.tui.dashboard.render(
-            &orch_status,
-            None,
-            &ctx.tui.task_summaries,
-            Some(&ctx.flags.active_worker_ids),
-        )
+        self.render_dashboard(ctx, started_at, None)
     }
 }
 
@@ -266,14 +234,14 @@ impl Orchestrator {
                 "Budget limit reached: ${:.4} >= ${max_cost:.4}",
                 ctx.tui.mux_output.total_cost()
             ));
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             return true;
         }
         if let Some(timeout) = self.config.timeout
             && started_at.elapsed() >= timeout
         {
             let msg = MultiplexedOutput::format_orchestrator_line("Timeout reached");
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             return true;
         }
         false
@@ -286,7 +254,7 @@ impl Orchestrator {
                 "All tasks complete: {} done, {} blocked — waiting for new tasks (press 'r' to reload, 'q' to exit)",
                 status.done, status.blocked
             ));
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             ctx.flags.completed.store(true, Ordering::Relaxed);
         }
     }
@@ -309,10 +277,6 @@ impl Orchestrator {
         }
 
         self.handle_event(event, ctx).await?;
-
-        if ctx.flags.resize_flag.swap(false, Ordering::SeqCst) {
-            ctx.tui.dashboard.handle_resize()?;
-        }
         self.render_dashboard(ctx, started_at, graceful_shutdown_started)
     }
 
@@ -333,7 +297,7 @@ impl Orchestrator {
                 "✗ Failed to send message to worker {}: {}",
                 worker_id, e
             ));
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             return Ok(()); // Don't propagate error — just log and continue
         }
 
@@ -345,7 +309,7 @@ impl Orchestrator {
     }
 
     /// Returns `true` if the loop should break (force shutdown).
-    fn handle_ctrl_c(
+    pub(super) fn handle_ctrl_c(
         &self,
         ctx: &mut RunLoopContext<'_>,
         graceful_shutdown_started: &mut Option<Instant>,
@@ -354,7 +318,7 @@ impl Orchestrator {
             let msg = MultiplexedOutput::format_orchestrator_line(
                 "Force shutdown — aborting all workers",
             );
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             ctx.flags.shutdown.store(true, Ordering::SeqCst);
             for (_, handle) in ctx.join_handles.drain() {
                 handle.abort();
@@ -364,7 +328,7 @@ impl Orchestrator {
             let msg = MultiplexedOutput::format_orchestrator_line(
                 "Graceful shutdown — waiting for in-progress tasks...",
             );
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             ctx.flags.graceful_shutdown.store(true, Ordering::SeqCst);
             *graceful_shutdown_started = Some(Instant::now());
 
@@ -378,32 +342,11 @@ impl Orchestrator {
 
     fn handle_sigterm(&self, ctx: &mut RunLoopContext<'_>) {
         let msg = MultiplexedOutput::format_orchestrator_line("SIGTERM received — force shutdown");
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
         ctx.flags.shutdown.store(true, Ordering::SeqCst);
         for (_, handle) in ctx.join_handles.drain() {
             handle.abort();
         }
-    }
-
-    fn handle_render_notify(
-        &self,
-        ctx: &mut RunLoopContext<'_>,
-        started_at: Instant,
-        graceful_shutdown_started: Option<Instant>,
-    ) -> Result<()> {
-        if ctx.flags.reload_requested.swap(false, Ordering::SeqCst) {
-            self.handle_manual_reload(ctx);
-        }
-
-        // Check for user-confirmed worker restart
-        if ctx.flags.restart_confirmed.load(Ordering::SeqCst) {
-            self.handle_restart_request(ctx)?;
-        }
-
-        if ctx.flags.resize_flag.swap(false, Ordering::SeqCst) {
-            ctx.tui.dashboard.handle_resize()?;
-        }
-        self.render_dashboard(ctx, started_at, graceful_shutdown_started)
     }
 
     /// Returns `true` if the loop should break.
@@ -445,9 +388,6 @@ impl Orchestrator {
             *last_watchdog = Instant::now();
         }
 
-        if ctx.flags.resize_flag.swap(false, Ordering::SeqCst) {
-            ctx.tui.dashboard.handle_resize()?;
-        }
         self.render_dashboard(ctx, started_at, *graceful_shutdown_started)?;
         Ok(false)
     }
@@ -458,29 +398,24 @@ impl Orchestrator {
 impl Orchestrator {
     /// Handle a user-confirmed worker restart request.
     ///
-    /// Reads the restart atomics set by the input thread, validates the
-    /// target worker state, aborts the JoinHandle, re-queues the task
-    /// (without incrementing retries), and resets the worker slot to Idle.
-    fn handle_restart_request(&self, ctx: &mut RunLoopContext<'_>) -> Result<()> {
-        let confirmed = ctx.flags.restart_confirmed.load(Ordering::SeqCst);
-        if !confirmed {
-            return Ok(());
-        }
+    /// Reads restart state from OrchestrateApp, validates the target worker
+    /// state, aborts the JoinHandle, re-queues the task (without incrementing
+    /// retries), and resets the worker slot to Idle.
+    pub(super) fn handle_restart_request(&self, ctx: &mut RunLoopContext<'_>) -> Result<()> {
+        use crate::commands::task::orchestrate::app::RestartState;
+
+        let worker_id = match ctx.tui.app.restart_state() {
+            RestartState::Confirmed { worker_id } => *worker_id,
+            _ => return Ok(()),
+        };
+
+        // Reset restart state immediately to prevent re-processing
+        ctx.tui.app.clear_restart();
 
         // Edge case: Ignore restart if graceful shutdown is active.
-        // During shutdown, we don't want to spawn new work or abort draining workers.
-        // Reset flags to prevent stale restart state.
         if ctx.flags.graceful_shutdown.load(Ordering::SeqCst) {
-            ctx.flags.restart_confirmed.store(false, Ordering::SeqCst);
-            ctx.flags.restart_worker_id.store(0, Ordering::SeqCst);
             return Ok(());
         }
-
-        let worker_id = ctx.flags.restart_worker_id.load(Ordering::SeqCst);
-
-        // Reset flags immediately to prevent re-processing
-        ctx.flags.restart_confirmed.store(false, Ordering::SeqCst);
-        ctx.flags.restart_worker_id.store(0, Ordering::SeqCst);
 
         if worker_id == 0 {
             return Ok(());
@@ -493,14 +428,14 @@ impl Orchestrator {
                 let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                     "⟳ Restart: worker {worker_id} does not exist"
                 ));
-                ctx.tui.dashboard.push_log_line(&msg);
+                ctx.tui.app.push_log_line(&msg);
                 return Ok(());
             }
             Some(WorkerSlot::Idle) => {
                 let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                     "⟳ Restart: worker {worker_id} is idle, nothing to restart"
                 ));
-                ctx.tui.dashboard.push_log_line(&msg);
+                ctx.tui.app.push_log_line(&msg);
                 return Ok(());
             }
             Some(WorkerSlot::Busy { .. }) => {
@@ -530,7 +465,7 @@ impl Orchestrator {
             let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                 "⟳ Restart: worker {worker_id} is merging — cannot restart during merge"
             ));
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             return Ok(());
         }
 
@@ -552,7 +487,7 @@ impl Orchestrator {
         ctx.release_worker(worker_id);
 
         // 4. Update dashboard: worker status to idle, clear output
-        ctx.tui.dashboard.update_worker_status(
+        ctx.tui.app.update_worker_status(
             worker_id,
             crate::commands::task::orchestrate::worker_status::WorkerStatus::idle(worker_id),
         );
@@ -575,7 +510,7 @@ impl Orchestrator {
         let msg = MultiplexedOutput::format_orchestrator_line(&format!(
             "⟳ Worker {worker_id} restarted (task {task_id} re-queued)"
         ));
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
 
         Ok(())
     }
@@ -590,7 +525,7 @@ impl Orchestrator {
             let msg = MultiplexedOutput::format_orchestrator_line(
                 "Force shutdown — aborting all workers",
             );
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             for (_, handle) in ctx.join_handles.drain() {
                 handle.abort();
             }
@@ -620,7 +555,7 @@ impl Orchestrator {
             .any(|s| matches!(s, WorkerSlot::Busy { .. }))
         {
             let msg = MultiplexedOutput::format_orchestrator_line("All workers drained — exiting");
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             return Ok(true);
         }
 
@@ -630,7 +565,7 @@ impl Orchestrator {
             let msg = MultiplexedOutput::format_orchestrator_line(
                 "Grace period expired — force-killing all workers",
             );
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             ctx.flags.shutdown.store(true, Ordering::SeqCst);
             for (_, handle) in ctx.join_handles.drain() {
                 handle.abort();
@@ -700,7 +635,7 @@ impl Orchestrator {
                             "✗ Watchdog: worker {} (task {}) panicked: {}",
                             worker_id, task_id, panic_info
                         ));
-                        ctx.tui.dashboard.push_log_line(&msg);
+                        ctx.tui.app.push_log_line(&msg);
 
                         // Recover: mark task as failed, free worker slot
                         let requeued = ctx.scheduler.mark_failed(&task_id);
@@ -709,7 +644,7 @@ impl Orchestrator {
                         }
 
                         ctx.release_worker(worker_id);
-                        ctx.tui.dashboard.update_worker_status(
+                        ctx.tui.app.update_worker_status(
                             worker_id,
                             crate::commands::task::orchestrate::worker_status::WorkerStatus::idle(
                                 worker_id,
@@ -748,7 +683,7 @@ impl Orchestrator {
                     let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                         "✗ Watchdog: merge task panicked: {panic_info}",
                     ));
-                    ctx.tui.dashboard.push_log_line(&msg);
+                    ctx.tui.app.push_log_line(&msg);
 
                     // Reset merge state so the next queued merge can proceed
                     ctx.merge_ctx.merge_in_progress = false;
@@ -787,7 +722,7 @@ impl Orchestrator {
                         "⚠ Watchdog: worker {} (task {}) has been busy for {}m",
                         worker_id, task_id, mins
                     ));
-                    ctx.tui.dashboard.push_log_line(&msg);
+                    ctx.tui.app.push_log_line(&msg);
                 }
             }
         }
@@ -807,7 +742,7 @@ impl Orchestrator {
                         "⚠ Watchdog: worker {} (task {}) no heartbeat for {}s — may be stuck",
                         worker_id, task_id, secs
                     ));
-                    ctx.tui.dashboard.push_log_line(&msg);
+                    ctx.tui.app.push_log_line(&msg);
                 }
             }
         }
@@ -818,7 +753,7 @@ impl Orchestrator {
 
 impl Orchestrator {
     /// Manual reload triggered by user pressing 'r'.
-    fn handle_manual_reload(&self, ctx: &mut RunLoopContext<'_>) {
+    pub(super) fn handle_manual_reload(&self, ctx: &mut RunLoopContext<'_>) {
         let timestamp = chrono::Local::now().format("%H:%M:%S");
         match TasksFile::load(&self.tasks_path) {
             Ok(mut new_tf) => {
@@ -831,7 +766,7 @@ impl Orchestrator {
                         "✗ [{timestamp}] reload failed: DAG cycle detected: {}",
                         cycle.join(" -> ")
                     ));
-                    ctx.tui.dashboard.push_log_line(&msg);
+                    ctx.tui.app.push_log_line(&msg);
                 } else {
                     // Apply reload and capture unblocked tasks
                     let unblocked = self.apply_reload(ctx, &mut new_tf, new_dag);
@@ -869,14 +804,14 @@ impl Orchestrator {
                         "♻ [{timestamp}] tasks.yml reloaded ({})",
                         delta_str
                     ));
-                    ctx.tui.dashboard.push_log_line(&msg);
+                    ctx.tui.app.push_log_line(&msg);
                 }
             }
             Err(e) => {
                 let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                     "✗ [{timestamp}] reload failed: {e}"
                 ));
-                ctx.tui.dashboard.push_log_line(&msg);
+                ctx.tui.app.push_log_line(&msg);
             }
         }
     }
@@ -928,7 +863,7 @@ impl Orchestrator {
                 "♻ Resuming — {} new tasks detected",
                 status.pending + status.ready
             ));
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
         }
 
         unblocked
@@ -1116,29 +1051,7 @@ mod tests {
     }
 
     // ── Task 18.3: Worker restart tests ─────────────────────────────────
-
-    #[test]
-    fn test_restart_flags_reset_logic() {
-        // Test: restart flags should be reset to defaults after processing
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-
-        let restart_worker_id = Arc::new(AtomicU32::new(3));
-        let restart_confirmed = Arc::new(AtomicBool::new(true));
-
-        // Simulate processing — flags should be reset
-        let confirmed = restart_confirmed.load(Ordering::SeqCst);
-        assert!(confirmed);
-        let worker_id = restart_worker_id.load(Ordering::SeqCst);
-        assert_eq!(worker_id, 3);
-
-        // Reset (as done in handle_restart_request)
-        restart_confirmed.store(false, Ordering::SeqCst);
-        restart_worker_id.store(0, Ordering::SeqCst);
-
-        assert!(!restart_confirmed.load(Ordering::SeqCst));
-        assert_eq!(restart_worker_id.load(Ordering::SeqCst), 0);
-    }
+    // NOTE: Old restart atomic flag tests removed (restart state is now in OrchestrateApp).
 
     #[test]
     fn test_restart_skips_idle_worker() {
@@ -1209,22 +1122,6 @@ mod tests {
     }
 
     #[test]
-    fn test_restart_zero_worker_id_is_noop() {
-        // Test: worker_id=0 means no restart requested
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-
-        let restart_worker_id = Arc::new(AtomicU32::new(0));
-        let restart_confirmed = Arc::new(AtomicBool::new(true));
-
-        let confirmed = restart_confirmed.load(Ordering::SeqCst);
-        let worker_id = restart_worker_id.load(Ordering::SeqCst);
-
-        assert!(confirmed);
-        assert_eq!(worker_id, 0, "worker_id=0 should trigger early return");
-    }
-
-    #[test]
     fn test_restart_merge_pipeline_detection() {
         // Test: Worker in merge pipeline should be detected
         use crate::commands::task::orchestrate::orchestrator_merge::{MergeContext, PendingMerge};
@@ -1280,63 +1177,6 @@ mod tests {
             !worker_1_in_pipeline,
             "Worker 1 should NOT be in merge pipeline"
         );
-    }
-
-    // ── Task 18.5: Edge cases and guards tests ──────────────────────────
-
-    #[test]
-    fn test_restart_request_graceful_shutdown_guard() {
-        // Test: handle_restart_request should ignore restart during graceful shutdown
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU32};
-
-        let graceful_shutdown = Arc::new(AtomicBool::new(true));
-        let restart_worker_id = Arc::new(AtomicU32::new(2));
-        let restart_confirmed = Arc::new(AtomicBool::new(true));
-
-        // Simulate handle_restart_request logic
-        let confirmed = restart_confirmed.load(Ordering::SeqCst);
-        assert!(confirmed);
-
-        if graceful_shutdown.load(Ordering::SeqCst) {
-            restart_confirmed.store(false, Ordering::SeqCst);
-            restart_worker_id.store(0, Ordering::SeqCst);
-        }
-
-        // Verify flags are reset
-        assert!(!restart_confirmed.load(Ordering::SeqCst));
-        assert_eq!(restart_worker_id.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn test_restart_request_proceeds_when_not_shutdown() {
-        // Test: handle_restart_request should proceed when NOT in graceful shutdown
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU32};
-
-        let graceful_shutdown = Arc::new(AtomicBool::new(false));
-        let restart_worker_id = Arc::new(AtomicU32::new(2));
-        let restart_confirmed = Arc::new(AtomicBool::new(true));
-
-        // Simulate handle_restart_request logic
-        let confirmed = restart_confirmed.load(Ordering::SeqCst);
-        assert!(confirmed);
-
-        if graceful_shutdown.load(Ordering::SeqCst) {
-            restart_confirmed.store(false, Ordering::SeqCst);
-            restart_worker_id.store(0, Ordering::SeqCst);
-            panic!("Should not reach here");
-        }
-
-        let worker_id = restart_worker_id.load(Ordering::SeqCst);
-        assert_eq!(worker_id, 2, "Worker ID should remain 2 for processing");
-
-        // Normally flags are reset after processing
-        restart_confirmed.store(false, Ordering::SeqCst);
-        restart_worker_id.store(0, Ordering::SeqCst);
-
-        assert!(!restart_confirmed.load(Ordering::SeqCst));
-        assert_eq!(restart_worker_id.load(Ordering::SeqCst), 0);
     }
 
     // ── Task 25.2.3: Message channel tests ──────────────────────────────

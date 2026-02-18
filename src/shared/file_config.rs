@@ -94,6 +94,9 @@ pub struct FileConfig {
     #[serde(default)]
     pub ui: UiConfig,
     #[serde(default)]
+    #[allow(dead_code)] // Will be consumed by TUI rendering modules
+    pub tui: TuiConfig,
+    #[serde(default)]
     pub task: TaskConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -113,8 +116,50 @@ impl Default for UiConfig {
     }
 }
 
+/// TUI configuration for terminal user interface.
+/// Fields will be consumed by TUI rendering modules in future tasks.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct TuiConfig {
+    /// Output buffer size in characters (default: 5000)
+    #[serde(default = "default_output_buffer_size")]
+    pub output_buffer_size: u32,
+    /// Sidebar width in characters (default: 25)
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: u16,
+    /// Show sidebar (default: true)
+    #[serde(default = "default_true")]
+    pub sidebar_visible: bool,
+    /// Theme name (default: "default")
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            output_buffer_size: default_output_buffer_size(),
+            sidebar_width: default_sidebar_width(),
+            sidebar_visible: default_true(),
+            theme: default_theme(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
+}
+
+fn default_output_buffer_size() -> u32 {
+    5000
+}
+
+fn default_sidebar_width() -> u16 {
+    25
+}
+
+fn default_theme() -> String {
+    "default".to_string()
 }
 
 /// Prompt configuration with optional prefix and suffix
@@ -2372,5 +2417,81 @@ phase_timeout_minutes = -1
             "Error message should mention both invalid value and expected type. Got: {}",
             err_msg
         );
+    }
+
+    // --- TUI config tests ---
+
+    #[test]
+    fn test_tui_config_defaults() {
+        let config = FileConfig::default();
+        assert_eq!(config.tui.output_buffer_size, 5000);
+        assert_eq!(config.tui.sidebar_width, 25);
+        assert!(config.tui.sidebar_visible);
+        assert_eq!(config.tui.theme, "default");
+    }
+
+    #[test]
+    fn test_tui_config_without_tui_section() {
+        // Existing .ralph.toml without [tui] section should use defaults
+        let toml_content = r#"
+[prompt]
+prefix = "test"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.tui.output_buffer_size, 5000);
+        assert_eq!(config.tui.sidebar_width, 25);
+        assert!(config.tui.sidebar_visible);
+        assert_eq!(config.tui.theme, "default");
+    }
+
+    #[test]
+    fn test_tui_config_full() {
+        let toml_content = r#"
+[tui]
+output_buffer_size = 10000
+sidebar_width = 35
+sidebar_visible = false
+theme = "dark"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.tui.output_buffer_size, 10000);
+        assert_eq!(config.tui.sidebar_width, 35);
+        assert!(!config.tui.sidebar_visible);
+        assert_eq!(config.tui.theme, "dark");
+    }
+
+    #[test]
+    fn test_tui_config_partial() {
+        let toml_content = r#"
+[tui]
+output_buffer_size = 8000
+theme = "light"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.tui.output_buffer_size, 8000);
+        assert_eq!(config.tui.sidebar_width, 25); // default
+        assert!(config.tui.sidebar_visible); // default
+        assert_eq!(config.tui.theme, "light");
+    }
+
+    #[test]
+    fn test_tui_config_with_other_sections() {
+        // TUI config should work alongside other sections
+        let toml_content = r#"
+[prompt]
+prefix = "Custom prompt"
+
+[tui]
+output_buffer_size = 7500
+theme = "solarized"
+
+[ui]
+nerd_font = false
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.prompt.prefix.as_deref(), Some("Custom prompt"));
+        assert_eq!(config.tui.output_buffer_size, 7500);
+        assert_eq!(config.tui.theme, "solarized");
+        assert!(!config.ui.nerd_font);
     }
 }

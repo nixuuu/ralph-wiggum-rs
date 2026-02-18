@@ -1,0 +1,20 @@
+---
+source: src/commands/task/command_app.rs
+expression: snap(&buffer)
+---
+ralph task add
+Adding new feature...
+
+
+
+
+ ❓ Question
+
+ Select components to include
+
+ > [ ] Authentication
+   [ ] API Gateway
+   [ ] Database
+   [ ] Logging
+
+Multi-select active

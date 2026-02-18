@@ -1,0 +1,6 @@
+---
+source: src/commands/run/event_formatting.rs
+expression: output
+---
+Line 0: [Rgb(203, 166, 247)]▍[Rgb(203, 166, 247),BOLD]You
+Line 1: [Rgb(203, 166, 247)]▍[Reset]User answered: [Indexed(15),BOLD]Yes, proceed

@@ -1,0 +1,43 @@
+---
+source: src/commands/run/app.rs
+expression: snapshot
+---
+run | claude-sonnet-4-5 2/10 | 0.0s ⠋
+ Tasks                 ▐Output line 0
+                       ▐Output line 1
+                       ▐Output line 2
+                       ▐Output line 3
+                       ▐Output line 4
+                       ▐Output line 5
+                       ▐Output line 6
+                       ▐Output line 7
+                       ▐Output line 8
+                       ▐Output line 9
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+                       ▐
+ 0/0 0%                ▐
+[t] 0.0s │ ↓ 0 ↑ 0 │ $0.0000 │ q Quit t Sidebar ↑↓ Scroll Tab Focus

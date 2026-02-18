@@ -1,0 +1,5 @@
+---
+source: src/tui/tool_formatting.rs
+expression: "output.join(\"\")"
+---
+[Explore] Explore codebase architecture

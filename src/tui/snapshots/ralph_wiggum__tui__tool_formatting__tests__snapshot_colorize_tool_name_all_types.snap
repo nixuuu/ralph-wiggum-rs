@@ -1,0 +1,15 @@
+---
+source: src/tui/tool_formatting.rs
+expression: "output.join(\"\\n\")"
+---
+Read: color="Cyan"
+Glob: color="Cyan"
+Grep: color="Cyan"
+Write: color="Yellow"
+Edit: color="Yellow"
+Bash: color="Magenta"
+Task: color="Blue"
+WebFetch: color="Green"
+WebSearch: color="Green"
+TodoWrite: color="White"
+Unknown: color="White"

@@ -1,0 +1,12 @@
+---
+source: src/tui/widgets/task_sidebar.rs
+expression: snap(&buffer)
+---
+ Tasks                            ▐
+                                  ▐
+                                  ▐
+  ▶ Epic One [parser]             ▐
+  ▶ Epic Two [dag]                ▐
+                                  ▐
+                                  ▐
+ 1/4 25%                          ▐

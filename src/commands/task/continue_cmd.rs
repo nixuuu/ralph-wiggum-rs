@@ -69,7 +69,9 @@ pub async fn execute(file_config: &FileConfig) -> Result<()> {
         continue_session: false,
         no_nf: false,
         debug: false,
+        no_splash: false,
         progress_file: Some(tasks_path.clone()),
+        command_name: Some("task continue".to_string()),
     };
 
     crate::commands::run::execute(args).await

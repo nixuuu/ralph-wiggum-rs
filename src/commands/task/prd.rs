@@ -1,12 +1,19 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use crossterm::style::Stylize;
 
 use super::args::PrdArgs;
+use super::command_app::TaskCommandApp;
 use super::input::resolve_input;
-use crate::commands::run::{RunOnceOptions, run_once};
+use crate::commands::run::output::OutputFormatter;
+use crate::commands::run::runner::ClaudeRunner;
 use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::FileConfig;
 use crate::shared::tasks::TasksFile;
 use crate::templates;
+use crate::tui::app::App;
 
 pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
     // Resolve input
@@ -35,22 +42,95 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
     // Determine model
     let model = args
         .model
+        .clone()
         .or_else(|| file_config.task.default_model.clone());
 
-    // Run Claude with streaming output (all tools — needs Write for file generation)
-    // No tasks_path: PRD generates the tasks file, so no MCP server needed yet
-    run_once(RunOnceOptions {
-        prompt,
-        model,
-        output_dir: Some(output_dir.clone()),
-        use_nerd_font: file_config.ui.nerd_font,
-        allowed_tools: None,
-        disallowed_tools: None,
-        mcp_config: None,
-        question_rx: None,
-        tasks_path: None,
-    })
-    .await?;
+    // Initialize TaskCommandApp with shared state
+    let app_state = Arc::new(Mutex::new(TaskCommandApp::new("task prd")));
+    if let Some(ref m) = model {
+        app_state.lock().unwrap().set_model(m);
+    }
+    app_state.lock().unwrap().set_status("Initializing...");
+
+    // Setup shutdown flag
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Configure ClaudeRunner
+    let runner = ClaudeRunner::oneshot(prompt, model, Some(output_dir.clone()));
+
+    // Create OutputFormatter for event formatting
+    let formatter = Arc::new(Mutex::new(OutputFormatter::new(file_config.ui.nerd_font)));
+    formatter.lock().unwrap().start_iteration();
+
+    // Spawn ClaudeRunner in background task
+    let runner_handle = {
+        let app_state = app_state.clone();
+        let shutdown = shutdown.clone();
+        let formatter = formatter.clone();
+
+        tokio::spawn(async move {
+            let result = runner
+                .run(
+                    shutdown.clone(),
+                    |event| {
+                        // Format event to Lines
+                        let lines = {
+                            let mut fmt = formatter.lock().unwrap();
+                            fmt.format_event(event)
+                        };
+
+                        // Push to app ring buffer
+                        if !lines.is_empty() {
+                            let mut app = app_state.lock().unwrap();
+                            app.push_event(lines);
+                            app.set_status("Generating PRD...");
+                        }
+                    },
+                    || {
+                        // Idle callback — update status
+                        let mut app = app_state.lock().unwrap();
+                        app.set_status("Generating PRD...");
+                    },
+                )
+                .await;
+
+            // Mark completion and signal TUI to exit
+            {
+                let mut app = app_state.lock().unwrap();
+                if result.is_ok() {
+                    app.set_status("PRD generation complete — press q to exit");
+                } else {
+                    app.set_status("PRD generation failed — press q to exit");
+                }
+            }
+            // Brief delay so user sees final status before TUI closes
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            shutdown.store(true, Ordering::SeqCst);
+
+            result
+        })
+    };
+
+    // Run TUI event loop on main thread (exits on shutdown flag or 'q' key)
+    let tui_result = {
+        let mut tui_app = App::new(Duration::from_millis(100))?.with_shutdown(shutdown.clone());
+        tui_app.run_shared(app_state.clone())
+    };
+
+    // Wait for runner to complete (may already be done if TUI exited via shutdown)
+    let runner_result = runner_handle
+        .await
+        .map_err(|e| RalphError::ClaudeProcess(format!("ClaudeRunner task panicked: {}", e)))?;
+
+    // Handle TUI errors
+    tui_result?;
+
+    // Propagate runner errors (Interrupted from Ctrl+C is expected on manual quit)
+    match runner_result {
+        Ok(_) => {}
+        Err(RalphError::Interrupted) => {}
+        Err(e) => return Err(e),
+    }
 
     // Verify required outputs exist
     let tasks_path = output_dir.join(&file_config.task.tasks_file);

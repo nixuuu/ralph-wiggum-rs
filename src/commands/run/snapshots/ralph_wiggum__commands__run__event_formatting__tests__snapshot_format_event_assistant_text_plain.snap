@@ -1,0 +1,6 @@
+---
+source: src/commands/run/event_formatting.rs
+expression: output
+---
+Line 0: [Rgb(137, 180, 250)]▍[Rgb(137, 180, 250),BOLD]Claude
+Line 1: [Rgb(137, 180, 250)]▍[Reset]Hello, this is a plain text response.

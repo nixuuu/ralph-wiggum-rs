@@ -1,0 +1,19 @@
+---
+source: src/commands/task/explorer/drawing.rs
+expression: snapshot
+---
+ Tasks [sort: ID]                Detail
+
+ ▾ 1 Epic [test]                 1 Epic
+   ✓ 1.1 Task A [test]           Component: test
+   ✓ 1.2 Task B [test]
+   ◎ 1.3 Task C [test]           Subtasks: 4
+   ○ 1.4 Task D [test]
+
+
+
+
+
+
+
+█████████████████████████████████2/4 done (50%)

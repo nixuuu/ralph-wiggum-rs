@@ -44,7 +44,15 @@ pub struct RunArgs {
     #[arg(long)]
     pub debug: bool,
 
+    /// Skip splash screen on startup
+    #[arg(long)]
+    pub no_splash: bool,
+
     /// Path to PROGRESS.md for adaptive iterations (set programmatically by task continue)
     #[arg(skip)]
     pub progress_file: Option<std::path::PathBuf>,
+
+    /// Command name to display in TUI header (set programmatically, default: "run")
+    #[arg(skip)]
+    pub command_name: Option<String>,
 }

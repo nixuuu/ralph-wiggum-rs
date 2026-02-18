@@ -1,7 +1,7 @@
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
-use crate::commands::mcp::standalone_text_input;
+use crate::commands::standalone_text_input::standalone_text_input;
 use crate::shared::error::{RalphError, Result};
 use crossterm::style::Stylize;
 
@@ -98,11 +98,10 @@ mod tests {
     #[test]
     #[allow(clippy::type_complexity)]
     fn test_text_input_imports_available() {
-        // Weryfikacja że funkcje text_input są dostępne z poziomu commands::task::input
-        // poprzez import z mcp::tui
+        // Weryfikacja że funkcje text_input są dostępne z commands::standalone_text_input
 
         // Import przez pełną ścieżkę
-        use crate::commands::mcp::tui::text_input::{standalone_text_input, text_input};
+        use crate::commands::standalone_text_input::{standalone_text_input, text_input};
 
         // Weryfikacja że typy funkcji się zgadzają
         let _fn1: fn(Option<&str>, Option<&str>, bool, Option<&str>) -> Result<String> = text_input;
@@ -111,13 +110,12 @@ mod tests {
 
     #[test]
     #[allow(clippy::type_complexity)]
-    fn test_text_input_imports_via_mcp_module() {
-        // Alternatywnie: import przez re-export w mcp::mod
-        use crate::commands::mcp::{standalone_text_input, text_input};
+    fn test_standalone_text_input_wrapper_signature() {
+        // Weryfikacja że standalone_text_input konwertuje Back → Interrupted
+        use crate::commands::standalone_text_input::standalone_text_input;
 
-        // Weryfikacja typów
-        let _fn1: fn(Option<&str>, Option<&str>, bool, Option<&str>) -> Result<String> = text_input;
-        let _fn2: fn(Option<&str>, bool) -> Result<String> = standalone_text_input;
+        // Sygnatura: standalone_text_input jest wrapperem text_input(placeholder, None, required, None)
+        let _fn: fn(Option<&str>, bool) -> Result<String> = standalone_text_input;
     }
 
     #[test]

@@ -1,6 +1,9 @@
+pub(crate) mod app;
 mod args;
 mod config;
 mod event_formatting;
+/// Legacy inline mode support — używane tylko przez once.rs dla task commands.
+/// Główny run mode używa app::RunApp z fullscreen TUI.
 mod events;
 mod formatting_helpers;
 mod once;
@@ -11,28 +14,33 @@ pub(crate) mod runner;
 pub(crate) mod runner_reader;
 pub(crate) mod runner_types;
 pub(crate) mod state;
-mod tool_formatting;
-pub(crate) mod ui;
+mod summary;
+/// Legacy inline mode support — używane tylko przez once.rs dla task commands.
+/// Główny run mode używa app::RunApp z fullscreen TUI.
+mod ui;
+
+#[cfg(test)]
+mod responsive_tests;
+
+#[cfg(test)]
+mod run_mode_integration_tests;
 
 pub use args::RunArgs;
 pub(crate) use once::{DANGEROUS_TOOLS, RunOnceOptions, run_once};
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::signal;
 
 use crate::shared::error::{RalphError, Result};
-use crate::updater::UpdateState;
-use crate::updater::version_checker::UpdateInfo;
 
+use app::RunApp;
 use config::Config;
-use events::InputThread;
-use output::OutputFormatter;
 use promise::find_promise;
 use prompt::build_system_prompt;
 use runner::{ClaudeEvent, ClaudeRunner};
 use state::StateManager;
-use ui::{StatusData, StatusTerminal};
+use summary::{SessionResult, print_final_summary};
 
 fn build_task_progress(summary: &crate::shared::progress::ProgressSummary) -> output::TaskProgress {
     let current = crate::shared::progress::current_task(summary);
@@ -62,44 +70,14 @@ fn load_progress_auto(path: &std::path::Path) -> Result<crate::shared::progress:
 /// Shared state passed between execute() helper functions.
 #[derive(Clone)]
 struct SharedState {
-    formatter: Arc<Mutex<OutputFormatter>>,
-    status_terminal: Arc<Mutex<StatusTerminal>>,
-    update_info: Arc<Mutex<Option<UpdateInfo>>>,
-    update_state: Arc<AtomicU8>,
-    resize_flag: Arc<AtomicBool>,
-    update_trigger: Arc<AtomicBool>,
-    refresh_flag: Arc<AtomicBool>,
+    run_app: Arc<Mutex<RunApp>>,
 }
 
 impl SharedState {
-    /// Build StatusData with update_info and update_state populated.
-    fn build_status(&self) -> StatusData {
-        let mut status = self
-            .formatter
-            .lock()
-            .expect("formatter: mutex poisoned")
-            .get_status();
-        status.update_info = self
-            .update_info
-            .lock()
-            .expect("update_info: mutex poisoned")
-            .clone();
-        status.update_state = UpdateState::from_u8(self.update_state.load(Ordering::SeqCst));
-        status
-    }
-
-    /// Handle resize if flagged, then update status bar.
-    fn update_status_bar(&self) -> Result<()> {
-        let status = self.build_status();
-        let mut term = self
-            .status_terminal
-            .lock()
-            .expect("status_terminal: mutex poisoned");
-        if self.resize_flag.swap(false, Ordering::SeqCst) {
-            let _ = term.handle_resize(&status);
-        }
-        term.update(&status)?;
-        Ok(())
+    /// Update RunApp status data (refresh from formatter).
+    fn update_status(&self) {
+        let mut app = self.run_app.lock().expect("run_app: mutex poisoned");
+        app.update_status();
     }
 }
 
@@ -126,79 +104,59 @@ fn setup_signals(shutdown: &Arc<AtomicBool>) {
     }
 }
 
-/// Initialize OutputFormatter with config defaults.
-fn setup_formatter(config: &Config) -> Arc<Mutex<OutputFormatter>> {
-    let formatter = Arc::new(Mutex::new(OutputFormatter::new(config.use_nerd_font)));
-    {
-        let mut fmt = formatter.lock().expect("formatter: mutex poisoned");
-        fmt.set_min_iterations(config.min_iterations);
-        fmt.set_max_iterations(config.max_iterations);
+/// Initialize RunApp with config defaults.
+fn setup_run_app(config: &Config) -> Arc<Mutex<RunApp>> {
+    let mut app = RunApp::new(
+        &config.command_name,
+        "claude-sonnet-4-5", // TODO: read from config/env
+        config.use_nerd_font,
+        5000,              // ring buffer capacity
+        !config.no_splash, // show_splash (negacja no_splash)
+    );
+    app.output_formatter
+        .set_min_iterations(config.min_iterations);
+    app.output_formatter
+        .set_max_iterations(config.max_iterations);
+
+    // Jeśli jest ustawiony progress_file (task continue), włącz sidebar z task tree
+    if let Some(ref tasks_path) = config.progress_file {
+        app.set_tasks_file(tasks_path.clone());
     }
-    formatter
+
+    Arc::new(Mutex::new(app))
 }
 
-/// Pre-load task progress so progress bar is visible from first iteration.
+/// Pre-load task progress into RunApp so progress bar is visible from first iteration.
 /// Returns the initial mtime for periodic refresh tracking.
-fn init_progress(
-    config: &Config,
-    formatter: &Arc<Mutex<OutputFormatter>>,
-) -> Option<std::time::SystemTime> {
+fn init_progress(config: &Config, run_app: &Arc<Mutex<RunApp>>) -> Option<std::time::SystemTime> {
     let progress_file = config.progress_file.as_ref()?;
     let summary = load_progress_auto(progress_file).ok()?;
     let tp = build_task_progress(&summary);
-    let mut fmt = formatter.lock().expect("formatter: mutex poisoned");
-    fmt.set_initial_done_count(summary.done);
-    fmt.set_task_progress(Some(tp));
+    let mut app = run_app.lock().expect("run_app: mutex poisoned");
+    app.output_formatter.set_initial_done_count(summary.done);
+    app.output_formatter.set_task_progress(Some(tp));
     std::fs::metadata(progress_file)
         .ok()
         .and_then(|m| m.modified().ok())
 }
 
-/// Initialize StatusTerminal — use 3-line height in task continue mode.
-fn setup_terminal(config: &Config) -> Result<Arc<Mutex<StatusTerminal>>> {
-    let terminal = if config.progress_file.is_some() {
-        StatusTerminal::with_height(config.use_nerd_font, 3)?
-    } else {
-        StatusTerminal::new(config.use_nerd_font)?
-    };
-    Ok(Arc::new(Mutex::new(terminal)))
-}
+// setup_terminal usunięta — używamy RunApp zamiast StatusTerminal
 
-/// Show shutdown message, save state, cleanup terminal, print interrupted stats.
-fn cleanup_interrupted(shared: &SharedState, state_manager: &StateManager) -> Result<()> {
-    let mut term = shared
-        .status_terminal
-        .lock()
-        .expect("status_terminal: mutex poisoned");
-    term.show_shutting_down()?;
-    term.cleanup()?;
-    let lines = shared
-        .formatter
-        .lock()
-        .expect("formatter: mutex poisoned")
+/// Show interrupted stats in RunApp.
+fn cleanup_interrupted(shared: &SharedState, state_manager: &StateManager) {
+    let mut app = shared.run_app.lock().expect("run_app: mutex poisoned");
+    let lines = app
+        .output_formatter
         .format_interrupted(state_manager.iteration());
-    term.print_lines(&lines)?;
-    Ok(())
+    app.push_lines(lines);
 }
 
-/// Print iteration header and update the status bar.
-fn print_iteration_header(shared: &SharedState) -> Result<()> {
-    let header_lines = shared
-        .formatter
-        .lock()
-        .expect("formatter: mutex poisoned")
-        .format_iteration_header();
-    let status = shared.build_status();
-    let mut term = shared
-        .status_terminal
-        .lock()
-        .expect("status_terminal: mutex poisoned");
-    if shared.resize_flag.swap(false, Ordering::SeqCst) {
-        let _ = term.handle_resize(&status);
-    }
-    term.print_lines(&header_lines)?;
-    term.update(&status)?;
-    Ok(())
+/// Push iteration header to RunApp ring buffer.
+fn print_iteration_header(shared: &SharedState) {
+    let mut app = shared.run_app.lock().expect("run_app: mutex poisoned");
+    let header_lines = app.output_formatter.format_iteration_header();
+    app.push_lines(header_lines);
+    app.update_status();
 }
 
 /// Create a ClaudeRunner for the current iteration.
@@ -218,110 +176,51 @@ fn build_runner(config: &Config, state_manager: &StateManager) -> ClaudeRunner {
     }
 }
 
-/// Event callback body: format event → update terminal.
-fn handle_event(event: &ClaudeEvent, shared: &SharedState, shutdown: &Arc<AtomicBool>) {
-    let (lines, mut status) = {
-        let mut fmt = shared.formatter.lock().expect("formatter: mutex poisoned");
-        let lines = fmt.format_event(event);
-        let status = fmt.get_status();
-        (lines, status)
-    };
-    status.update_info = shared
-        .update_info
-        .lock()
-        .expect("update_info: mutex poisoned")
-        .clone();
-    status.update_state = UpdateState::from_u8(shared.update_state.load(Ordering::SeqCst));
-    let mut term = shared
-        .status_terminal
-        .lock()
-        .expect("status_terminal: mutex poisoned");
-    if shared.resize_flag.swap(false, Ordering::SeqCst) {
-        let _ = term.handle_resize(&status);
-    }
-    for line in &lines {
-        let _ = term.print_line(line);
-    }
-    if shutdown.load(Ordering::SeqCst) {
-        let _ = term.show_shutting_down();
-    } else {
-        let _ = term.update(&status);
-    }
+/// Event callback body: format event → push to ring buffer.
+fn handle_event(event: &ClaudeEvent, shared: &SharedState, _shutdown: &Arc<AtomicBool>) {
+    let mut app = shared.run_app.lock().expect("run_app: mutex poisoned");
+    app.push_event(event);
+    app.update_status();
 }
 
-/// Idle callback body: handle update trigger, refresh progress, update status bar.
+/// Idle callback body: periodically reload progress file and refresh status.
 fn handle_idle(
     shared: &SharedState,
     progress_file: &Option<std::path::PathBuf>,
     last_progress_mtime: &mut Option<std::time::SystemTime>,
     last_mtime_check: &mut std::time::Instant,
 ) {
-    if shared.update_trigger.swap(false, Ordering::SeqCst) {
-        let state_for_task = shared.update_state.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::updater::update_in_background(state_for_task);
-        });
+    // Periodyczny reload pliku progress (co 15s lub po zmianie mtime)
+    if let Some(summary) =
+        check_progress_reload(progress_file, last_progress_mtime, last_mtime_check)
+    {
+        let tp = build_task_progress(&summary);
+        let mut app = shared.run_app.lock().expect("run_app: mutex poisoned");
+        app.output_formatter.set_task_progress(Some(tp));
     }
-
-    let reload_result = check_progress_reload(
-        progress_file,
-        &shared.refresh_flag,
-        last_progress_mtime,
-        last_mtime_check,
-    );
-
-    let mut status = {
-        let mut fmt = shared.formatter.lock().expect("formatter: mutex poisoned");
-        if let Some(summary) = reload_result {
-            fmt.set_task_progress(Some(build_task_progress(&summary)));
-        }
-        fmt.get_status()
-    };
-    status.update_info = shared
-        .update_info
-        .lock()
-        .expect("update_info: mutex poisoned")
-        .clone();
-    status.update_state = UpdateState::from_u8(shared.update_state.load(Ordering::SeqCst));
-    let mut term = shared
-        .status_terminal
-        .lock()
-        .expect("status_terminal: mutex poisoned");
-    if shared.resize_flag.swap(false, Ordering::SeqCst) {
-        let _ = term.handle_resize(&status);
-    }
-    let _ = term.update(&status);
+    shared.update_status();
 }
 
-/// Check if progress file should be reloaded (manual 'r' key or 15s mtime poll).
+/// Check if progress file should be reloaded (15s mtime poll).
 fn check_progress_reload(
     progress_file: &Option<std::path::PathBuf>,
-    refresh_flag: &Arc<AtomicBool>,
     last_progress_mtime: &mut Option<std::time::SystemTime>,
     last_mtime_check: &mut std::time::Instant,
 ) -> Option<crate::shared::progress::ProgressSummary> {
     let progress_path = progress_file.as_ref()?;
-    let mut should_reload = refresh_flag.swap(false, Ordering::SeqCst);
-
-    if !should_reload {
-        let now = std::time::Instant::now();
-        if now.duration_since(*last_mtime_check).as_secs() >= 15 {
-            *last_mtime_check = now;
-            if let Ok(meta) = std::fs::metadata(progress_path)
-                && let Ok(mtime) = meta.modified()
-                && last_progress_mtime.as_ref() != Some(&mtime)
-            {
-                *last_progress_mtime = Some(mtime);
-                should_reload = true;
-            }
-        }
+    let now = std::time::Instant::now();
+    if now.duration_since(*last_mtime_check).as_secs() < 15 {
+        return None;
     }
-
-    if should_reload {
-        load_progress_auto(progress_path).ok()
-    } else {
-        None
+    *last_mtime_check = now;
+    if let Ok(meta) = std::fs::metadata(progress_path)
+        && let Ok(mtime) = meta.modified()
+        && last_progress_mtime.as_ref() != Some(&mtime)
+    {
+        *last_progress_mtime = Some(mtime);
+        return load_progress_auto(progress_path).ok();
     }
+    None
 }
 
 /// Adaptive iterations: re-read progress and adjust min/max + task progress.
@@ -339,96 +238,64 @@ fn update_adaptive_iterations(
         state_manager.set_max_iterations(new_min + 5);
 
         let tp = build_task_progress(&summary);
-        let mut fmt = shared.formatter.lock().expect("formatter: mutex poisoned");
-        fmt.set_min_iterations(state_manager.min_iterations());
-        fmt.set_max_iterations(new_min + 5);
-        fmt.set_task_progress(Some(tp));
-        fmt.record_iteration_end();
+        let mut app = shared.run_app.lock().expect("run_app: mutex poisoned");
+        app.output_formatter
+            .set_min_iterations(state_manager.min_iterations());
+        app.output_formatter.set_max_iterations(new_min + 5);
+        app.output_formatter.set_task_progress(Some(tp));
+        app.output_formatter.record_iteration_end();
     }
 }
 
-/// Check for completion promise and handle it. Returns Ok(true) if completed.
+/// Check for completion promise and handle it. Returns true if completed.
 fn check_promise(
     last_message: &Option<String>,
     shared: &SharedState,
     state_manager: &StateManager,
-) -> Result<bool> {
+) -> bool {
     let text = match last_message {
         Some(t) => t,
-        None => return Ok(false),
+        None => return false,
     };
     if !find_promise(text, state_manager.completion_promise()) {
-        return Ok(false);
+        return false;
     }
     if state_manager.can_accept_promise() {
-        let mut term = shared
-            .status_terminal
-            .lock()
-            .expect("status_terminal: mutex poisoned");
-        term.cleanup()?;
-        let lines = shared
-            .formatter
-            .lock()
-            .expect("formatter: mutex poisoned")
-            .format_stats(
-                state_manager.iteration(),
-                true,
-                state_manager.completion_promise(),
-            );
-        term.print_lines(&lines)?;
-        return Ok(true);
+        let mut app = shared.run_app.lock().expect("run_app: mutex poisoned");
+        let lines = app.output_formatter.format_stats(
+            state_manager.iteration(),
+            true,
+            state_manager.completion_promise(),
+        );
+        app.push_lines(lines);
+        return true;
     }
     // Promise found but min iterations not reached
     let msg = format!(
-        "\n[Promise found but ignoring - need {} more iteration(s) to reach minimum of {}]",
+        "[Promise found but ignoring - need {} more iteration(s) to reach minimum of {}]",
         state_manager.min_iterations() - state_manager.iteration(),
         state_manager.min_iterations()
     );
-    shared
-        .status_terminal
-        .lock()
-        .expect("status_terminal: mutex poisoned")
-        .print_line(&msg)?;
-    Ok(false)
+    let mut app = shared.run_app.lock().expect("run_app: mutex poisoned");
+    app.push_lines(vec![ratatui::text::Line::raw(msg)]);
+    false
 }
 
-/// Handle max iterations reached: cleanup and return error.
-fn handle_max_iterations(shared: &SharedState, state_manager: &StateManager) -> Result<()> {
-    let mut term = shared
-        .status_terminal
-        .lock()
-        .expect("status_terminal: mutex poisoned");
-    term.cleanup()?;
-    let lines = shared
-        .formatter
-        .lock()
-        .expect("formatter: mutex poisoned")
-        .format_stats(
-            state_manager.iteration(),
-            false,
-            state_manager.completion_promise(),
-        );
-    term.print_lines(&lines)?;
-    Ok(())
+/// Handle max iterations reached: push stats to RunApp.
+fn handle_max_iterations(shared: &SharedState, state_manager: &StateManager) {
+    let mut app = shared.run_app.lock().expect("run_app: mutex poisoned");
+    let lines = app.output_formatter.format_stats(
+        state_manager.iteration(),
+        false,
+        state_manager.completion_promise(),
+    );
+    app.push_lines(lines);
 }
 
 /// Initialize all shared state needed for the run loop.
-fn setup_shared_state(config: &Config, shutdown: &Arc<AtomicBool>) -> Result<SharedState> {
-    let version_checker = crate::updater::VersionChecker::new();
-    let update_info = version_checker.update_info();
-    let update_state = version_checker.update_state();
-    version_checker.spawn_checker(shutdown.clone());
-
-    let formatter = setup_formatter(config);
-    Ok(SharedState {
-        formatter,
-        status_terminal: setup_terminal(config)?,
-        update_info,
-        update_state,
-        resize_flag: Arc::new(AtomicBool::new(false)),
-        update_trigger: Arc::new(AtomicBool::new(false)),
-        refresh_flag: Arc::new(AtomicBool::new(false)),
-    })
+fn setup_shared_state(config: &Config, _shutdown: &Arc<AtomicBool>) -> SharedState {
+    let run_app = setup_run_app(config);
+    SharedState { run_app }
 }
 
 /// Run a single Claude iteration with event and idle callbacks.
@@ -461,10 +328,31 @@ async fn run_iteration(
         .await
 }
 
-/// Handle shutdown: save state, cleanup terminal.
+/// Handle shutdown: save state, show interrupted stats.
 async fn handle_shutdown(shared: &SharedState, state_manager: &mut StateManager) -> Result<()> {
     state_manager.save().await?;
-    cleanup_interrupted(shared, state_manager)
+    cleanup_interrupted(shared, state_manager);
+    Ok(())
+}
+
+/// Print final session summary to stdout after TUI cleanup.
+///
+/// IMPORTANT: Must be called AFTER tui_handle.await completes,
+/// so that LeaveAlternateScreen has already restored normal terminal.
+/// Otherwise println!() output goes to alternate screen and is lost.
+fn print_summary_and_exit(
+    shared: &SharedState,
+    state_manager: &StateManager,
+    result: SessionResult,
+) {
+    let app = shared.run_app.lock().expect("run_app: mutex poisoned");
+    let promise = state_manager.completion_promise();
+    print_final_summary(
+        &app.output_formatter,
+        state_manager.iteration(),
+        result,
+        promise,
+    );
 }
 
 pub async fn execute(args: RunArgs) -> Result<()> {
@@ -473,41 +361,57 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     setup_signals(&shutdown);
 
-    let shared = setup_shared_state(&config, &shutdown)?;
-    let mut last_progress_mtime = init_progress(&config, &shared.formatter);
+    let shared = setup_shared_state(&config, &shutdown);
+    let mut last_progress_mtime = init_progress(&config, &shared.run_app);
     let mut last_mtime_check = std::time::Instant::now();
 
-    let input_thread = InputThread::spawn(
-        shutdown.clone(),
-        shared.resize_flag.clone(),
-        shared.update_state.clone(),
-        shared.update_trigger.clone(),
-        shared.refresh_flag.clone(),
-    );
+    // Uruchom fullscreen TUI w tle — run_shared() lockuje Mutex krótkotrwale,
+    // pozwalając runner callbackom pushować do ring buffera między renderami.
+    // Współdzielona flaga shutdown: SIGINT przerywa zarówno TUI jak i runner.
+    let shutdown_tui = shutdown.clone();
+    let run_app_clone = shared.run_app.clone();
+    let tui_handle = tokio::task::spawn_blocking(move || {
+        let mut app = crate::tui::App::new(std::time::Duration::from_millis(100))
+            .expect("Failed to initialize TUI")
+            .with_shutdown(shutdown_tui.clone());
+
+        let result = app.run_shared(run_app_clone);
+
+        // Gdy TUI kończy (q/Ctrl+C), ustaw shutdown
+        shutdown_tui.store(true, Ordering::SeqCst);
+        result
+    });
 
     state_manager.save().await?;
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
             handle_shutdown(&shared, &mut state_manager).await?;
-            drop(input_thread);
+            let _ = tui_handle.await;
+            print_summary_and_exit(&shared, &state_manager, SessionResult::Interrupted);
             return Err(RalphError::Interrupted);
         }
 
         if state_manager.is_max_reached() {
-            handle_max_iterations(&shared, &state_manager)?;
+            handle_max_iterations(&shared, &state_manager);
             state_manager.cleanup().await?;
-            drop(input_thread);
+            shutdown.store(true, Ordering::SeqCst);
+            let _ = tui_handle.await;
+            print_summary_and_exit(&shared, &state_manager, SessionResult::MaxIterations);
             return Err(RalphError::MaxIterations(state_manager.iteration()));
         }
 
         state_manager.increment_iteration().await?;
         {
-            let mut fmt = shared.formatter.lock().expect("formatter: mutex poisoned");
-            fmt.set_iteration(state_manager.iteration());
-            fmt.start_iteration();
+            let mut app = shared.run_app.lock().expect("run_app: mutex poisoned");
+            app.output_formatter
+                .set_iteration(state_manager.iteration());
+            app.output_formatter.start_iteration();
+            app.header_data.iteration = Some(state_manager.iteration());
+            app.header_data.max_iterations = Some(state_manager.max_iterations());
+            app.header_data.is_running = true;
         }
-        print_iteration_header(&shared)?;
+        print_iteration_header(&shared);
 
         let runner = build_runner(&config, &state_manager);
         if shutdown.load(Ordering::SeqCst) {
@@ -528,24 +432,35 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             Ok(msg) => msg,
             Err(RalphError::Interrupted) => {
                 handle_shutdown(&shared, &mut state_manager).await?;
-                drop(input_thread);
+                let _ = tui_handle.await;
+                print_summary_and_exit(&shared, &state_manager, SessionResult::Interrupted);
                 return Err(RalphError::Interrupted);
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // Cleanup TUI przed propagacją błędu
+                shutdown.store(true, Ordering::SeqCst);
+                let _ = tui_handle.await;
+                return Err(e);
+            }
         };
 
         update_adaptive_iterations(&config, &mut state_manager, &shared);
-        shared.update_status_bar()?;
+        shared.update_status();
 
-        if check_promise(&last_message, &shared, &state_manager)? {
+        if check_promise(&last_message, &shared, &state_manager) {
             state_manager.cleanup().await?;
-            input_thread.stop();
+            // Pozwól TUI pokazać stats przez 2s przed zamknięciem
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            shutdown.store(true, Ordering::SeqCst);
+            let _ = tui_handle.await;
+            print_summary_and_exit(&shared, &state_manager, SessionResult::PromiseFound);
             return Ok(());
         }
 
         if shutdown.load(Ordering::SeqCst) {
             handle_shutdown(&shared, &mut state_manager).await?;
-            drop(input_thread);
+            let _ = tui_handle.await;
+            print_summary_and_exit(&shared, &state_manager, SessionResult::Interrupted);
             return Err(RalphError::Interrupted);
         }
     }
@@ -726,5 +641,64 @@ tasks:
 
         let result = load_progress_auto(&path);
         assert!(result.is_err(), "Should fail for invalid YAML");
+    }
+
+    // ── check_progress_reload tests ──
+
+    /// Test: brak pliku progress — zwraca None
+    #[test]
+    fn test_check_progress_reload_no_file() {
+        let mut mtime = None;
+        let mut last_check = std::time::Instant::now() - std::time::Duration::from_secs(20);
+
+        let result = check_progress_reload(&None, &mut mtime, &mut last_check);
+        assert!(result.is_none());
+    }
+
+    /// Test: plik nie zmieniony — zwraca None
+    #[test]
+    fn test_check_progress_reload_not_modified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("tasks.yml");
+        create_test_tasks_file(&path).unwrap();
+
+        let initial_mtime = std::fs::metadata(&path).unwrap().modified().ok();
+        let mut mtime = initial_mtime;
+        let mut last_check = std::time::Instant::now() - std::time::Duration::from_secs(20);
+
+        let result = check_progress_reload(&Some(path), &mut mtime, &mut last_check);
+        // mtime nie zmienione → brak reload
+        assert!(result.is_none());
+    }
+
+    /// Test: check w ciągu 15s — nie sprawdza mtime
+    #[test]
+    fn test_check_progress_reload_too_soon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("tasks.yml");
+        create_test_tasks_file(&path).unwrap();
+
+        let mut mtime = None; // Pierwszy check — mtime niezainicjowane
+        let mut last_check = std::time::Instant::now(); // Właśnie sprawdzony
+
+        let result = check_progress_reload(&Some(path), &mut mtime, &mut last_check);
+        // Za wcześnie na sprawdzenie (< 15s)
+        assert!(result.is_none());
+    }
+
+    /// Test: pierwszy check po 15s — ładuje progress
+    #[test]
+    fn test_check_progress_reload_first_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("tasks.yml");
+        create_test_tasks_file(&path).unwrap();
+
+        let mut mtime = None; // Brak poprzedniego mtime
+        let mut last_check = std::time::Instant::now() - std::time::Duration::from_secs(20);
+
+        let result = check_progress_reload(&Some(path), &mut mtime, &mut last_check);
+        // Pierwszy load — mtime zmienione z None → Some
+        assert!(result.is_some());
+        assert!(mtime.is_some());
     }
 }

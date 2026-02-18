@@ -1,0 +1,5 @@
+---
+source: src/tui/widgets/task_sidebar.rs
+expression: snap(&buffer)
+---
+

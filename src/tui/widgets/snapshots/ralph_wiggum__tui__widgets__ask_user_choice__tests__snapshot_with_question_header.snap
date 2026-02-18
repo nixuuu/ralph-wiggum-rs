@@ -1,0 +1,9 @@
+---
+source: src/tui/widgets/ask_user_choice.rs
+expression: snapshot
+---
+Choose authentication method
+
+● Option A
+  Description A
+○ Option B

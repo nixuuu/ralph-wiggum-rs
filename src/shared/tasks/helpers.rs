@@ -1,21 +1,16 @@
 use crate::shared::tasks::LeafTask;
 
-/// Resolve short model aliases to full model IDs.
-pub fn resolve_model_alias(alias: &str) -> String {
-    match alias {
-        "opus" => "claude-opus-4-6".to_string(),
-        "sonnet" => "claude-sonnet-4-5-20250929".to_string(),
-        "haiku" => "claude-haiku-4-5-20251001".to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// Reverse-map full model IDs to human-friendly aliases.
-pub fn reverse_model_alias(full_id: &str) -> String {
-    match full_id {
+/// Shorten a model identifier for display in TUI panels.
+///
+/// Known full IDs map to their canonical short names.
+/// Unknown `claude-*` IDs have the `claude-` prefix stripped.
+/// Short names and other strings pass through unchanged.
+pub fn shorten_model_name(model: &str) -> String {
+    match model {
         "claude-opus-4-6" => "opus".to_string(),
         "claude-sonnet-4-5-20250929" => "sonnet".to_string(),
         "claude-haiku-4-5-20251001" => "haiku".to_string(),
+        other if other.starts_with("claude-") => other["claude-".len()..].to_string(),
         other => other.to_string(),
     }
 }
@@ -70,23 +65,23 @@ mod tests {
     use crate::shared::progress::TaskStatus;
 
     #[test]
-    fn test_resolve_model_alias() {
-        assert_eq!(resolve_model_alias("opus"), "claude-opus-4-6");
-        assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-4-5-20250929");
-        assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5-20251001");
-        assert_eq!(resolve_model_alias("claude-opus-4-6"), "claude-opus-4-6");
-        assert_eq!(resolve_model_alias("custom-model"), "custom-model");
-        assert_eq!(resolve_model_alias(""), "");
-    }
-
-    #[test]
-    fn test_reverse_model_alias() {
-        assert_eq!(reverse_model_alias("claude-opus-4-6"), "opus");
-        assert_eq!(reverse_model_alias("claude-sonnet-4-5-20250929"), "sonnet");
-        assert_eq!(reverse_model_alias("claude-haiku-4-5-20251001"), "haiku");
-        assert_eq!(reverse_model_alias("opus"), "opus");
-        assert_eq!(reverse_model_alias("custom-model"), "custom-model");
-        assert_eq!(reverse_model_alias(""), "");
+    fn test_shorten_model_name() {
+        // Known full IDs -> short names
+        assert_eq!(shorten_model_name("claude-opus-4-6"), "opus");
+        assert_eq!(shorten_model_name("claude-sonnet-4-5-20250929"), "sonnet");
+        assert_eq!(shorten_model_name("claude-haiku-4-5-20251001"), "haiku");
+        // Short names pass through
+        assert_eq!(shorten_model_name("opus"), "opus");
+        assert_eq!(shorten_model_name("sonnet"), "sonnet");
+        assert_eq!(shorten_model_name("haiku"), "haiku");
+        // Unknown claude- prefix gets stripped
+        assert_eq!(
+            shorten_model_name("claude-opus-5-20260101"),
+            "opus-5-20260101"
+        );
+        // Custom model names pass through
+        assert_eq!(shorten_model_name("custom-model"), "custom-model");
+        assert_eq!(shorten_model_name(""), "");
     }
 
     #[test]

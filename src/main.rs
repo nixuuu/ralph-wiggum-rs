@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod shared;
 mod templates;
+mod tui;
 mod updater;
 
 #[cfg(test)]

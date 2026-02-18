@@ -1,0 +1,11 @@
+---
+source: src/tui/widgets/task_preview.rs
+expression: snapshot
+---
+ Task List (p to close, ↑↓ to scroll)
+
+ 1 Root Project
+   1.1 Module A
+     1.1.1 Feature X
+       1.1.1.1 Component Y
+         ● 1.1.1.1.1: Implementation detail [core]

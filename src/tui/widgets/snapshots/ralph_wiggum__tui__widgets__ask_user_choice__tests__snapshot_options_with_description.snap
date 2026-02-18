@@ -1,0 +1,10 @@
+---
+source: src/tui/widgets/ask_user_choice.rs
+expression: snapshot
+---
+○ JWT
+  Token-based authentication
+● Session
+  Cookie-based authentication
+○ OAuth
+  Third-party authentication

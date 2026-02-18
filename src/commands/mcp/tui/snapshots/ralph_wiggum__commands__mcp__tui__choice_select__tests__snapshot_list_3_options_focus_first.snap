@@ -1,8 +1,0 @@
----
-source: src/commands/mcp/tui/choice_select.rs
-expression: snapshot
----
-> Option Alpha
-  Option Beta
-  Option Gamma
-  Other  type your answer

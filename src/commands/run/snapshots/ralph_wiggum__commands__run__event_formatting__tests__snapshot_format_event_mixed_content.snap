@@ -1,0 +1,11 @@
+---
+source: src/commands/run/event_formatting.rs
+expression: output
+---
+Line 0: [Rgb(137, 180, 250)]▍[Rgb(137, 180, 250),BOLD]Claude
+Line 1: [Rgb(137, 180, 250)]▍[Reset]Let me read the file first.
+Line 2: [empty]
+Line 3: [Rgb(108, 112, 134)]▍[BOLD]Read: /tmp/test.rs
+Line 4: [empty]
+Line 5: [Rgb(137, 180, 250)]▍[Rgb(137, 180, 250),BOLD]Claude
+Line 6: [Rgb(137, 180, 250)]▍[Reset]Now I'll analyze the contents.

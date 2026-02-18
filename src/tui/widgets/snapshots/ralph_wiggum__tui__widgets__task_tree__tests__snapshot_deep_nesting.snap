@@ -1,0 +1,8 @@
+---
+source: src/tui/widgets/task_tree.rs
+expression: snap(&buffer)
+---
+▾ 1 Root [core]
+  ▾ 1.1 Child [core]
+    ✓ 1.1.1 Grandchild [core]
+    ○ 1.1.2 Grandchild 2 [core]                     → 1.1.1

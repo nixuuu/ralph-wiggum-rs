@@ -14,7 +14,7 @@ use super::orchestrator_events::conflict_resolution_end_separator;
 use crate::shared::error::{RalphError, Result};
 use crate::shared::markdown::render_markdown;
 use crate::shared::progress::TaskStatus;
-use crate::shared::tasks::{TasksFile, resolve_model_alias};
+use crate::shared::tasks::TasksFile;
 
 use super::assignment::get_mtime;
 use super::git_helpers::git_command;
@@ -229,10 +229,9 @@ impl Orchestrator {
                     lines: vec!["⚡ Starting AI conflict resolution...".to_string()],
                 }));
 
-                let resolved_model = resolve_model_alias(&conflict_model);
                 let mut runner = crate::commands::run::runner::ClaudeRunner::oneshot(
                     prompt,
-                    Some(resolved_model),
+                    Some(conflict_model.clone()),
                     Some(root.clone()),
                 );
 
@@ -481,7 +480,7 @@ impl Orchestrator {
             let msg = MultiplexedOutput::format_orchestrator_line(&format!(
                 "Warning: tasks.yml update failed for {task_id}: {e}"
             ));
-            tui.dashboard.push_log_line(&msg);
+            tui.app.push_log_line(&msg);
             return None;
         }
         get_mtime(&self.tasks_path)

@@ -1,9 +1,0 @@
----
-source: src/commands/task/orchestrate/panels.rs
-expression: snapshot
----
-╭ W2 [11.1] ─────────────────────────────────────╮
-│◎ review+fix                                    │
-│                                                │
-│                                                │
-╰ $0.0000 │ ↓0 ↑0 ───────────────────────────────╯

@@ -1,0 +1,5 @@
+---
+source: src/commands/run/event_formatting.rs
+expression: output
+---
+Line 0: [Rgb(108, 112, 134)]▍[BOLD]Bash: Run tests: cargo test --all

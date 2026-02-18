@@ -1,0 +1,9 @@
+---
+source: src/tui/widgets/task_preview.rs
+expression: snapshot
+---
+ Task List (p to close, ↑↓ to scroll)
+
+ ✓ 1: First task [api]
+ ● 2: Second task [ui]
+ ○ 3: Third task [tests]

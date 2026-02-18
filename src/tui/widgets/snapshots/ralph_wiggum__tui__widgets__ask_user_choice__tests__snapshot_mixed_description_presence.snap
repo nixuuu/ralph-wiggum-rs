@@ -1,0 +1,9 @@
+---
+source: src/tui/widgets/ask_user_choice.rs
+expression: snapshot
+---
+○ With desc
+  Has description
+○ No desc
+● Also with desc
+  Another description

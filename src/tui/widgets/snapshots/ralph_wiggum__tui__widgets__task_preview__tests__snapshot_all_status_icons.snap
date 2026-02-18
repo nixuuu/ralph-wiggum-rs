@@ -1,0 +1,10 @@
+---
+source: src/tui/widgets/task_preview.rs
+expression: snapshot
+---
+ Task List (p to close, ↑↓ to scroll)
+
+ ✓ 1: Completed task [api]
+ ● 2: In progress task [ui]
+ ○ 3: Pending task [tests]
+ ✗ 4: Blocked task [infra]

@@ -1,0 +1,16 @@
+---
+source: src/tui/widgets/text_input_overlay.rs
+expression: snapshot
+---
+
+
+               Message to Worker 42
+
+               |
+
+
+
+
+
+
+               Ctrl+Enter=send | Esc=cancel

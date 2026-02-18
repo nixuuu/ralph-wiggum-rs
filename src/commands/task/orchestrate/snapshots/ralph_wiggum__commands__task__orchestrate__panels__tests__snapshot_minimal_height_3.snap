@@ -1,7 +1,0 @@
----
-source: src/commands/task/orchestrate/panels.rs
-expression: snapshot
----
-╭ W1 [---] ──────────────────────────────────────╮
-│○ idle                                          │
-╰ $0.0000 │ ↓0 ↑0 ───────────────────────────────╯

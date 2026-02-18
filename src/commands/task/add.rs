@@ -2,12 +2,16 @@ use crossterm::style::Stylize;
 
 use super::args::AddArgs;
 use super::input::resolve_input;
-use crate::commands::run::{DANGEROUS_TOOLS, RunOnceOptions, run_once};
+use super::task_runner::{TaskRunOptions, run_task_command};
 use crate::shared::error::Result;
 use crate::shared::file_config::{FileConfig, VerifyProfile, format_profiles_info};
 use crate::shared::tasks::TasksFile;
 use crate::templates;
 
+/// Execute task add command.
+///
+/// Delegates to run_once() with MCP server for task mutations.
+/// TODO(5.4): Integrate fullscreen TUI via TaskCommandApp with inline ask_user widgets.
 pub async fn execute(args: AddArgs, file_config: &FileConfig) -> Result<()> {
     let tasks_path = &file_config.task.tasks_file;
 
@@ -44,17 +48,13 @@ pub async fn execute(args: AddArgs, file_config: &FileConfig) -> Result<()> {
         .or_else(|| file_config.task.default_model.clone());
 
     // Run Claude with readonly built-in tools + MCP server for task mutations.
-    // Block AskUserQuestion to enforce MCP ask_user flow.
-    run_once(RunOnceOptions {
+    // Blocks dangerous tools and AskUserQuestion via run_task_command().
+    run_task_command(TaskRunOptions {
         prompt,
+        command_name: "task add".to_string(),
         model,
-        output_dir: None,
         use_nerd_font: file_config.ui.nerd_font,
-        allowed_tools: None,
-        disallowed_tools: Some(format!("{},AskUserQuestion", DANGEROUS_TOOLS)),
-        mcp_config: None,
-        question_rx: None,
-        tasks_path: Some(tasks_path.clone()),
+        tasks_path: tasks_path.clone(),
     })
     .await?;
 
@@ -133,10 +133,7 @@ mod tests {
 
         // Verify empty TasksFile z default model
         assert_eq!(before.tasks.len(), 0);
-        assert_eq!(
-            before.default_model.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
-        );
+        assert_eq!(before.default_model.as_deref(), Some("sonnet"));
 
         // Verify plik został stworzony na dysku
         assert!(tasks_path.exists());

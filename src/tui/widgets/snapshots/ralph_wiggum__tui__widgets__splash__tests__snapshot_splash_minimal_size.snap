@@ -1,0 +1,9 @@
+---
+source: src/tui/widgets/splash.rs
+expression: snap(&buffer)
+---
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿
+⠀⠀⠀⠀⠀⣠⣴⣿⡿⢋
+⠀⠀⠀⠀⣰⠛⣽⠟⣡⡾

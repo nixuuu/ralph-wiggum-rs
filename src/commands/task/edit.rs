@@ -2,7 +2,7 @@ use crossterm::style::Stylize;
 
 use super::args::EditArgs;
 use super::input::resolve_input;
-use crate::commands::run::{DANGEROUS_TOOLS, RunOnceOptions, run_once};
+use super::task_runner::{TaskRunOptions, run_task_command};
 use crate::shared::error::Result;
 use crate::shared::file_config::{FileConfig, format_profiles_info};
 use crate::shared::tasks::TasksFile;
@@ -39,18 +39,18 @@ pub async fn execute(args: EditArgs, file_config: &FileConfig) -> Result<()> {
         .model
         .or_else(|| file_config.task.default_model.clone());
 
-    // Run Claude with readonly built-in tools + MCP server for task mutations.
-    // Block AskUserQuestion to enforce MCP ask_user flow.
-    run_once(RunOnceOptions {
+    // Run Claude with fullscreen TUI output + inline ask_user widgets.
+    // Uses run_task_command() which:
+    // - Blocks dangerous tools (Write, Edit, Bash, etc.)
+    // - Blocks AskUserQuestion to enforce MCP ask_user flow
+    // - Auto-starts MCP server with tasks_path
+    // - Renders ask_user questions as inline TUI widgets
+    run_task_command(TaskRunOptions {
         prompt,
+        command_name: "task edit".to_string(),
         model,
-        output_dir: None,
         use_nerd_font: file_config.ui.nerd_font,
-        allowed_tools: None,
-        disallowed_tools: Some(format!("{},AskUserQuestion", DANGEROUS_TOOLS)),
-        mcp_config: None,
-        question_rx: None,
-        tasks_path: Some(tasks_path.clone()),
+        tasks_path: tasks_path.clone(),
     })
     .await?;
 

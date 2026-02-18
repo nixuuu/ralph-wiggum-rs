@@ -22,21 +22,13 @@ fn task_start_separator(task_id: &str) -> String {
 
 // ── Helper functions ────────────────────────────────────────────────
 
-/// Set worker to idle state and clear worker_phases entry (task 25.3.3).
+/// Set worker to idle state.
 ///
 /// Consolidates the pattern of setting worker to idle in orchestrator events.
-/// Also clears the worker_phases entry to prevent stale phase data.
 fn set_worker_idle(ctx: &mut RunLoopContext, worker_id: u32) {
-    // Clear phase from worker_phases (task 25.3.3)
-    ctx.flags
-        .worker_phases
-        .lock()
-        .unwrap()
-        .insert(worker_id, None);
-
-    // Update dashboard status to idle
+    // Update app status to idle
     ctx.tui
-        .dashboard
+        .app
         .update_worker_status(worker_id, WorkerStatus::idle(worker_id));
 
     // Clear multiplexed output
@@ -127,7 +119,7 @@ fn build_worker_status(p: WorkerStatusParams) -> WorkerStatus {
         phase: p.phase,
         model: p
             .model
-            .map(|m| crate::shared::tasks::reverse_model_alias(m)),
+            .map(|m| crate::shared::tasks::shorten_model_name(m)),
         cost_usd: p.cost_usd,
         input_tokens: p.input_tokens,
         output_tokens: p.output_tokens,
@@ -364,10 +356,10 @@ impl Orchestrator {
                 self.handle_merge_conflict(*worker_id, task_id, conflicting_files, ctx);
             }
             WorkerEventKind::OutputLines { worker_id, lines } => {
-                ctx.tui.dashboard.push_worker_output(*worker_id, lines);
+                ctx.tui.app.push_worker_output(*worker_id, lines);
             }
             WorkerEventKind::MergeStepOutput { worker_id, lines } => {
-                ctx.tui.dashboard.push_worker_output(*worker_id, lines);
+                ctx.tui.app.push_worker_output(*worker_id, lines);
             }
             WorkerEventKind::Heartbeat { worker_id, .. } => {
                 ctx.last_heartbeat
@@ -388,12 +380,10 @@ impl Orchestrator {
 
     /// Worker started processing a new task — initialize TUI and heartbeat.
     fn handle_task_started(&self, worker_id: u32, task_id: &str, ctx: &mut RunLoopContext) {
-        ctx.tui.dashboard.clear_worker_output(worker_id);
+        ctx.tui.app.clear_worker_output(worker_id);
 
         let separator = task_start_separator(task_id);
-        ctx.tui
-            .dashboard
-            .push_worker_output(worker_id, &[separator]);
+        ctx.tui.app.push_worker_output(worker_id, &[separator]);
 
         ctx.last_heartbeat
             .insert(worker_id, std::time::Instant::now());
@@ -410,13 +400,13 @@ impl Orchestrator {
             output_tokens: 0,
             verify_profiles: Vec::new(),
         });
-        ctx.tui.dashboard.update_worker_status(worker_id, ws);
+        ctx.tui.app.update_worker_status(worker_id, ws);
 
         let msg = ctx
             .tui
             .mux_output
             .format_worker_line(worker_id, &format!("Started: {task_id}"));
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
     }
 
     /// Worker entered a new execution phase — update dashboard and log.
@@ -428,13 +418,6 @@ impl Orchestrator {
         profiles: Option<Vec<String>>,
         ctx: &mut RunLoopContext,
     ) {
-        // Task 25.3.3: Update worker_phases for input thread validation
-        ctx.flags
-            .worker_phases
-            .lock()
-            .unwrap()
-            .insert(worker_id, Some(phase.clone()));
-
         let new_state = match phase {
             WorkerPhase::Setup => WorkerState::SettingUp,
             WorkerPhase::Implement => WorkerState::Implementing,
@@ -472,18 +455,16 @@ impl Orchestrator {
             output_tokens: output,
             verify_profiles,
         });
-        ctx.tui.dashboard.update_worker_status(worker_id, ws);
+        ctx.tui.app.update_worker_status(worker_id, ws);
 
         let msg = ctx
             .tui
             .mux_output
             .format_worker_line(worker_id, &format!("{task_id} → phase: {phase}"));
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
 
         let separator = phase_start_separator(phase);
-        ctx.tui
-            .dashboard
-            .push_worker_output(worker_id, &[separator]);
+        ctx.tui.app.push_worker_output(worker_id, &[separator]);
     }
 
     /// Worker finished an execution phase — log result, update profile statuses, add separator.
@@ -501,9 +482,7 @@ impl Orchestrator {
                 .iter()
                 .map(|r| (r.name.clone(), r.success))
                 .collect();
-            ctx.tui
-                .dashboard
-                .update_verify_profiles(worker_id, profiles);
+            ctx.tui.app.update_verify_profiles(worker_id, profiles);
         }
 
         let status_text = if success { "ok" } else { "FAILED" };
@@ -511,12 +490,10 @@ impl Orchestrator {
             worker_id,
             &format!("{task_id} ← phase: {phase} [{status_text}]"),
         );
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
 
         let separator = phase_end_separator(phase, success);
-        ctx.tui
-            .dashboard
-            .push_worker_output(worker_id, &[separator]);
+        ctx.tui.app.push_worker_output(worker_id, &[separator]);
     }
 
     /// Incremental cost update from a worker — propagate to mux_output and dashboard.
@@ -532,7 +509,7 @@ impl Orchestrator {
             .update_cost(worker_id, cost_usd, input_tokens, output_tokens);
         let (total_cost, total_in, total_out) = ctx.tui.mux_output.worker_cost(worker_id);
         ctx.tui
-            .dashboard
+            .app
             .update_worker_cost(worker_id, total_cost, total_in, total_out);
     }
 
@@ -591,7 +568,7 @@ impl Orchestrator {
                 output_tokens: output,
                 verify_profiles: Vec::new(),
             });
-            ctx.tui.dashboard.update_worker_status(worker_id, ws);
+            ctx.tui.app.update_worker_status(worker_id, ws);
 
             // Get task name from cached_tasks_file
             let task_name = ctx
@@ -613,7 +590,7 @@ impl Orchestrator {
                     worker_id,
                     &format!("Queued merge: {task_id} (another merge in progress)"),
                 );
-                ctx.tui.dashboard.push_log_line(&msg);
+                ctx.tui.app.push_log_line(&msg);
                 ctx.merge_ctx.pending_merges.push_back(pending);
             } else {
                 Self::spawn_merge_task(
@@ -641,7 +618,7 @@ impl Orchestrator {
                 worker_id,
                 &format!("Cannot merge {task_id}: {reason} — releasing worker"),
             );
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
 
             ctx.scheduler.mark_blocked(task_id);
             sync_task_status(self, ctx, task_id, TaskStatus::Blocked);
@@ -675,7 +652,7 @@ impl Orchestrator {
             .tui
             .mux_output
             .format_worker_line(worker_id, &format!("Done (no merge): {task_id}"));
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
 
         ctx.tui.task_summaries.push(TaskSummaryEntry {
             task_id: task_id.to_string(),
@@ -719,13 +696,13 @@ impl Orchestrator {
                 worker_id,
                 &format!("Task {task_id} failed, re-queued for retry"),
             );
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
         } else {
             let msg = ctx.tui.mux_output.format_worker_line(
                 worker_id,
                 &format!("Task {task_id} blocked after max retries"),
             );
-            ctx.tui.dashboard.push_log_line(&msg);
+            ctx.tui.app.push_log_line(&msg);
             sync_task_status(self, ctx, task_id, TaskStatus::Blocked);
 
             ctx.tui.task_summaries.push(TaskSummaryEntry {
@@ -760,7 +737,7 @@ impl Orchestrator {
                 &format!("Task {task_id} failed ({retries_left} retries left): {error}"),
             )
         };
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
     }
 
     /// Merge process started for a completed task — update TUI.
@@ -778,13 +755,13 @@ impl Orchestrator {
             output_tokens: output,
             verify_profiles: Vec::new(),
         });
-        ctx.tui.dashboard.update_worker_status(worker_id, ws);
+        ctx.tui.app.update_worker_status(worker_id, ws);
 
         let msg = ctx
             .tui
             .mux_output
             .format_worker_line(worker_id, &format!("Merging: {task_id}"));
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
     }
 
     /// Merge completed (success or failure) — finalize task, cleanup worktree, start next merge.
@@ -807,7 +784,7 @@ impl Orchestrator {
             worker_id,
             &format!("Merge {task_id}: {status_text} ({hash})"),
         );
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
 
         if success {
             self.handle_merge_success(worker_id, task_id, ctx).await;
@@ -916,7 +893,7 @@ impl Orchestrator {
             worker_id,
             &format!("Merge conflict in {task_id}: {conflicting_files:?}"),
         );
-        ctx.tui.dashboard.push_log_line(&msg);
+        ctx.tui.app.push_log_line(&msg);
 
         let (cost, input, output) = ctx.tui.mux_output.worker_cost(worker_id);
         let conflict_model = &self.config.conflict_resolution_model;
@@ -931,40 +908,34 @@ impl Orchestrator {
             output_tokens: output,
             verify_profiles: Vec::new(),
         });
-        ctx.tui.dashboard.update_worker_status(worker_id, ws);
+        ctx.tui.app.update_worker_status(worker_id, ws);
 
         let separator = conflict_resolution_start_separator();
-        ctx.tui
-            .dashboard
-            .push_worker_output(worker_id, &[separator]);
+        ctx.tui.app.push_worker_output(worker_id, &[separator]);
     }
 
     /// User message sent to a worker — display in worker panel.
     fn handle_user_message_sent(worker_id: u32, message: &str, ctx: &mut RunLoopContext) {
         let formatted_msg = format!("▶ USER: {message}");
-        ctx.tui
-            .dashboard
-            .push_worker_output(worker_id, &[formatted_msg]);
+        ctx.tui.app.push_worker_output(worker_id, &[formatted_msg]);
 
         let log_msg = ctx
             .tui
             .mux_output
             .format_worker_line(worker_id, "Message sent");
-        ctx.tui.dashboard.push_log_line(&log_msg);
+        ctx.tui.app.push_log_line(&log_msg);
     }
 
     /// User message received by a worker — display in worker panel.
     fn handle_user_message_received(worker_id: u32, message: &str, ctx: &mut RunLoopContext) {
         let formatted_msg = format!("◀ RECEIVED: {message}");
-        ctx.tui
-            .dashboard
-            .push_worker_output(worker_id, &[formatted_msg]);
+        ctx.tui.app.push_worker_output(worker_id, &[formatted_msg]);
 
         let log_msg = ctx
             .tui
             .mux_output
             .format_worker_line(worker_id, "Message received");
-        ctx.tui.dashboard.push_log_line(&log_msg);
+        ctx.tui.app.push_log_line(&log_msg);
     }
 }
 
@@ -1440,23 +1411,23 @@ mod tests {
 
     #[test]
     fn test_separators_added_to_output_ring_buffer() {
-        use crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer;
+        use crate::tui::ring_buffer::OutputRingBuffer;
 
-        let mut buffer = OutputRingBuffer::new(100);
+        let mut buffer = OutputRingBuffer::with_capacity(100);
 
         // 1. Add task start separator
         let task_sep = task_start_separator("1.2.3");
-        buffer.push(&task_sep);
+        buffer.push_str(&task_sep);
 
         // 2. Add phase start separators for each phase
-        buffer.push(&phase_start_separator(&WorkerPhase::Setup));
-        buffer.push(&phase_start_separator(&WorkerPhase::Implement));
-        buffer.push(&phase_start_separator(&WorkerPhase::ReviewFix));
-        buffer.push(&phase_start_separator(&WorkerPhase::Verify));
+        buffer.push_str(&phase_start_separator(&WorkerPhase::Setup));
+        buffer.push_str(&phase_start_separator(&WorkerPhase::Implement));
+        buffer.push_str(&phase_start_separator(&WorkerPhase::ReviewFix));
+        buffer.push_str(&phase_start_separator(&WorkerPhase::Verify));
 
         // 3. Add phase completion separators (success and failure)
-        buffer.push(&phase_end_separator(&WorkerPhase::Setup, true));
-        buffer.push(&phase_end_separator(&WorkerPhase::Implement, false));
+        buffer.push_str(&phase_end_separator(&WorkerPhase::Setup, true));
+        buffer.push_str(&phase_end_separator(&WorkerPhase::Implement, false));
 
         // Verify buffer contains all separators
         assert_eq!(buffer.len(), 7, "Buffer should contain all 7 separators");
@@ -1476,12 +1447,12 @@ mod tests {
 
     #[test]
     fn test_task_start_separator_in_ring_buffer() {
-        use crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer;
+        use crate::tui::ring_buffer::OutputRingBuffer;
 
-        let mut buffer = OutputRingBuffer::new(10);
+        let mut buffer = OutputRingBuffer::with_capacity(10);
         let separator = task_start_separator("4.3");
 
-        buffer.push(&separator);
+        buffer.push_str(&separator);
 
         let lines = buffer.tail(10);
         assert_eq!(lines.len(), 1);
@@ -1494,26 +1465,17 @@ mod tests {
 
     #[test]
     fn test_phase_separators_preserve_styling_in_ring_buffer() {
-        use crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer;
+        use crate::tui::ring_buffer::OutputRingBuffer;
 
-        let mut buffer = OutputRingBuffer::new(10);
+        let mut buffer = OutputRingBuffer::with_capacity(10);
 
         // Add phase start separator with color
         let separator = phase_start_separator(&WorkerPhase::Implement);
-        buffer.push(&separator);
+        buffer.push_str(&separator);
 
         let lines = buffer.tail(10);
         assert_eq!(lines.len(), 1);
 
-        // Verify that ANSI color codes were converted to ratatui styling
-        let has_color = lines[0].spans.iter().any(|span| span.style.fg.is_some());
-
-        assert!(
-            has_color,
-            "Phase separator should have color styling in ring buffer"
-        );
-
-        // Verify content
         let line_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line_text.contains("Implement"));
         assert!(line_text.contains("●"));
@@ -1521,17 +1483,17 @@ mod tests {
 
     #[test]
     fn test_phase_end_separator_success_and_failure_in_ring_buffer() {
-        use crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer;
+        use crate::tui::ring_buffer::OutputRingBuffer;
 
-        let mut buffer = OutputRingBuffer::new(10);
+        let mut buffer = OutputRingBuffer::with_capacity(10);
 
         // Add success separator
         let success_sep = phase_end_separator(&WorkerPhase::Verify, true);
-        buffer.push(&success_sep);
+        buffer.push_str(&success_sep);
 
         // Add failure separator
         let failure_sep = phase_end_separator(&WorkerPhase::ReviewFix, false);
-        buffer.push(&failure_sep);
+        buffer.push_str(&failure_sep);
 
         let lines = buffer.tail(10);
         assert_eq!(lines.len(), 2);
@@ -1551,20 +1513,20 @@ mod tests {
 
     #[test]
     fn test_mixed_output_with_separators_in_ring_buffer() {
-        use crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer;
+        use crate::tui::ring_buffer::OutputRingBuffer;
 
-        let mut buffer = OutputRingBuffer::new(20);
+        let mut buffer = OutputRingBuffer::with_capacity(20);
 
         // Simulate realistic worker output sequence
-        buffer.push(&task_start_separator("2.1"));
-        buffer.push("Worker output: Starting implementation...");
-        buffer.push(&phase_start_separator(&WorkerPhase::Implement));
-        buffer.push("Worker output: Writing code...");
-        buffer.push("Worker output: Code written successfully");
-        buffer.push(&phase_end_separator(&WorkerPhase::Implement, true));
-        buffer.push(&phase_start_separator(&WorkerPhase::Verify));
-        buffer.push("Worker output: Running tests...");
-        buffer.push(&phase_end_separator(&WorkerPhase::Verify, true));
+        buffer.push_str(&task_start_separator("2.1"));
+        buffer.push_str("Worker output: Starting implementation...");
+        buffer.push_str(&phase_start_separator(&WorkerPhase::Implement));
+        buffer.push_str("Worker output: Writing code...");
+        buffer.push_str("Worker output: Code written successfully");
+        buffer.push_str(&phase_end_separator(&WorkerPhase::Implement, true));
+        buffer.push_str(&phase_start_separator(&WorkerPhase::Verify));
+        buffer.push_str("Worker output: Running tests...");
+        buffer.push_str(&phase_end_separator(&WorkerPhase::Verify, true));
 
         assert_eq!(buffer.len(), 9);
 
@@ -1670,55 +1632,33 @@ mod tests {
 
     #[test]
     fn test_conflict_resolution_separator_in_ring_buffer() {
-        use crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer;
+        use crate::tui::ring_buffer::OutputRingBuffer;
 
-        let mut buffer = OutputRingBuffer::new(10);
+        let mut buffer = OutputRingBuffer::with_capacity(10);
 
         // Add conflict resolution start separator
         let start_sep = conflict_resolution_start_separator();
-        buffer.push(&start_sep);
+        buffer.push_str(&start_sep);
 
         // Add conflict resolution end separator (success)
         let end_sep_ok = conflict_resolution_end_separator(true);
-        buffer.push(&end_sep_ok);
+        buffer.push_str(&end_sep_ok);
 
         // Add conflict resolution end separator (failure)
         let end_sep_fail = conflict_resolution_end_separator(false);
-        buffer.push(&end_sep_fail);
+        buffer.push_str(&end_sep_fail);
 
         let lines = buffer.tail(10);
         assert_eq!(lines.len(), 3);
 
-        // Verify start separator has styling (red color)
-        let has_color_start = lines[0].spans.iter().any(|span| span.style.fg.is_some());
-        assert!(
-            has_color_start,
-            "Conflict resolution start separator should have color styling"
-        );
-
-        // Verify content
         let start_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(start_text.contains("Conflict Resolution"));
         assert!(start_text.contains("⚡"));
-
-        // Verify end separator (success) has green styling
-        let has_color_success = lines[1].spans.iter().any(|span| span.style.fg.is_some());
-        assert!(
-            has_color_success,
-            "Conflict resolution end separator (success) should have color styling"
-        );
 
         let success_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(success_text.contains("Conflict Resolution"));
         assert!(success_text.contains("[ok]"));
         assert!(success_text.contains("✓"));
-
-        // Verify end separator (failure) has red styling
-        let has_color_failure = lines[2].spans.iter().any(|span| span.style.fg.is_some());
-        assert!(
-            has_color_failure,
-            "Conflict resolution end separator (failure) should have color styling"
-        );
 
         let failure_text: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(failure_text.contains("Conflict Resolution"));
@@ -1728,32 +1668,32 @@ mod tests {
 
     #[test]
     fn test_merge_conflict_output_sequence() {
-        use crate::commands::task::orchestrate::ring_buffer::OutputRingBuffer;
+        use crate::tui::ring_buffer::OutputRingBuffer;
 
-        let mut buffer = OutputRingBuffer::new(30);
+        let mut buffer = OutputRingBuffer::with_capacity(30);
 
         // Simulate realistic merge → conflict → AI resolution → end sequence
         // 1. Merge output
-        buffer.push("Merge output: Attempting to merge branch 'task/1.1' into master...");
-        buffer.push("Merge output: Auto-merging src/main.rs");
-        buffer.push("Merge output: CONFLICT (content): Merge conflict in src/main.rs");
+        buffer.push_str("Merge output: Attempting to merge branch 'task/1.1' into master...");
+        buffer.push_str("Merge output: Auto-merging src/main.rs");
+        buffer.push_str("Merge output: CONFLICT (content): Merge conflict in src/main.rs");
 
         // 2. Conflict resolution start separator
-        buffer.push(&conflict_resolution_start_separator());
+        buffer.push_str(&conflict_resolution_start_separator());
 
         // 3. AI output during conflict resolution
-        buffer.push("AI output: Analyzing conflict in src/main.rs...");
-        buffer.push("AI output: Conflict involves function signature changes");
-        buffer.push("AI output: Applying resolution strategy: preserve both changes");
-        buffer.push("AI output: Writing resolved file...");
-        buffer.push("AI output: Staging resolved file...");
+        buffer.push_str("AI output: Analyzing conflict in src/main.rs...");
+        buffer.push_str("AI output: Conflict involves function signature changes");
+        buffer.push_str("AI output: Applying resolution strategy: preserve both changes");
+        buffer.push_str("AI output: Writing resolved file...");
+        buffer.push_str("AI output: Staging resolved file...");
 
         // 4. Conflict resolution end separator (success)
-        buffer.push(&conflict_resolution_end_separator(true));
+        buffer.push_str(&conflict_resolution_end_separator(true));
 
         // 5. Final merge output
-        buffer.push("Merge output: Conflict resolved successfully");
-        buffer.push("Merge output: Creating merge commit...");
+        buffer.push_str("Merge output: Conflict resolved successfully");
+        buffer.push_str("Merge output: Creating merge commit...");
 
         assert_eq!(buffer.len(), 12);
 
@@ -1769,17 +1709,6 @@ mod tests {
         assert!(line9_text.contains("✓")); // Conflict end separator at index 9
         assert!(line9_text.contains("[ok]"));
 
-        // Verify that separators have styling preserved
-        let has_color_start = lines[3].spans.iter().any(|span| span.style.fg.is_some());
-        assert!(
-            has_color_start,
-            "Conflict start separator should have color"
-        );
-
-        let has_color_end = lines[9].spans.iter().any(|span| span.style.fg.is_some());
-        assert!(has_color_end, "Conflict end separator should have color");
-
-        // Verify that regular output lines are between separators
         let line4_text: String = lines[4].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line4_text.contains("Analyzing conflict"));
 

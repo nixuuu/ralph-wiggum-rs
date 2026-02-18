@@ -1,0 +1,5 @@
+---
+source: src/tui/ring_buffer.rs
+expression: snapshot
+---
+Line 5 - only this remains

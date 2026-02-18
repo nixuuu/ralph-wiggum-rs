@@ -1,0 +1,14 @@
+---
+source: src/commands/task/command_app.rs
+expression: snap(&buffer)
+---
+ralph task prd │ model: claude-sonnet-4-5
+Generating PRD...
+Analysis complete.
+
+
+
+
+
+
+Processing │ 45%

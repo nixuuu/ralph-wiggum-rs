@@ -311,6 +311,16 @@ verify_commands = ["npm test", "npm run lint"]
 setup_commands = ["npm install"]
 ```
 
+## Features
+
+- **Iterative execution loop**: Run Claude CLI until a completion promise is found
+- **Task-based workflow**: Generate structured task lists from PRD documents
+- **Parallel orchestration**: Execute multiple tasks simultaneously with Git worktree isolation
+- **Interactive fullscreen TUI**: Real-time dashboard with worker panels, task sidebar, and overlay interfaces
+- **Flexible configuration**: Customize prompts, verification commands, and profiles via `.ralph.toml`
+- **State management**: Resume interrupted sessions seamlessly
+- **Cost tracking**: Monitor token usage and cost estimates during execution
+
 ## Task-Based Development
 
 Beyond single-prompt loops, Ralph Wiggum supports a full task-based workflow: define a PRD, generate a structured task list, and let Claude iterate through each task until the project is complete.
@@ -436,21 +446,43 @@ ralph-wiggum task orchestrate --max-cost 5.0 --timeout 2h
 | `--conflict-model NAME` | Claude model for merge conflict resolution (default: `opus`) |
 | `--review-model NAME` | Claude model for code review phase (default: `opus`) |
 
+**Dashboard TUI components:**
+
+- **Worker panels**: Grid layout displaying real-time output from each worker with color-coded status indicators
+- **Task sidebar**: Collapsible hierarchical view of task tree with progress tracking and current task highlighting (toggle with `t`)
+- **Global status bar**: Displays orchestrator status, scheduler state, time elapsed, cost, and token usage
+- **Task preview overlay**: Floating panel showing detailed task information including description, dependencies, and related files (toggle with `p`)
+- **Text input overlay**: Inline message composer for sending real-time guidance to workers during Claude phases (activate with `i`)
+- **Confirmation dialogs**: Interactive prompts for restart and quit operations with visual feedback
+
 **Dashboard keyboard shortcuts:**
 
 | Key | Action |
 |-----|--------|
 | `Tab` / `Shift+Tab` | Cycle focus between worker panels |
-| `1`-`9` | Jump to worker N |
-| `Esc` | Unfocus current panel |
+| `1`-`9` | Jump to worker N directly |
+| `Esc` | Unfocus current panel / Close overlays / Cancel confirmations |
 | `Up` / `Down` | Scroll focused worker output |
+| `Left` / `Right` | Scroll to oldest / newest output (home/end) |
 | `i` | Send message to focused worker (opens text input overlay) |
 | `p` | Toggle task preview overlay |
-| `r` | Reload tasks.yml |
-| `R` | Restart a failed/blocked worker (with confirmation) |
-| `q` | Quit (with confirmation — press twice to force) |
+| `t` | Toggle task sidebar visibility |
+| `r` | Reload tasks.yml from disk |
+| `R` | Restart a failed/blocked worker (requires confirmation with `y`/`n`) |
+| `q` | Graceful shutdown (press twice or `Enter` to confirm, `Esc` to cancel) |
 
-The `i` key opens a text input overlay for sending real-time messages to the focused worker during its Implement or ReviewFix phase. Type your message and press Enter to send, or Esc to cancel. This lets you provide mid-task guidance without stopping the worker.
+**Text input overlay controls:**
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Insert newline |
+| `Ctrl+Enter` | Send message to worker |
+| `Esc` | Cancel and close overlay |
+| `Home` / `End` | Jump to start / end of line |
+| `Up` / `Down` | Move cursor between lines |
+| Type freely | Compose message (multiline supported) |
+
+The `i` key opens a text input overlay for sending real-time messages to the focused worker during its Implement or ReviewFix phase. Type your message and press `Ctrl+Enter` to send, or `Esc` to cancel. This lets you provide mid-task guidance without stopping the worker.
 
 After completion, a summary table is printed with per-task status, cost, duration, and retry count.
 
@@ -524,13 +556,47 @@ ralph-wiggum task generate-deps
 ralph-wiggum task generate-deps --model claude-sonnet-4-5-20250929
 ```
 
-#### `task status` — Show progress dashboard
+#### `task status` — Interactive task explorer
 
-Displays a quick overview of project progress.
+Launches a fullscreen TUI for exploring and managing the task tree interactively.
 
 ```bash
 ralph-wiggum task status
 ```
+
+**Task explorer features:**
+
+- **Tree panel**: Hierarchical task visualization with expand/collapse support and status icons
+- **Detail panel**: Displays selected task's description, dependencies, related files, and metadata
+- **Progress footer**: Shows completion stats and filtered task count
+- **Sorting modes**: Cycle through different sort orders (by ID, status, component) with `s` key
+- **Search/filter**: Filter tasks by name, ID, or component with `/` or `f` keys
+- **Live reload**: Refresh task data from disk with `r` key
+
+**Task explorer keyboard shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` / `j` / `k` | Navigate through tasks |
+| `Left` / `Right` / `h` / `l` | Collapse / Expand node or move to detail panel |
+| `Enter` | Expand node or focus detail panel |
+| `Tab` | Toggle focus between tree and detail panels |
+| `Esc` | Unfocus detail panel or quit explorer |
+| `e` | Expand all nodes |
+| `c` | Collapse all nodes |
+| `s` | Cycle sort mode (ID → Status → Component) |
+| `f` / `/` | Enter filter mode |
+| `r` | Reload tasks.yml from disk |
+| `Home` / `End` | Jump to first / last task |
+
+**Filter mode shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| Type text | Add characters to filter |
+| `Backspace` | Remove last character |
+| `Enter` | Accept filter and return to navigation |
+| `Esc` | Clear filter and return to navigation |
 
 #### `task migrate` — Migrate from PROGRESS.md to tasks.yml
 
@@ -551,6 +617,24 @@ ralph-wiggum task clean
 #### MCP server (internal)
 
 Ralph Wiggum runs an HTTP MCP server (Streamable HTTP transport) automatically during `task add`, `task edit`, `task plan`, and `task orchestrate`. The server exposes tasks.yml CRUD operations as MCP tools, giving Claude direct access to read and modify the task tree. Available tools include `list_profiles` for querying configured verification profiles. No manual setup is needed.
+
+**Interactive ask_user TUI:**
+
+When Claude needs user input via the `ask_user` MCP tool, Ralph Wiggum presents an interactive fullscreen TUI with:
+
+- **Single-choice picker**: Radio button style selection for questions with one answer
+- **Multi-choice picker**: Checkbox style selection for questions allowing multiple answers (when `multiSelect: true`)
+- **Confirmation dialog**: Yes/No prompts with keyboard shortcuts
+- **Text input overlay**: Free-form text entry when "Other" option is selected or for text questions
+
+**ask_user TUI keyboard shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` / `j` / `k` | Navigate options |
+| `Space` | Toggle selection (multi-choice mode only) |
+| `Enter` | Confirm selection |
+| `Esc` | Cancel (returns empty response) |
 
 All task commands auto-initialize `.ralph/tasks.yml` if the file doesn't exist yet — no need to run `task prd` first.
 

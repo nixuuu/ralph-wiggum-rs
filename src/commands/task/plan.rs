@@ -2,7 +2,7 @@ use crossterm::style::Stylize;
 
 use super::args::PlanArgs;
 use super::input::resolve_input;
-use crate::commands::run::{DANGEROUS_TOOLS, RunOnceOptions, run_once};
+use super::task_runner::{TaskRunOptions, run_task_command};
 use crate::shared::error::Result;
 use crate::shared::file_config::{FileConfig, format_profiles_info};
 use crate::shared::tasks::TasksFile;
@@ -41,28 +41,20 @@ pub async fn execute(args: PlanArgs, file_config: &FileConfig) -> Result<()> {
         .replace("{profiles_info}", &profiles_info);
 
     // Model: args > config > default (opus for plan)
-    let model = Some(
-        args.model
-            .or_else(|| file_config.task.default_model.clone())
-            .unwrap_or_else(|| DEFAULT_PLAN_MODEL.to_string()),
-    );
+    let model = args
+        .model
+        .or_else(|| file_config.task.default_model.clone())
+        .unwrap_or_else(|| DEFAULT_PLAN_MODEL.to_string());
 
     // Run Claude with auto-started MCP server.
-    // The MCP server and question channel are automatically managed by run_once.
-    // Use disallowed_tools denylist to block dangerous built-in tools (Write, Edit, Bash, etc.)
-    // while allowing MCP tools (ask_user, tasks_create, etc.) to pass through.
-    // The plan_prompt.md instructs Claude to use exploration tools (Read, Glob, Grep, WebFetch,
-    // WebSearch) and MCP tools (ask_user, tasks_*) while avoiding direct file modifications.
-    run_once(RunOnceOptions {
+    // Blocks dangerous tools and AskUserQuestion via run_task_command().
+    // Claude uses exploration tools (Read, Glob, Grep) and MCP tools (ask_user, tasks_*).
+    run_task_command(TaskRunOptions {
         prompt,
-        model,
-        output_dir: None,
+        command_name: "task plan".to_string(),
+        model: Some(model),
         use_nerd_font: file_config.ui.nerd_font,
-        allowed_tools: None,
-        disallowed_tools: Some(format!("{},AskUserQuestion", DANGEROUS_TOOLS)),
-        mcp_config: None,
-        question_rx: None,
-        tasks_path: Some(tasks_path.clone()),
+        tasks_path: tasks_path.clone(),
     })
     .await?;
 

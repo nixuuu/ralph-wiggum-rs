@@ -1,6 +1,5 @@
 use std::io::{self, Stdout};
 
-use ansi_to_tui::IntoText;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::{
     Frame, Terminal, Viewport,
@@ -19,7 +18,10 @@ use crate::updater::version_checker::{UpdateInfo, UpdateState};
 
 use super::output::TaskProgress;
 
-/// Data for the status bar display
+/// Data for the status bar display.
+///
+/// Legacy: used by StatusTerminal (inline mode). Kept for tests and potential reuse.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct StatusData {
     pub iteration: u32,
@@ -38,6 +40,7 @@ pub struct StatusData {
     pub eta_text: Option<String>,
 }
 
+#[allow(dead_code)]
 impl StatusData {
     /// Format tokens for display (e.g., 1234 -> "1.2k")
     fn format_tokens(tokens: u64) -> String {
@@ -226,6 +229,7 @@ impl StatusData {
 }
 
 /// Terminal wrapper for inline status bar rendering
+#[allow(dead_code)]
 pub struct StatusTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     enabled: bool,
@@ -233,6 +237,7 @@ pub struct StatusTerminal {
     height: u16,
 }
 
+#[allow(dead_code)]
 impl StatusTerminal {
     /// Create a new status terminal with inline viewport (1 line)
     pub fn new(use_nerd_font: bool) -> Result<Self> {
@@ -298,15 +303,16 @@ impl StatusTerminal {
     // Never called in production code. Content rendering is handled via
     // print_line() and print_styled_lines() instead.
 
-    /// Print a line above the status bar
+    /// Print a line above the status bar (ANSI → ratatui conversion).
+    /// Unused — once.rs uses print_styled_lines() instead. Kept for API completeness.
+    #[allow(dead_code)]
     pub fn print_line(&mut self, text: &str) -> Result<()> {
         if !self.enabled {
             println!("{}", text);
             return Ok(());
         }
 
-        // Convert ANSI escape codes to ratatui Text
-        let ratatui_text = text.into_text().unwrap_or_default();
+        let ratatui_text = ratatui::text::Text::raw(text.to_string());
 
         self.terminal.insert_before(1, |buf| {
             let area = Rect::new(0, 0, buf.area.width, 1);
@@ -318,35 +324,43 @@ impl StatusTerminal {
         Ok(())
     }
 
-    /// Print multiple lines above the status bar
-    pub fn print_lines(&mut self, lines: &[String]) -> Result<()> {
+    /// Print ratatui Lines above the status bar (native styled output).
+    ///
+    /// Accepts `Vec<Line<'static>>` — renders Span-based lines directly
+    /// without ANSI → ratatui conversion.
+    pub fn print_styled_lines(&mut self, lines: &[Line<'static>]) -> Result<()> {
         if !self.enabled {
             for line in lines {
-                println!("{}", line);
+                // Fallback: wydrukuj plain text z concat spanów
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                println!("{}", text);
             }
             return Ok(());
         }
 
-        // Convert all lines to ratatui Text, properly handling ANSI escape codes
-        let combined = lines.join("\n");
-        let ratatui_text = combined.into_text().unwrap_or_default();
-        let text_height = ratatui_text.lines.len() as u16;
+        if lines.is_empty() {
+            return Ok(());
+        }
 
-        // Calculate required height with wrapping
         let terminal_width = self.terminal.size()?.width;
         let mut total_height = 0u16;
-        for line in &ratatui_text.lines {
-            let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
-            let wrapped_lines = if line_width == 0 {
+        for line in lines {
+            // Use unicode_width for accurate display width calculation
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            let wrapped = if line_width == 0 {
                 1
             } else {
                 ((line_width as u16).saturating_sub(1) / terminal_width + 1).max(1)
             };
-            total_height += wrapped_lines;
+            total_height += wrapped;
         }
 
-        // Use the larger of actual lines or calculated wrapped height
-        let height = total_height.max(text_height);
+        let ratatui_text = ratatui::text::Text::from(lines.to_vec());
+        let height = total_height.max(lines.len() as u16);
 
         self.terminal.insert_before(height, |buf| {
             let area = Rect::new(0, 0, buf.area.width, height);

@@ -1,0 +1,10 @@
+---
+source: src/tui/ring_buffer.rs
+expression: snapshot
+---
+Plain text line
+✓ Success
+Another plain line
+✗ Error
+⚠ Warning
+Final plain text

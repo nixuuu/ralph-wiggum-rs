@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crossterm::execute;
+
 use crate::commands::mcp::server::McpServer;
 use crate::commands::mcp::state::QuestionEnvelope;
-use crate::commands::task::orchestrate::dashboard::Dashboard;
-use crate::commands::task::orchestrate::dashboard_input::{
-    DashboardInputParams, DashboardInputThread,
-};
+use crate::commands::task::orchestrate::app::OrchestrateApp;
 use crate::commands::task::orchestrate::events::{EventLogger, WorkerEvent};
 use crate::commands::task::orchestrate::output::MultiplexedOutput;
 use crate::commands::task::orchestrate::scheduler::TaskScheduler;
@@ -169,16 +169,7 @@ impl Orchestrator {
         // 9. Shutdown signaling
         let shutdown = Arc::new(AtomicBool::new(false));
         let graceful_shutdown = Arc::new(AtomicBool::new(false));
-        let resize_flag = Arc::new(AtomicBool::new(false));
-        let focused_worker = Arc::new(AtomicU32::new(0));
-        let scroll_delta = Arc::new(AtomicI32::new(0));
-        let render_notify = Arc::new(tokio::sync::Notify::new());
-        let show_task_preview = Arc::new(AtomicBool::new(false));
-        let reload_requested = Arc::new(AtomicBool::new(false));
-        let quit_state = Arc::new(AtomicU8::new(0)); // 0=running, 1=quit_pending
         let completed = Arc::new(AtomicBool::new(false));
-        let restart_worker_id = Arc::new(AtomicU32::new(0)); // 0=none, >0=worker ID
-        let restart_confirmed = Arc::new(AtomicBool::new(false));
 
         // 9b. Start shared MCP server for all workers
         // Dummy channel — workers don't use ask_user, but McpServer requires it
@@ -195,66 +186,53 @@ impl Orchestrator {
         let mcp_session_registry = mcp_server.session_registry();
 
         // 10a. Initialize shared overlay (Task 28.1)
-        // Shared between input thread (keyboard handling) and Dashboard (rendering)
-        // Must be created before Dashboard::new() to pass as constructor argument
+        // Shared between OrchestrateApp and future EventDispatcher integration
         let shared_overlay = Arc::new(std::sync::Mutex::new(None));
 
-        // 10b. Initialize TUI (fullscreen dashboard)
+        // 10b. Initialize TUI (OrchestrateApp + Terminal)
+        use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+        use ratatui::Terminal;
+        use ratatui::backend::CrosstermBackend;
+        use std::io;
+
+        // Setup terminal
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::new(backend)?;
+
         let mut tui = TuiContext {
-            dashboard: Dashboard::new(worker_count, Arc::clone(&shared_overlay))?,
+            app: OrchestrateApp::new(worker_count, Arc::clone(&shared_overlay)),
+            terminal,
             mux_output: MultiplexedOutput::new(),
             task_start_times: HashMap::new(),
             task_summaries: Vec::new(),
         };
 
-        // 11. Initialize active_worker_ids (Task 21.3)
-        // Start with all workers considered active (will be updated by dashboard on render)
-        let active_worker_ids = Arc::new(std::sync::Mutex::new(
-            (1..=worker_count).collect::<Vec<u32>>(),
-        ));
+        // 11. Spawn EventDispatcher on OS thread + bridge to tokio channel
+        use crate::tui::events::EventDispatcher;
+        let mut event_dispatcher = EventDispatcher::spawn(Duration::from_millis(100));
 
-        // 11b. Initialize user message channel (Task 25.4.3)
-        // TUI overlay → run_loop communication for interactive worker messaging
-        let (user_message_tx, user_message_rx) = mpsc::channel::<(u32, String)>(16);
+        // Bridge: read from EventDispatcher's std channel, forward to tokio channel
+        let (tui_event_tx, key_event_rx) = mpsc::channel::<crate::tui::events::AppEvent>(64);
+        let dispatcher_rx = event_dispatcher.take_receiver();
+        std::thread::Builder::new()
+            .name("tui-event-bridge".into())
+            .spawn(move || {
+                while let Ok(event) = dispatcher_rx.recv() {
+                    if tui_event_tx.blocking_send(event).is_err() {
+                        break; // tokio receiver dropped, exit bridge
+                    }
+                }
+            })
+            .expect("Failed to spawn TUI event bridge thread");
 
-        // 12. Spawn input thread (dedicated OS thread for crossterm)
-        let overlay_active = Arc::new(AtomicBool::new(false));
-        let worker_phases = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let mut input_thread = DashboardInputThread::spawn(DashboardInputParams {
-            shutdown: Arc::clone(&shutdown),
-            graceful_shutdown: Arc::clone(&graceful_shutdown),
-            resize_flag: Arc::clone(&resize_flag),
-            focused_worker: Arc::clone(&focused_worker),
-            scroll_delta: Arc::clone(&scroll_delta),
-            render_notify: Arc::clone(&render_notify),
-            show_task_preview: Arc::clone(&show_task_preview),
-            reload_requested: Arc::clone(&reload_requested),
-            quit_state: Arc::clone(&quit_state),
-            restart_worker_id: Arc::clone(&restart_worker_id),
-            restart_confirmed: Arc::clone(&restart_confirmed),
-            active_worker_ids: Arc::clone(&active_worker_ids),
-            overlay_active: Arc::clone(&overlay_active),
-            worker_phases: Arc::clone(&worker_phases),
-            user_message_tx,
-            shared_overlay: Arc::clone(&shared_overlay),
-        });
-
-        // 13. Build run loop context
+        // 12. Build run loop context
         let flags = InputFlags {
             shutdown,
             graceful_shutdown,
-            resize_flag,
-            focused_worker,
-            scroll_delta,
-            render_notify,
-            show_task_preview,
-            reload_requested,
-            quit_state: Arc::clone(&quit_state),
             completed,
-            restart_worker_id,
-            restart_confirmed,
-            active_worker_ids,
-            worker_phases: Arc::clone(&worker_phases),
         };
 
         // Cache TasksFile in Arc for efficient sharing with dashboard preview
@@ -281,27 +259,30 @@ impl Orchestrator {
             mcp_session_registry,
             mcp_cancel_token: mcp_cancel_token.clone(),
             mcp_server_handle,
-            user_message_rx,
+            key_event_rx,
         };
 
         // 14. Run the main orchestration loop
         let result = self.run_loop(&mut ctx).await;
 
-        // 15. Cleanup TUI
-        ctx.tui.dashboard.cleanup()?;
-        input_thread.stop();
+        // 15. Cleanup TUI + EventDispatcher
+        use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
+
+        event_dispatcher.stop();
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
 
         result
     }
 
-    /// Resolve the model to use for a specific task (with alias support).
+    /// Resolve the model to use for a specific task.
     pub(super) fn resolve_model(&self, task_id: &str, tasks_file: &TasksFile) -> Option<String> {
         let models = tasks_file.models_map();
-        let raw: Option<&String> = models
+        models
             .get(task_id)
             .or(tasks_file.default_model.as_ref())
-            .or(self.config.model.as_ref());
-        raw.map(|m| crate::shared::tasks::resolve_model_alias(m))
+            .or(self.config.model.as_ref())
+            .cloned()
     }
 }
 
@@ -464,146 +445,8 @@ mod tests {
         assert!(iterations > 1);
     }
 
-    #[test]
-    fn test_quit_confirmation_works_in_completed_state() {
-        let quit_state = Arc::new(AtomicU8::new(0));
-        let graceful_shutdown = Arc::new(AtomicBool::new(false));
-        let completed = Arc::new(AtomicBool::new(true));
-
-        let current_quit = quit_state.load(Ordering::SeqCst);
-        if current_quit != 1 {
-            quit_state.store(1, Ordering::SeqCst);
-        }
-        assert_eq!(quit_state.load(Ordering::SeqCst), 1);
-
-        let current_quit = quit_state.load(Ordering::SeqCst);
-        if current_quit == 1 {
-            graceful_shutdown.store(true, Ordering::SeqCst);
-            quit_state.store(0, Ordering::SeqCst);
-        }
-
-        assert!(graceful_shutdown.load(Ordering::SeqCst));
-        assert!(completed.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_completion_idempotent_flag_set() {
-        let completed = Arc::new(AtomicBool::new(false));
-
-        let mut times_set = 0;
-
-        for _ in 0..5 {
-            if !completed.load(Ordering::Relaxed) {
-                completed.store(true, Ordering::Relaxed);
-                times_set += 1;
-            }
-        }
-
-        assert_eq!(times_set, 1);
-        assert!(completed.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_esc_in_completed_state_closes_preview_or_noop() {
-        let _completed = Arc::new(AtomicBool::new(true));
-        let show_task_preview = Arc::new(AtomicBool::new(true));
-        let quit_state = Arc::new(AtomicU8::new(0));
-        let focused_worker = Arc::new(AtomicU32::new(1));
-
-        assert!(_completed.load(Ordering::Relaxed));
-        assert!(show_task_preview.load(Ordering::Relaxed));
-        assert_eq!(quit_state.load(Ordering::SeqCst), 0);
-
-        let current_quit = quit_state.load(Ordering::SeqCst);
-        if current_quit == 1 {
-            quit_state.store(0, Ordering::SeqCst);
-        } else {
-            focused_worker.store(0, Ordering::Relaxed);
-        }
-
-        assert!(show_task_preview.load(Ordering::Relaxed));
-        assert_eq!(focused_worker.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn test_p_during_completion_shows_preview_overlay() {
-        let _completed = Arc::new(AtomicBool::new(true));
-        let show_task_preview = Arc::new(AtomicBool::new(false));
-        let quit_state = Arc::new(AtomicU8::new(0));
-
-        assert!(_completed.load(Ordering::Relaxed));
-        assert!(!show_task_preview.load(Ordering::Relaxed));
-
-        if quit_state.load(Ordering::SeqCst) == 1 {
-            quit_state.store(0, Ordering::SeqCst);
-        }
-        let current = show_task_preview.load(Ordering::Relaxed);
-        show_task_preview.store(!current, Ordering::Relaxed);
-        assert!(show_task_preview.load(Ordering::Relaxed));
-
-        if quit_state.load(Ordering::SeqCst) == 1 {
-            quit_state.store(0, Ordering::SeqCst);
-        }
-        let current = show_task_preview.load(Ordering::Relaxed);
-        show_task_preview.store(!current, Ordering::Relaxed);
-        assert!(!show_task_preview.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_q_during_completion_with_preview_open() {
-        let _completed = Arc::new(AtomicBool::new(true));
-        let show_task_preview = Arc::new(AtomicBool::new(true));
-        let quit_state = Arc::new(AtomicU8::new(0));
-        let graceful_shutdown = Arc::new(AtomicBool::new(false));
-
-        assert!(show_task_preview.load(Ordering::Relaxed));
-
-        let current_quit = quit_state.load(Ordering::SeqCst);
-        if current_quit != 1 {
-            quit_state.store(1, Ordering::SeqCst);
-        }
-        assert_eq!(quit_state.load(Ordering::SeqCst), 1);
-        assert!(show_task_preview.load(Ordering::Relaxed));
-
-        let current_quit = quit_state.load(Ordering::SeqCst);
-        if current_quit == 1 {
-            graceful_shutdown.store(true, Ordering::SeqCst);
-            quit_state.store(0, Ordering::SeqCst);
-        }
-
-        assert!(graceful_shutdown.load(Ordering::SeqCst));
-        assert!(show_task_preview.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_completed_state_all_transitions() {
-        let completed = Arc::new(AtomicBool::new(true));
-        let quit_state = Arc::new(AtomicU8::new(0));
-        let graceful_shutdown = Arc::new(AtomicBool::new(false));
-        let show_task_preview = Arc::new(AtomicBool::new(false));
-
-        assert!(completed.load(Ordering::Relaxed));
-        assert_eq!(quit_state.load(Ordering::SeqCst), 0);
-
-        let current = show_task_preview.load(Ordering::Relaxed);
-        show_task_preview.store(!current, Ordering::Relaxed);
-        assert!(show_task_preview.load(Ordering::Relaxed));
-
-        let current_quit = quit_state.load(Ordering::SeqCst);
-        if current_quit != 1 {
-            quit_state.store(1, Ordering::SeqCst);
-        }
-        assert_eq!(quit_state.load(Ordering::SeqCst), 1);
-        assert!(show_task_preview.load(Ordering::Relaxed));
-
-        let current_quit = quit_state.load(Ordering::SeqCst);
-        if current_quit == 1 {
-            graceful_shutdown.store(true, Ordering::SeqCst);
-            quit_state.store(0, Ordering::SeqCst);
-        }
-        assert!(graceful_shutdown.load(Ordering::SeqCst));
-        assert!(completed.load(Ordering::Relaxed));
-    }
+    // NOTE: Old quit_state/show_task_preview/focused_worker atomic tests removed.
+    // These states are now managed by OrchestrateApp (tested in app.rs tests).
 
     #[test]
     fn test_completed_flag_reset_on_reload() {
@@ -1099,7 +942,9 @@ mod tests {
     fn test_prompt_config_propagation() {
         // Test: Verify that prompt.prefix, prompt.suffix, and prompt.system
         // from .ralph.toml are correctly propagated to Orchestrator struct
-        use crate::shared::file_config::{LoggingConfig, PromptConfig, TaskConfig, UiConfig};
+        use crate::shared::file_config::{
+            LoggingConfig, PromptConfig, TaskConfig, TuiConfig, UiConfig,
+        };
 
         let file_config = FileConfig {
             prompt: PromptConfig {
@@ -1108,6 +953,7 @@ mod tests {
                 system: Some("CUSTOM SYSTEM PROMPT".to_string()),
             },
             ui: UiConfig::default(),
+            tui: TuiConfig::default(),
             task: TaskConfig::default(),
             logging: LoggingConfig::default(),
         };
@@ -1161,7 +1007,9 @@ mod tests {
     #[test]
     fn test_prompt_config_empty_strings_filtered() {
         // Test: Verify that empty strings are filtered out and treated as None
-        use crate::shared::file_config::{LoggingConfig, PromptConfig, TaskConfig, UiConfig};
+        use crate::shared::file_config::{
+            LoggingConfig, PromptConfig, TaskConfig, TuiConfig, UiConfig,
+        };
 
         let file_config = FileConfig {
             prompt: PromptConfig {
@@ -1170,6 +1018,7 @@ mod tests {
                 system: Some("  \n  ".to_string()), // Only whitespace
             },
             ui: UiConfig::default(),
+            tui: TuiConfig::default(),
             task: TaskConfig::default(),
             logging: LoggingConfig::default(),
         };
@@ -1213,7 +1062,9 @@ mod tests {
     #[test]
     fn test_prompt_config_none_values() {
         // Test: Verify that None values in prompt config work correctly
-        use crate::shared::file_config::{LoggingConfig, PromptConfig, TaskConfig, UiConfig};
+        use crate::shared::file_config::{
+            LoggingConfig, PromptConfig, TaskConfig, TuiConfig, UiConfig,
+        };
 
         let file_config = FileConfig {
             prompt: PromptConfig {
@@ -1222,6 +1073,7 @@ mod tests {
                 system: None,
             },
             ui: UiConfig::default(),
+            tui: TuiConfig::default(),
             task: TaskConfig::default(),
             logging: LoggingConfig::default(),
         };

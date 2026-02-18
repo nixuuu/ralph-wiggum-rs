@@ -1,0 +1,24 @@
+---
+source: src/commands/task/explorer/drawing.rs
+expression: snapshot
+---
+ Tasks [sort: ID]
+
+ ▾ 1 Epic One [parser]
+   ✓ 1.1 Subtask A [parser]
+   ◎ 1.2 Subtask B [parser]                                    → 1.1
+ ▾ 2 Epic Two [dag]
+   ○ 2.1 Cycle detect [dag]
+   ⊘ 2.2 Topo sort [dag]                                 → 2.1 → 1.2
+
+
+
+
+
+
+
+
+
+
+
+██████████████████          1/4 done (25%)

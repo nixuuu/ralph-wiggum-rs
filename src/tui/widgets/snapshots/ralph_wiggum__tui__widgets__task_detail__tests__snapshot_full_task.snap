@@ -1,0 +1,29 @@
+---
+source: src/tui/widgets/task_detail.rs
+expression: snap(&buffer)
+---
+ Task Details
+
+ 4.3 — Detail panel widget
+
+ Status: InProgress
+ Component: tui
+ Model: sonnet
+
+ Dependencies:
+   → 1.1
+
+ Related Files:
+   • src/tui/widgets/task_detail.rs
+   • src/shared/tasks/node.rs
+
+ Implementation Steps:
+   1. Utwórz src/tui/widgets/task_detail.rs
+   2. Zdefiniuj TaskDetailWidget z ref do TaskNode
+   3. Renderuj: ID + Name (bold), Status (colored), Model,
+      Component
+
+ Description:
+ Panel z detalami wybranego taska: description, status,
+ model, deps, related_files, implementation_steps.
+ Scrollable.

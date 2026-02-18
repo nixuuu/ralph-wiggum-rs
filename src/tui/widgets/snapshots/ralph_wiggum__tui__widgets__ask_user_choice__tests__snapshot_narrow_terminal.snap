@@ -1,0 +1,10 @@
+---
+source: src/tui/widgets/ask_user_choice.rs
+expression: snapshot
+---
+Pick
+
+○ Auth
+  Authentication mod
+● API
+  REST API endpoints
