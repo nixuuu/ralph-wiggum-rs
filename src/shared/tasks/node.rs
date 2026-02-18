@@ -22,6 +22,8 @@ pub struct TaskNode {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub implementation_steps: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_criteria: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subtasks: Vec<TaskNode>,
@@ -39,6 +41,7 @@ pub struct LeafTask {
     pub description: Option<String>,
     pub related_files: Vec<String>,
     pub implementation_steps: Vec<String>,
+    pub acceptance_criteria: Vec<String>,
     pub profiles: Vec<String>,
 }
 
@@ -164,6 +167,7 @@ name: "Test task with empty profiles"
 component: "tests"
 status: "in_progress"
 deps: []
+acceptance_criteria: []
 profiles: []
 "#;
         let node: TaskNode = serde_yaml::from_str(yaml_content).unwrap();
@@ -199,6 +203,7 @@ name: "Task with profiles"
 component: "backend"
 status: "todo"
 deps: []
+acceptance_criteria: []
 profiles: ["backend", "api"]
 "#;
         let node: TaskNode = serde_yaml::from_str(yaml_content).unwrap();
@@ -220,6 +225,7 @@ profiles: ["backend", "api"]
             description: None,
             related_files: vec![],
             implementation_steps: vec![],
+            acceptance_criteria: Vec::new(),
             profiles: vec![], // Empty profiles should be skipped
             subtasks: vec![],
         };
@@ -245,6 +251,7 @@ profiles: ["backend", "api"]
             description: None,
             related_files: vec![],
             implementation_steps: vec![],
+            acceptance_criteria: Vec::new(),
             profiles: vec!["backend".to_string(), "api".to_string()],
             subtasks: vec![],
         };
@@ -273,6 +280,7 @@ status: "todo"
 id: "7.2"
 name: "Empty profiles"
 status: "todo"
+acceptance_criteria: []
 profiles: []
 "#;
         let node_empty: TaskNode = serde_yaml::from_str(yaml_empty).unwrap();

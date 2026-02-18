@@ -611,6 +611,7 @@ mod tests {
                 description: None,
                 related_files: vec![],
                 implementation_steps: vec![],
+                acceptance_criteria: Vec::new(),
                 profiles: vec![],
                 subtasks: vec![],
             })

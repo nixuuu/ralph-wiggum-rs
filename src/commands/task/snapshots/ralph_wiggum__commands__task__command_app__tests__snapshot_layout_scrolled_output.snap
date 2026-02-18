@@ -3,17 +3,17 @@ source: src/commands/task/command_app.rs
 expression: snap(&buffer)
 ---
 ralph task test
-Output line 12
-Output line 13
-Output line 14
-Output line 15
-Output line 16
-Output line 17
-Output line 18
-Output line 19
-Output line 20
-Output line 21
-Output line 22
-Output line 23
-Output line 24
+Output line 12                                                                 ▐
+Output line 13                                                                 ▐
+Output line 14                                                                 ▐
+Output line 15                                                                 ▐
+Output line 16                                                                 ▐
+Output line 17                                                                 ▐
+Output line 18                                                                 ▐
+Output line 19                                                                 ▐
+Output line 20                                                                 ▐
+Output line 21                                                                 ▐
+Output line 22                                                                 ▐
+Output line 23                                                                 ▐
+Output line 24                                                                 ▐
 Scrolled up 5 lines

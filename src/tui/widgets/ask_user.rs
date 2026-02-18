@@ -16,9 +16,10 @@ use crossterm::event::KeyCode;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    prelude::StatefulWidget,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Padding, Widget},
+    widgets::{Block, Borders, Padding, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget},
 };
 
 use crate::shared::markdown::render_markdown_for_width;
@@ -80,7 +81,8 @@ pub struct AskUserQuestion {
 #[derive(Debug, Clone)]
 pub(super) enum InnerState {
     Text(TextInputState),
-    Choice(ChoiceState),
+    /// (choice state, text input when "Other" option is being typed)
+    Choice(ChoiceState, Option<TextInputState>),
     Multi(MultiSelectState),
     Confirm(ConfirmState),
 }
@@ -106,12 +108,16 @@ pub(super) enum AskUserState {
 /// W stanie Answered renderuje statyczny tekst z pytaniem i odpowiedzią.
 ///
 /// Tworzony przez `AskUserWidget::new()`, stan modyfikowany przez `handle_key()`.
+/// Gdy treść pytania nie mieści się w dostępnym obszarze, widget scrolluje wirtualnie
+/// przez tymczasowy bufor. Scroll obsługiwany przez `scroll_up()`/`scroll_down()`.
 #[derive(Debug, Clone)]
 pub struct AskUserWidget {
     /// Dane pytania
     question: AskUserQuestion,
     /// Stan widgetu (Active/Answered)
     state: AskUserState,
+    /// Scroll offset w wierszach od góry (0 = brak scrollowania)
+    scroll_offset: u16,
 }
 
 impl AskUserWidget {
@@ -127,7 +133,7 @@ impl AskUserWidget {
                     .as_ref()
                     .and_then(|d| question.options.iter().position(|o| o.label == *d))
                     .unwrap_or(0);
-                InnerState::Choice(ChoiceState::with_selected(default_index))
+                InnerState::Choice(ChoiceState::with_selected(default_index), None)
             }
             QuestionKind::MultiChoice => {
                 let options: Vec<MultiSelectOption> = question
@@ -152,6 +158,7 @@ impl AskUserWidget {
         Self {
             question,
             state: AskUserState::Active(inner),
+            scroll_offset: 0,
         }
     }
 
@@ -160,6 +167,7 @@ impl AskUserWidget {
         Self {
             question,
             state: AskUserState::Answered(answer),
+            scroll_offset: 0,
         }
     }
 
@@ -168,31 +176,37 @@ impl AskUserWidget {
         matches!(self.state, AskUserState::Active(_))
     }
 
-    /// Dynamiczna wysokość widgetu (w wierszach) w zależności od stanu, typu pytania i szerokości.
+    /// Pełna wysokość widgetu (w wierszach) potrzebna do wyświetlenia całej treści.
     ///
-    /// Zawiera: border top (1) + question lines + separator (1) + content + border bottom (1).
+    /// Zawiera: border top (1) + padding.top (1) + question lines + content + padding.bottom (1).
     /// `width` — dostępna szerokość widgetu (potrzebna do obliczenia zawijania tekstu).
-    pub fn height_for_width(&self, width: u16) -> u16 {
-        // Inner width: area - border (1+1) - padding (1+1) = width - 4
+    pub fn full_height_for_width(&self, width: u16) -> u16 {
+        // Inner width: area - padding.left(2) - padding.right(2) = width - 4
+        // (Borders::TOP has no left/right sides, so only padding reduces width)
         let inner_width = width.saturating_sub(4).max(1) as usize;
-        let question_lines = count_rendered_lines_for_width(&self.question.question, inner_width);
+        let question_lines =
+            count_rendered_lines_for_width(self.question.question.trim_end(), inner_width);
 
         match &self.state {
             AskUserState::Active(inner) => {
                 let content_height = match inner {
-                    // Text: pytanie + separator + input line + hint line
-                    InnerState::Text(_) => question_lines + 1 + 1 + 1,
-                    // Choice: pytanie + separator + opcje
-                    InnerState::Choice(_) => {
-                        question_lines + 1 + self.question.options.len() as u16
+                    // Text: pytanie + input line + hint line
+                    InnerState::Text(_) => question_lines + 1 + 1,
+                    // Choice: pytanie + opcje + wiersz "Other"
+                    //         + 2 dodatkowe (text input + hint) gdy tryb "Other" aktywny
+                    InnerState::Choice(_, other_input) => {
+                        let base = question_lines + self.question.options.len() as u16 + 1;
+                        if other_input.is_some() { base + 2 } else { base }
                     }
-                    // Multi: pytanie + separator + opcje + hint line
-                    InnerState::Multi(state) => question_lines + 1 + state.options.len() as u16 + 1,
-                    // Confirm: pytanie + separator + buttons line
-                    InnerState::Confirm(_) => question_lines + 1 + 1,
+                    // Multi: pytanie + opcje + hint line
+                    InnerState::Multi(state) => {
+                        question_lines + state.options.len() as u16 + 1
+                    }
+                    // Confirm: pytanie + buttons line
+                    InnerState::Confirm(_) => question_lines + 1,
                 };
-                // border top + content + border bottom
-                content_height + 2
+                // border_top/title(1) + padding.top(1) + content + padding.bottom(1)
+                content_height + 3
             }
             AskUserState::Answered(answer) => {
                 let answer_lines = if answer.is_empty() {
@@ -204,6 +218,38 @@ impl AskUserWidget {
                 question_lines + 1 + answer_lines + 2
             }
         }
+    }
+
+    /// Dynamiczna wysokość widgetu — backward-compat alias dla `full_height_for_width()`.
+    ///
+    /// Używany przez testy i kod który nie potrzebuje cappowania.
+    pub fn height_for_width(&self, width: u16) -> u16 {
+        self.full_height_for_width(width)
+    }
+
+    /// Wysokość widgetu ograniczona do `max_height` wierszy.
+    ///
+    /// Gdy treść jest wyższa niż `max_height`, widget scrolluje.
+    /// Używany przez `command_app.rs` przy obliczaniu miejsca w layoutcie.
+    pub fn height_for_width_capped(&self, width: u16, max_height: u16) -> u16 {
+        self.full_height_for_width(width).min(max_height)
+    }
+
+    /// Scrolluje widok o `n` wierszy w górę (odsłania wcześniejszą treść).
+    pub fn scroll_up(&mut self, n: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+    }
+
+    /// Scrolluje widok o `n` wierszy w dół (z clampingiem do końca treści).
+    pub fn scroll_down(&mut self, n: u16, width: u16, max_height: u16) {
+        let full = self.full_height_for_width(width);
+        let max_offset = full.saturating_sub(max_height);
+        self.scroll_offset = (self.scroll_offset + n).min(max_offset);
+    }
+
+    /// Resetuje scroll do góry (używane przy przejściu do nowego pytania).
+    pub fn reset_scroll(&mut self) {
+        self.scroll_offset = 0;
     }
 
     /// Obsługuje zdarzenie klawiatury w stanie Active.
@@ -219,13 +265,18 @@ impl AskUserWidget {
         };
 
         // Esc → anuluj (wspólne dla wszystkich typów)
-        if key == KeyCode::Esc {
+        // Wyjątek: gdy jesteśmy w trybie "Other" text input, Esc musi dotrzeć
+        // do handle_choice_key żeby wrócić do listy (nie anulować całego widgetu)
+        let in_other_mode = matches!(inner, InnerState::Choice(_, Some(_)));
+        if key == KeyCode::Esc && !in_other_mode {
             return AskUserAction::Cancel;
         }
 
         match inner {
             InnerState::Text(state) => handle_text_key(state, key),
-            InnerState::Choice(state) => handle_choice_key(state, &self.question.options, key),
+            InnerState::Choice(state, other_input) => {
+                handle_choice_key(state, other_input, &self.question.options, key)
+            }
             InnerState::Multi(state) => handle_multi_key(state, key),
             InnerState::Confirm(state) => handle_confirm_key(state, key),
         }
@@ -275,20 +326,63 @@ fn handle_text_key(state: &mut TextInputState, key: KeyCode) -> AskUserAction {
 
 fn handle_choice_key(
     state: &mut ChoiceState,
+    other_input: &mut Option<TextInputState>,
     options: &[QuestionOption],
     key: KeyCode,
 ) -> AskUserAction {
+    // Tryb "Other": user wybrał "Other" i teraz wpisuje tekst
+    if let Some(text_state) = other_input {
+        return match key {
+            KeyCode::Enter => AskUserAction::Submit(text_state.value().to_string()),
+            KeyCode::Esc => {
+                *other_input = None; // wróć do listy opcji
+                AskUserAction::Continue
+            }
+            KeyCode::Backspace => {
+                text_state.delete_char();
+                AskUserAction::Continue
+            }
+            KeyCode::Left => {
+                text_state.move_cursor_left();
+                AskUserAction::Continue
+            }
+            KeyCode::Right => {
+                text_state.move_cursor_right();
+                AskUserAction::Continue
+            }
+            KeyCode::Home => {
+                text_state.move_cursor_home();
+                AskUserAction::Continue
+            }
+            KeyCode::End => {
+                text_state.move_cursor_end();
+                AskUserAction::Continue
+            }
+            KeyCode::Char(c) => {
+                text_state.insert_char(c);
+                AskUserAction::Continue
+            }
+            _ => AskUserAction::Continue,
+        };
+    }
+
+    // Normalny tryb: nawigacja po N opcjach + wirtualny slot "Other" (indeks N)
+    let total = options.len() + 1;
     match key {
         KeyCode::Up => {
-            state.move_up(options.len());
+            state.move_up(total);
             AskUserAction::Continue
         }
         KeyCode::Down => {
-            state.move_down(options.len());
+            state.move_down(total);
             AskUserAction::Continue
         }
         KeyCode::Enter => {
-            if let Some(label) = state.get_selected_label(options) {
+            if state.selected == options.len() {
+                // "Other" — aktywuj text input
+                *other_input = Some(TextInputState::new(None));
+                AskUserAction::Continue
+            } else if let Some(label) = state.get_selected_label(options) {
                 AskUserAction::Submit(label.to_string())
             } else {
                 AskUserAction::Continue
@@ -347,41 +441,120 @@ impl Widget for AskUserWidget {
             return;
         }
 
-        let theme = &DEFAULT_THEME;
+        let full_height = self.full_height_for_width(area.width);
+        let scroll_offset = self.scroll_offset;
         let is_active = matches!(self.state, AskUserState::Active(_));
 
-        let title_style = if is_active {
-            theme.header_style()
-        } else {
-            theme.muted_style()
+        // Scroll indicators w tytule
+        let can_scroll_up = scroll_offset > 0;
+        let can_scroll_down = scroll_offset + area.height < full_height;
+        let title = build_title(is_active, can_scroll_up, can_scroll_down);
+
+        if full_height <= area.height {
+            // Treść mieści się — renderuj bezpośrednio (bez virtual buffera)
+            render_widget_inner(&self.question, &self.state, &title, area, buf);
+            return;
+        }
+
+        // Stwórz virtual buffer o pełnej wymaganej wysokości (zaczyna od 0,0)
+        let virt_rect = Rect {
+            x: 0,
+            y: 0,
+            width: area.width,
+            height: full_height,
         };
+        let mut virt_buf = Buffer::empty(virt_rect);
+        render_widget_inner(&self.question, &self.state, &title, virt_rect, &mut virt_buf);
 
-        let title = if is_active {
-            " ❓ Question "
-        } else {
-            " ✅ Answered "
-        };
-
-        let block = Block::default()
-            .padding(Padding::uniform(1))
-            .style(Style::default().bg(theme.panel_bg(is_active)))
-            .title(Span::styled(title, title_style));
-
-        let inner_area = block.inner(area);
-        block.render(area, buf);
-
-        match &self.state {
-            AskUserState::Active(inner) => {
-                render_active(inner, &self.question, inner_area, buf);
-            }
-            AskUserState::Answered(answer) => {
-                render_answered(&self.question.question, answer, inner_area, buf);
+        // Kopiuj slice [scroll_offset .. scroll_offset + area.height] do realnego buf
+        let copy_rows = area.height.min(full_height.saturating_sub(scroll_offset));
+        for row in 0..copy_rows {
+            let src_y = scroll_offset + row;
+            let dst_y = area.y + row;
+            for col in 0..area.width {
+                if let Some(src_cell) = virt_buf.cell((col, src_y))
+                    && let Some(dst_cell) = buf.cell_mut((area.x + col, dst_y))
+                {
+                    *dst_cell = src_cell.clone();
+                }
             }
         }
+
+        // Scrollbar (VerticalRight) — renderowany na real buf po skopiowaniu treści
+        let max_scroll = full_height.saturating_sub(area.height) as usize;
+        let mut sb_state = ScrollbarState::default()
+            .content_length(max_scroll + 1)
+            .viewport_content_length(area.height as usize)
+            .position(scroll_offset as usize);
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_symbol("▐")
+            .track_symbol(Some("▐"))
+            .thumb_style(Style::default().fg(DEFAULT_THEME.secondary))
+            .track_style(Style::default().fg(DEFAULT_THEME.border_normal))
+            .begin_symbol(None)
+            .end_symbol(None)
+            .render(area, buf, &mut sb_state);
     }
 }
 
 // ── Render helpers ─────────────────────────────────────────────────
+
+/// Buduje tytuł bloku z opcjonalnymi wskaźnikami scrollowania.
+fn build_title(is_active: bool, can_up: bool, can_down: bool) -> String {
+    if is_active {
+        let up = if can_up { " ▲" } else { "" };
+        let down = if can_down { " ▼" } else { "" };
+        format!(" Question{}{} ", up, down)
+    } else {
+        " Answered ".to_string()
+    }
+}
+
+/// Renderuje widget (Block + treść) do podanego buffera.
+///
+/// Wywoływany zarówno przy renderowaniu bezpośrednim jak i przez virtual buffer.
+fn render_widget_inner(
+    question: &AskUserQuestion,
+    state: &AskUserState,
+    title: &str,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let theme = &DEFAULT_THEME;
+    let is_active = matches!(state, AskUserState::Active(_));
+
+    let title_style = if is_active {
+        theme.header_style()
+    } else {
+        theme.muted_style()
+    };
+
+    let block = if is_active {
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(theme.secondary_style())
+            .padding(Padding::new(2, 2, 1, 1))
+            .style(Style::default().bg(theme.panel_bg(true)))
+            .title(Span::styled(title.to_string(), title_style))
+    } else {
+        Block::default()
+            .padding(Padding::uniform(1))
+            .style(Style::default().bg(theme.panel_bg(false)))
+            .title(Span::styled(title.to_string(), title_style))
+    };
+
+    let inner_area = block.inner(area);
+    block.render(area, buf);
+
+    match state {
+        AskUserState::Active(inner) => {
+            render_active(inner, question, inner_area, buf);
+        }
+        AskUserState::Answered(answer) => {
+            render_answered(&question.question, answer, inner_area, buf);
+        }
+    }
+}
 
 /// Renderuje aktywny stan z odpowiednim sub-widgetem
 fn render_active(inner: &InnerState, question: &AskUserQuestion, area: Rect, buf: &mut Buffer) {
@@ -389,7 +562,9 @@ fn render_active(inner: &InnerState, question: &AskUserQuestion, area: Rect, buf
         return;
     }
 
-    let question_text = render_markdown_for_width(&question.question, area.width as usize);
+    // Normalizuj trailing whitespace — zapobiega dodatkowym pustym liniom z Claude
+    let question_text =
+        render_markdown_for_width(question.question.trim_end(), area.width as usize);
     let parsed_lines = ansi_to_lines(&question_text);
     let q_height = parsed_lines.len() as u16;
 
@@ -402,15 +577,9 @@ fn render_active(inner: &InnerState, question: &AskUserQuestion, area: Rect, buf
         buf.set_line(area.x, y, line, area.width);
     }
 
-    // Separator (pusta linia)
-    let sep_y = area.y + q_height;
-    if sep_y >= area.y + area.height {
-        return;
-    }
-
-    // Content area pod pytaniem i separatorem
-    let content_y = sep_y + 1;
-    let content_height = area.height.saturating_sub(q_height + 1);
+    // Content area bezpośrednio po pytaniu (bez separatora)
+    let content_y = area.y + q_height;
+    let content_height = area.height.saturating_sub(q_height);
     if content_height == 0 {
         return;
     }
@@ -424,7 +593,9 @@ fn render_active(inner: &InnerState, question: &AskUserQuestion, area: Rect, buf
 
     match inner {
         InnerState::Text(state) => render_text_active(state, question, content_area, buf),
-        InnerState::Choice(state) => render_choice_active(state, question, content_area, buf),
+        InnerState::Choice(state, other_input) => {
+            render_choice_active(state, other_input, question, content_area, buf);
+        }
         InnerState::Multi(state) => render_multi_active(state, content_area, buf),
         InnerState::Confirm(state) => render_confirm_active(state, content_area, buf),
     }
@@ -441,11 +612,10 @@ fn render_text_active(
         return;
     }
 
-    let mut spans = Vec::new();
-    spans.push(Span::styled("> ", DEFAULT_THEME.header_style()));
-
     if state.buffer.is_empty() {
-        // Kursor block + placeholder
+        // Specjalny przypadek: pusty buffer z placeholder
+        let mut spans = Vec::new();
+        spans.push(Span::styled("> ", DEFAULT_THEME.header_style()));
         spans.push(Span::styled("█", DEFAULT_THEME.primary_style()));
         if let Some(ref placeholder) = question.placeholder {
             let rest: String = placeholder.chars().skip(1).collect();
@@ -456,8 +626,35 @@ fn render_text_active(
                 ));
             }
         }
+        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
     } else {
-        // Buffer z kursorem na pozycji
+        // Deleguj renderowanie wiersza do wspólnej funkcji
+        render_text_input_line(state, area, buf);
+    }
+
+    // Hint line
+    if area.height > 1 {
+        let hint = Line::from(Span::styled(
+            "Enter: submit │ Esc: cancel",
+            DEFAULT_THEME.muted_style(),
+        ));
+        buf.set_line(area.x, area.y + 1, &hint, area.width);
+    }
+}
+
+/// Renderuje sam wiersz text input (kursor + buffer) bez hint line.
+/// Współdzielony między render_text_active i render_choice_active (tryb "Other").
+fn render_text_input_line(state: &TextInputState, area: Rect, buf: &mut Buffer) {
+    if area.height == 0 {
+        return;
+    }
+
+    let mut spans = Vec::new();
+    spans.push(Span::styled("> ", DEFAULT_THEME.header_style()));
+
+    if state.buffer.is_empty() {
+        spans.push(Span::styled("█", DEFAULT_THEME.primary_style()));
+    } else {
         let chars: Vec<char> = state.buffer.chars().collect();
         let cursor_pos = state.cursor_pos;
 
@@ -474,38 +671,32 @@ fn render_text_active(
             }
         }
 
-        // Kursor na końcu tekstu
         if cursor_pos == chars.len() {
             spans.push(Span::styled("█", DEFAULT_THEME.primary_style()));
         }
     }
 
     buf.set_line(area.x, area.y, &Line::from(spans), area.width);
-
-    // Hint line
-    if area.height > 1 {
-        let hint = Line::from(Span::styled(
-            "Enter: submit │ Esc: cancel",
-            DEFAULT_THEME.muted_style(),
-        ));
-        buf.set_line(area.x, area.y + 1, &hint, area.width);
-    }
 }
 
-/// Renderuje choice select: radio buttons z opcjami
+/// Renderuje choice select: radio buttons z opcjami + wirtualna opcja "Other"
 fn render_choice_active(
     state: &ChoiceState,
+    other_input: &Option<TextInputState>,
     question: &AskUserQuestion,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    for (idx, option) in question.options.iter().enumerate() {
+    let options = &question.options;
+
+    // Renderuj predefiniowane opcje
+    for (idx, option) in options.iter().enumerate() {
         let y = area.y + idx as u16;
         if y >= area.y + area.height {
             break;
         }
 
-        let is_selected = idx == state.selected;
+        let is_selected = idx == state.selected && other_input.is_none();
         let radio = if is_selected { "●" } else { "○" };
         let style = if is_selected {
             Style::default()
@@ -529,6 +720,55 @@ fn render_choice_active(
         }
 
         buf.set_line(area.x, y, &Line::from(spans), area.width);
+    }
+
+    // Renderuj wirtualną opcję "Other"
+    let other_y = area.y + options.len() as u16;
+    if other_y < area.y + area.height {
+        let is_other_selected = state.selected == options.len() && other_input.is_none();
+        let is_other_active = other_input.is_some();
+        let radio = if is_other_selected || is_other_active {
+            "●"
+        } else {
+            "○"
+        };
+        let style = if is_other_selected || is_other_active {
+            Style::default()
+                .fg(DEFAULT_THEME.primary)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            DEFAULT_THEME.muted_style()
+        };
+
+        let spans = vec![
+            Span::styled(radio, style),
+            Span::raw(" "),
+            Span::styled("Other (type your answer...)", style),
+        ];
+        buf.set_line(area.x, other_y, &Line::from(spans), area.width);
+    }
+
+    // Jeśli tryb "Other" aktywny — renderuj text input i hint
+    if let Some(text_state) = other_input {
+        let text_y = area.y + options.len() as u16 + 1;
+        if text_y < area.y + area.height {
+            let text_area = Rect {
+                x: area.x,
+                y: text_y,
+                width: area.width,
+                height: 1,
+            };
+            render_text_input_line(text_state, text_area, buf);
+        }
+
+        let hint_y = area.y + options.len() as u16 + 2;
+        if hint_y < area.y + area.height {
+            let hint = Line::from(Span::styled(
+                "Enter: submit │ Esc: back to list",
+                DEFAULT_THEME.muted_style(),
+            ));
+            buf.set_line(area.x, hint_y, &hint, area.width);
+        }
     }
 }
 
@@ -770,7 +1010,7 @@ mod tests {
         assert!(widget.is_active());
         assert!(matches!(
             widget.state,
-            AskUserState::Active(InnerState::Choice(_))
+            AskUserState::Active(InnerState::Choice(_, None))
         ));
     }
 
@@ -806,7 +1046,7 @@ mod tests {
     #[test]
     fn test_choice_default_selects_correct_option() {
         let widget = AskUserWidget::new(choice_question());
-        if let AskUserState::Active(InnerState::Choice(ref state)) = widget.state {
+        if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
             assert_eq!(state.selected, 0); // "JWT" jest na indeksie 0
         } else {
             panic!("Expected Active Choice state");
@@ -818,7 +1058,7 @@ mod tests {
         let mut q = choice_question();
         q.default = Some("Session".into());
         let widget = AskUserWidget::new(q);
-        if let AskUserState::Active(InnerState::Choice(ref state)) = widget.state {
+        if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
             assert_eq!(state.selected, 1);
         } else {
             panic!("Expected Active Choice state");
@@ -830,7 +1070,7 @@ mod tests {
         let mut q = choice_question();
         q.default = Some("Unknown".into());
         let widget = AskUserWidget::new(q);
-        if let AskUserState::Active(InnerState::Choice(ref state)) = widget.state {
+        if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
             assert_eq!(state.selected, 0);
         } else {
             panic!("Expected Active Choice state");
@@ -866,28 +1106,28 @@ mod tests {
     #[test]
     fn test_height_text_active() {
         let widget = AskUserWidget::new(text_question());
-        // border(1) + question(1) + sep(1) + input(1) + hint(1) + border(1) = 6
+        // border_top/title(1) + padding.top(1) + question(1) + input(1) + hint(1) + padding.bottom(1) = 6
         assert_eq!(widget.height_for_width(50), 6);
     }
 
     #[test]
     fn test_height_choice_active() {
         let widget = AskUserWidget::new(choice_question());
-        // border(1) + question(1) + sep(1) + 2 opcje + border(1) = 6
-        assert_eq!(widget.height_for_width(50), 6);
+        // border_top/title(1) + padding.top(1) + question(1) + 2 opcje + "Other"(1) + padding.bottom(1) = 7
+        assert_eq!(widget.height_for_width(50), 7);
     }
 
     #[test]
     fn test_height_multi_active() {
         let widget = AskUserWidget::new(multi_question());
-        // border(1) + question(1) + sep(1) + 3 opcje + hint(1) + border(1) = 8
+        // border_top/title(1) + padding.top(1) + question(1) + 3 opcje + hint(1) + padding.bottom(1) = 8
         assert_eq!(widget.height_for_width(50), 8);
     }
 
     #[test]
     fn test_height_confirm_active() {
         let widget = AskUserWidget::new(confirm_question());
-        // border(1) + question(1) + separator(1) + buttons(1) + border(1) = 5
+        // border_top/title(1) + padding.top(1) + question(1) + buttons(1) + padding.bottom(1) = 5
         assert_eq!(widget.height_for_width(50), 5);
     }
 
@@ -982,13 +1222,165 @@ mod tests {
 
     #[test]
     fn test_handle_key_choice_wrap_up() {
-        let mut widget = AskUserWidget::new(choice_question());
-        // Na JWT (0), Up → wrap do Session (1)
+        let mut widget = AskUserWidget::new(choice_question()); // JWT(0), Session(1), Other(2)
+        // Na JWT (0), Up → wrap do "Other" (indeks 2 = options.len())
         widget.handle_key(KeyCode::Up);
+        if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
+            assert_eq!(state.selected, 2); // "Other" jest na indeksie 2
+        } else {
+            panic!("Expected Active Choice state");
+        }
+    }
+
+    // ── Choice "Other" option tests ───────────────────────────────
+
+    #[test]
+    fn test_handle_key_choice_other_is_last_option() {
+        // "Other" jest za ostatnią opcją (indeks N)
+        let mut widget = AskUserWidget::new(choice_question()); // 2 opcje: JWT, Session
+        // Down 2x → "Other" (indeks 2)
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Down);
+        // Stan choice.selected == 2 (options.len())
+        if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
+            assert_eq!(state.selected, 2);
+        } else {
+            panic!("Expected Active Choice state");
+        }
+    }
+
+    #[test]
+    fn test_handle_key_choice_enter_on_other_activates_text_input() {
+        let mut widget = AskUserWidget::new(choice_question());
+        // Down 2x → "Other"
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Down);
+        // Enter → aktywuje text input
+        assert_eq!(widget.handle_key(KeyCode::Enter), AskUserAction::Continue);
+        // Sprawdź że other_input jest Some
+        if let AskUserState::Active(InnerState::Choice(_, other_input)) = &widget.state {
+            assert!(other_input.is_some());
+        } else {
+            panic!("Expected Active Choice state");
+        }
+    }
+
+    #[test]
+    fn test_handle_key_choice_other_text_input_submit() {
+        let mut widget = AskUserWidget::new(choice_question());
+        // Down 2x → "Other", Enter → aktywuje text input
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Enter);
+        // Wpisz "custom answer"
+        for ch in "custom".chars() {
+            widget.handle_key(KeyCode::Char(ch));
+        }
+        // Enter → Submit z wpisanym tekstem
         assert_eq!(
             widget.handle_key(KeyCode::Enter),
+            AskUserAction::Submit("custom".into())
+        );
+    }
+
+    #[test]
+    fn test_handle_key_choice_other_esc_returns_to_list() {
+        let mut widget = AskUserWidget::new(choice_question());
+        // Przejdź do "Other" i aktywuj text input
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Enter);
+        // Esc → powrót do listy (nie Cancel!)
+        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Continue);
+        // other_input powinno być None
+        if let AskUserState::Active(InnerState::Choice(_, other_input)) = &widget.state {
+            assert!(other_input.is_none());
+        } else {
+            panic!("Expected Active Choice state");
+        }
+        // Widget nadal aktywny (nie anulowany)
+        assert!(widget.is_active());
+    }
+
+    #[test]
+    fn test_handle_key_choice_other_height_expands() {
+        let mut widget = AskUserWidget::new(choice_question());
+        let base_height = widget.height_for_width(50);
+        // Down 2x → "Other", Enter
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Enter);
+        // height powinno wzrosnąć o 2 (text input + hint)
+        assert_eq!(widget.height_for_width(50), base_height + 2);
+    }
+
+    #[test]
+    fn test_handle_key_choice_wrap_includes_other() {
+        let mut widget = AskUserWidget::new(choice_question()); // JWT, Session + Other
+        // Up z indeksu 0 → wrap do "Other" (indeks 2)
+        widget.handle_key(KeyCode::Up);
+        if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
+            assert_eq!(state.selected, 2); // "Other" jako ostatni
+        } else {
+            panic!("Expected Active Choice state");
+        }
+    }
+
+    #[test]
+    fn test_handle_key_choice_other_text_backspace_and_submit() {
+        let mut widget = AskUserWidget::new(choice_question());
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Enter);
+        // Wpisz "abc", usuń 'c', dodaj 'd'
+        widget.handle_key(KeyCode::Char('a'));
+        widget.handle_key(KeyCode::Char('b'));
+        widget.handle_key(KeyCode::Char('c'));
+        widget.handle_key(KeyCode::Backspace);
+        widget.handle_key(KeyCode::Char('d'));
+        assert_eq!(
+            widget.handle_key(KeyCode::Enter),
+            AskUserAction::Submit("abd".into())
+        );
+    }
+
+    #[test]
+    fn test_handle_key_choice_other_empty_submit() {
+        let mut widget = AskUserWidget::new(choice_question());
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Down);
+        widget.handle_key(KeyCode::Enter);
+        // Submit bez wpisywania czegokolwiek → pusty string
+        assert_eq!(
+            widget.handle_key(KeyCode::Enter),
+            AskUserAction::Submit("".into())
+        );
+    }
+
+    #[test]
+    fn test_handle_key_choice_normal_options_still_work() {
+        // Upewnij się że normalne opcje nadal działają po dodaniu "Other"
+        let mut widget = AskUserWidget::new(choice_question());
+        // JWT (domyślne, indeks 0) → Enter
+        assert_eq!(
+            widget.handle_key(KeyCode::Enter),
+            AskUserAction::Submit("JWT".into())
+        );
+
+        let mut widget2 = AskUserWidget::new(choice_question());
+        // Down → Session → Enter
+        widget2.handle_key(KeyCode::Down);
+        assert_eq!(
+            widget2.handle_key(KeyCode::Enter),
             AskUserAction::Submit("Session".into())
         );
+    }
+
+    #[test]
+    fn test_handle_key_choice_main_esc_still_cancels() {
+        // Esc w trybie normalnym (nie text input) nadal cancels
+        let mut widget = AskUserWidget::new(choice_question());
+        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Cancel);
     }
 
     #[test]
@@ -1276,16 +1668,18 @@ mod tests {
 
     #[test]
     fn test_integration_choice_wrap_around() {
-        let mut widget = AskUserWidget::new(choice_question());
+        let mut widget = AskUserWidget::new(choice_question()); // JWT(0), Session(1), Other(2)
 
         // Start na JWT (0)
-        // Up → wrap do Session (1)
+        // Up → wrap do "Other" (indeks 2 = last slot)
         widget.handle_key(KeyCode::Up);
-
-        assert_eq!(
-            widget.handle_key(KeyCode::Enter),
-            AskUserAction::Submit("Session".into())
-        );
+        // Enter na "Other" → aktywuje text input
+        assert_eq!(widget.handle_key(KeyCode::Enter), AskUserAction::Continue);
+        if let AskUserState::Active(InnerState::Choice(_, other_input)) = &widget.state {
+            assert!(other_input.is_some()); // "Other" text mode aktywny
+        } else {
+            panic!("Expected Active Choice state");
+        }
     }
 
     #[test]

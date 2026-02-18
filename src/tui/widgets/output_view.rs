@@ -1,4 +1,5 @@
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Paragraph, StatefulWidget, Widget, Wrap};
 
 use crate::tui::ring_buffer::OutputRingBuffer;
@@ -63,6 +64,7 @@ impl OutputViewState {
 pub struct OutputView<'a> {
     buffer: &'a OutputRingBuffer,
     block: Option<Block<'a>>,
+    dimmed: bool,
 }
 
 impl<'a> OutputView<'a> {
@@ -70,12 +72,19 @@ impl<'a> OutputView<'a> {
         Self {
             buffer,
             block: None,
+            dimmed: false,
         }
     }
 
     /// Set optional Block border/title around the widget.
     pub fn block(mut self, block: Block<'a>) -> Self {
         self.block = Some(block);
+        self
+    }
+
+    /// Dim the content area when another widget (e.g. ask_user) requires focus.
+    pub fn dimmed(mut self, dimmed: bool) -> Self {
+        self.dimmed = dimmed;
         self
     }
 }
@@ -123,6 +132,18 @@ impl<'a> StatefulWidget for OutputView<'a> {
         // Render lines as a Paragraph with wrapping
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
         paragraph.render(inner, buf);
+
+        // Dim the entire area when another widget requires focus
+        if self.dimmed {
+            let dim_style = Style::default().add_modifier(Modifier::DIM);
+            for y in inner.y..inner.y + inner.height {
+                for x in inner.x..inner.x + inner.width {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_style(dim_style);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -376,5 +397,66 @@ mod tests {
         let state = OutputViewState::default();
         assert_eq!(state.scroll_offset, 0);
         assert!(state.auto_follow);
+    }
+
+    // ── Dimmed mode tests ────────────────────────────────────────────
+
+    fn render_to_buffer(
+        buffer: &OutputRingBuffer,
+        state: &mut OutputViewState,
+        dimmed: bool,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, width, height);
+                let widget = OutputView::new(buffer).dimmed(dimmed);
+                frame.render_stateful_widget(widget, area, state);
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn test_dimmed_true_applies_dim_modifier() {
+        let mut buf = OutputRingBuffer::with_capacity(10);
+        buf.push_str("Hello world");
+        let mut state = OutputViewState::default();
+
+        let buffer = render_to_buffer(&buf, &mut state, true, 20, 3);
+
+        // Every rendered cell should have DIM modifier
+        for y in 0..3 {
+            for x in 0..20 {
+                let cell = buffer.cell((x, y)).expect("cell exists");
+                assert!(
+                    cell.modifier.contains(ratatui::style::Modifier::DIM),
+                    "cell ({x},{y}) missing DIM modifier"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dimmed_false_no_dim_modifier() {
+        let mut buf = OutputRingBuffer::with_capacity(10);
+        buf.push_str("Hello world");
+        let mut state = OutputViewState::default();
+
+        let buffer = render_to_buffer(&buf, &mut state, false, 20, 3);
+
+        // No cell should have DIM modifier when dimmed=false
+        for y in 0..3 {
+            for x in 0..20 {
+                let cell = buffer.cell((x, y)).expect("cell exists");
+                assert!(
+                    !cell.modifier.contains(ratatui::style::Modifier::DIM),
+                    "cell ({x},{y}) unexpectedly has DIM modifier"
+                );
+            }
+        }
     }
 }

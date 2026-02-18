@@ -11,12 +11,12 @@ Planning phase complete.
 
 
 
+ Question ──────────────────────────────────────────────────────────────────────
 
- ❓ Question
-
- Select authentication method
-
- ● JWT  Token-based auth
- ○ Session  Cookie-based auth
+  Select authentication method
+  ● JWT  Token-based auth
+  ○ Session  Cookie-based auth
+  ○ OAuth2  Third-party auth
+  ○ Other (type your answer...)
 
 Awaiting selection

@@ -38,10 +38,12 @@ fn set_worker_idle(ctx: &mut RunLoopContext, worker_id: u32) {
 /// Generate a colored separator line for phase start.
 fn phase_start_separator(phase: &WorkerPhase) -> String {
     let (icon, color_code, name) = match phase {
-        WorkerPhase::Setup => ("⚙", "\x1b[34m", "Setup"), // Blue
-        WorkerPhase::Implement => ("●", "\x1b[36m", "Implement"), // Cyan
-        WorkerPhase::ReviewFix => ("◎", "\x1b[33m", "Review+Fix"), // Yellow
-        WorkerPhase::Verify => ("◉", "\x1b[35m", "Verify"), // Magenta
+        WorkerPhase::Setup => ("⚙", "\x1b[34m", "Setup"),           // Blue
+        WorkerPhase::Implement => ("●", "\x1b[36m", "Implement"),    // Cyan
+        WorkerPhase::Review => ("◎", "\x1b[33m", "Review"),          // Yellow
+        WorkerPhase::Fix => ("◈", "\x1b[33m", "Fix"),                // Yellow
+        WorkerPhase::ReviewFix => ("◎", "\x1b[33m", "Review+Fix"),   // Yellow (deprecated)
+        WorkerPhase::Verify => ("◉", "\x1b[35m", "Verify"),          // Magenta
     };
     format!("{color_code}─── {icon} {name} ───\x1b[0m")
 }
@@ -51,6 +53,8 @@ fn phase_end_separator(phase: &WorkerPhase, success: bool) -> String {
     let name = match phase {
         WorkerPhase::Setup => "Setup",
         WorkerPhase::Implement => "Implement",
+        WorkerPhase::Review => "Review",
+        WorkerPhase::Fix => "Fix",
         WorkerPhase::ReviewFix => "Review+Fix",
         WorkerPhase::Verify => "Verify",
     };
@@ -419,13 +423,15 @@ impl Orchestrator {
         let new_state = match phase {
             WorkerPhase::Setup => WorkerState::SettingUp,
             WorkerPhase::Implement => WorkerState::Implementing,
+            WorkerPhase::Review => WorkerState::Reviewing,
+            WorkerPhase::Fix => WorkerState::Reviewing,
             WorkerPhase::ReviewFix => WorkerState::Reviewing,
             WorkerPhase::Verify => WorkerState::Verifying,
         };
         let (cost, input, output) = ctx.tui.mux_output.worker_cost(worker_id);
 
-        // Use review_model for ReviewFix phase, task's model for others
-        let model = if matches!(phase, WorkerPhase::ReviewFix) {
+        // Use review_model for Review/ReviewFix phases, task's model for others
+        let model = if matches!(phase, WorkerPhase::Review | WorkerPhase::ReviewFix) {
             Some(self.config.review_model.clone())
         } else {
             self.resolve_model(task_id, ctx.cached_tasks_file.as_ref())
@@ -964,6 +970,7 @@ mod tests {
                     description: None,
                     related_files: vec![],
                     implementation_steps: vec![],
+                    acceptance_criteria: Vec::new(),
                     profiles: vec![],
                     subtasks: vec![],
                 },
@@ -977,6 +984,7 @@ mod tests {
                     description: None,
                     related_files: vec![],
                     implementation_steps: vec![],
+                    acceptance_criteria: Vec::new(),
                     profiles: vec![],
                     subtasks: vec![],
                 },

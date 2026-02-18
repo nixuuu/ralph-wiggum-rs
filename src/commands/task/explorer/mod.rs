@@ -35,6 +35,7 @@ impl AppState for TaskExplorerApp {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::Resize(_, _) => EventResult::Consumed,
+            AppEvent::Mouse(_) => EventResult::Ignored,
             AppEvent::Tick => EventResult::Ignored,
         }
     }

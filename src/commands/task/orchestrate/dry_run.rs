@@ -391,6 +391,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                acceptance_criteria: Vec::new(),
                 profiles: vec!["frontend".to_string()],
                 subtasks: Vec::new(),
             },
@@ -404,6 +405,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                acceptance_criteria: Vec::new(),
                 profiles: vec!["backend".to_string()],
                 subtasks: Vec::new(),
             },
@@ -473,6 +475,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: vec!["frontend".to_string(), "backend".to_string()],
             subtasks: Vec::new(),
         }];
@@ -526,6 +529,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: Vec::new(),
         }];

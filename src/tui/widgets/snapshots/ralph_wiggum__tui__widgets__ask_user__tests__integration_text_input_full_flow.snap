@@ -2,8 +2,8 @@
 source: src/tui/widgets/ask_user.rs
 expression: snap(&buffer)
 ---
- ❓ Question
+ Question ────────────────────────────────────────
 
- What is your name?
-
- > Alice█
+  What is your name?
+  > Alice█
+  Enter: submit │ Esc: cancel

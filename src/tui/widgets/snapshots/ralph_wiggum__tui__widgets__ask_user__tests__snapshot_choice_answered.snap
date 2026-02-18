@@ -2,6 +2,6 @@
 source: src/tui/widgets/ask_user.rs
 expression: snap(&buffer)
 ---
- ✅ Answered
+ Answered
 
  Choose auth

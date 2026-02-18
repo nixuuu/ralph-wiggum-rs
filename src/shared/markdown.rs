@@ -101,6 +101,8 @@ mod tests {
         assert!(!result.is_empty());
     }
 
+
+
     #[test]
     fn test_render_code_block() {
         let result = render_markdown("```rust\nfn main() {}\n```");

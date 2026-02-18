@@ -156,7 +156,7 @@ pub fn list_tools() -> Value {
                         },
                         "tasks": {
                             "type": "string",
-                            "description": "YAML string with task list. Each task needs: id, name, status (for leaves). Optional fields: component, deps, model, description, related_files, implementation_steps, profiles. Example:\n- id: \"3.1\"\n  name: \"Implement feature\"\n  status: todo\n  component: api\n  profiles: [production, staging]"
+                            "description": "YAML string with task list. Each task needs: id, name, status (for leaves). Optional fields: component, deps, model, description, related_files, implementation_steps, acceptance_criteria, profiles. Example:\n- id: \"3.1\"\n  name: \"Implement feature\"\n  status: todo\n  component: api\n  acceptance_criteria:\n    - \"Handler is registered in the router\"\n    - \"UI displays the result\"\n  profiles: [production, staging]"
                         }
                     },
                     "required": ["tasks"]
@@ -207,6 +207,11 @@ pub fn list_tools() -> Value {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Ordered implementation steps"
+                        },
+                        "acceptance_criteria": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Specific, verifiable conditions that must ALL be true for the task to be done. Be concrete: 'function is called from X', 'UI renders Y', 'test Z passes'."
                         },
                         "profiles": {
                             "type": "array",

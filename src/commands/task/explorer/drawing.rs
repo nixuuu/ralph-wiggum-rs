@@ -344,6 +344,7 @@ mod tests {
             description: Some("A test description".to_string()),
             related_files: vec!["src/test.rs".to_string()],
             implementation_steps: vec!["Step one".to_string(), "Step two".to_string()],
+            acceptance_criteria: Vec::new(),
             profiles: vec!["backend".to_string()],
             subtasks: vec![],
         };
@@ -385,6 +386,7 @@ mod tests {
             description: None,
             related_files: vec![],
             implementation_steps: vec![],
+            acceptance_criteria: Vec::new(),
             profiles: vec![],
             subtasks: vec![
                 TaskNode {
@@ -397,6 +399,7 @@ mod tests {
                     description: None,
                     related_files: vec![],
                     implementation_steps: vec![],
+                    acceptance_criteria: Vec::new(),
                     profiles: vec![],
                     subtasks: vec![],
                 },
@@ -410,6 +413,7 @@ mod tests {
                     description: None,
                     related_files: vec![],
                     implementation_steps: vec![],
+                    acceptance_criteria: Vec::new(),
                     profiles: vec![],
                     subtasks: vec![],
                 },
@@ -443,6 +447,7 @@ mod tests {
             description: Some("A description".to_string()),
             related_files: vec!["a.rs".to_string(), "b.rs".to_string()],
             implementation_steps: vec!["Step 1".to_string()],
+            acceptance_criteria: Vec::new(),
             profiles: vec![],
             subtasks: vec![],
         };

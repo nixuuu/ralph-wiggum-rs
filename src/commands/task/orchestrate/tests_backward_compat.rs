@@ -140,6 +140,7 @@ implementation_steps: ["Step 1", "Step 2"]
 id: "1.1"
 name: "Task"
 status: "todo"
+acceptance_criteria: []
 profiles: []
 "#;
 
@@ -156,6 +157,7 @@ profiles: []
 id: "1.1"
 name: "Task"
 status: "todo"
+acceptance_criteria: []
 profiles: ["frontend", "backend"]
 "#;
 
@@ -179,6 +181,7 @@ profiles: ["frontend", "backend"]
             description: None,
             related_files: vec![],
             implementation_steps: vec![],
+            acceptance_criteria: Vec::new(),
             profiles: vec![], // Puste profiles
             subtasks: vec![],
         };

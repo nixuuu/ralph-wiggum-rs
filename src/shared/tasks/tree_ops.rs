@@ -133,6 +133,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                acceptance_criteria: Vec::new(),
                 profiles: Vec::new(),
                 subtasks: vec![
                     TaskNode {
@@ -145,6 +146,7 @@ mod tests {
                         description: None,
                         related_files: Vec::new(),
                         implementation_steps: Vec::new(),
+                        acceptance_criteria: Vec::new(),
                         profiles: Vec::new(),
                         subtasks: Vec::new(),
                     },
@@ -158,6 +160,7 @@ mod tests {
                         description: None,
                         related_files: Vec::new(),
                         implementation_steps: Vec::new(),
+                        acceptance_criteria: Vec::new(),
                         profiles: Vec::new(),
                         subtasks: Vec::new(),
                     },
@@ -173,6 +176,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                acceptance_criteria: Vec::new(),
                 profiles: Vec::new(),
                 subtasks: vec![TaskNode {
                     id: "2.1".to_string(),
@@ -184,6 +188,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    acceptance_criteria: Vec::new(),
                     profiles: Vec::new(),
                     subtasks: Vec::new(),
                 }],
@@ -220,6 +225,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: Vec::new(),
         };
@@ -241,6 +247,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: Vec::new(),
         };
@@ -263,6 +270,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: Vec::new(),
         };
@@ -325,6 +333,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: vec![TaskNode {
                 id: "1.1".to_string(),
@@ -336,6 +345,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                acceptance_criteria: Vec::new(),
                 profiles: Vec::new(),
                 subtasks: Vec::new(), // Pusty wektor — jest leafem
             }],
@@ -352,6 +362,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: Vec::new(),
         };
@@ -397,6 +408,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: Vec::new(),
         };
@@ -425,6 +437,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: Vec::new(),
         }];
@@ -465,6 +478,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                acceptance_criteria: Vec::new(),
                 profiles: Vec::new(),
                 subtasks: vec![
                     TaskNode {
@@ -477,6 +491,7 @@ mod tests {
                         description: None,
                         related_files: Vec::new(),
                         implementation_steps: Vec::new(),
+                        acceptance_criteria: Vec::new(),
                         profiles: Vec::new(),
                         subtasks: Vec::new(),
                     },
@@ -490,6 +505,7 @@ mod tests {
                         description: None,
                         related_files: Vec::new(),
                         implementation_steps: Vec::new(),
+                        acceptance_criteria: Vec::new(),
                         profiles: Vec::new(),
                         subtasks: Vec::new(),
                     },
@@ -505,6 +521,7 @@ mod tests {
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                acceptance_criteria: Vec::new(),
                 profiles: Vec::new(),
                 subtasks: vec![TaskNode {
                     id: "3.1".to_string(),
@@ -516,6 +533,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    acceptance_criteria: Vec::new(),
                     profiles: Vec::new(),
                     subtasks: Vec::new(),
                 }],
@@ -582,6 +600,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: vec![
                 TaskNode {
@@ -594,6 +613,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    acceptance_criteria: Vec::new(),
                     profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },
@@ -607,6 +627,7 @@ mod tests {
                     description: None,
                     related_files: Vec::new(),
                     implementation_steps: Vec::new(),
+                    acceptance_criteria: Vec::new(),
                     profiles: Vec::new(),
                     subtasks: Vec::new(),
                 },

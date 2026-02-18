@@ -50,9 +50,10 @@ The user's PRD/requirements:
    - `deps` — only on leaves, array of task IDs this task depends on, it is better to give more than to resolve conflicts later.
    - `model` — **required on every leaf task**. Aliases: `opus`, `sonnet`, `haiku` (or full model ID)
    - `component` — short identifier: `api`, `ui`, `infra`, `auth`, etc. Inherited from parent if not specified
-   - `description` — detailed task description with context, acceptance criteria, and references
+   - `description` — detailed task description with context and references
    - `related_files` — optional list of files relevant to the task (to read before implementing)
    - `implementation_steps` — optional ordered list of implementation steps
+   - `acceptance_criteria` — **required on every leaf task**: list of specific, verifiable conditions that must ALL be true for the task to be done. Be concrete: "function is called from X", "UI renders Y", "test Z passes". Always check: is the new code actually wired to wherever it's needed?
    - IDs use dot notation matching the tree depth: `1`, `1.1`, `1.1.1`, etc.
 
    Guidelines for tasks:

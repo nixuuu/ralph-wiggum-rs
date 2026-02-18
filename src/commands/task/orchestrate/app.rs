@@ -548,6 +548,7 @@ impl AppState for OrchestrateApp {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::Resize(_, _) => EventResult::Consumed,
+            AppEvent::Mouse(_) => EventResult::Ignored,
             AppEvent::Tick => {
                 // Refresh active workers on tick
                 self.refresh_active_worker_ids();

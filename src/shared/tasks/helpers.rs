@@ -51,6 +51,16 @@ pub fn format_task_prompt(leaf: &LeafTask) -> String {
         parts.push(format!("**Implementation steps:**\n{steps}"));
     }
 
+    if !leaf.acceptance_criteria.is_empty() {
+        parts.push(String::new());
+        let mut criteria = String::with_capacity(leaf.acceptance_criteria.len() * 50);
+        for c in &leaf.acceptance_criteria {
+            let _ = writeln!(criteria, "- {c}");
+        }
+        criteria.pop(); // Remove trailing newline
+        parts.push(format!("**Acceptance criteria:**\n{criteria}"));
+    }
+
     if !leaf.profiles.is_empty() {
         parts.push(String::new());
         parts.push(format!("**Profiles:** {}", leaf.profiles.join(", ")));
@@ -96,6 +106,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
         };
         let prompt = format_task_prompt(&leaf);
@@ -132,6 +143,7 @@ mod tests {
                 "Create auth route handler module".to_string(),
                 "Implement POST /login endpoint".to_string(),
             ],
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
         };
         let prompt = format_task_prompt(&leaf);
@@ -157,6 +169,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: vec![
                 "produkcja".to_string(),      // Polish word: production
                 "środowisko-dev".to_string(), // Polish word: environment-dev
@@ -200,6 +213,7 @@ mod tests {
             description: Some(long_description.clone()),
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
         };
         let prompt = format_task_prompt(&leaf);
@@ -253,6 +267,7 @@ mod tests {
                 "Handle & and * in strings".to_string(),
                 "Process | and > operators".to_string(),
             ],
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
         };
 

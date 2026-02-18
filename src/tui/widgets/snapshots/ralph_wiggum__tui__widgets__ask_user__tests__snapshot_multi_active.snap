@@ -2,10 +2,10 @@
 source: src/tui/widgets/ask_user.rs
 expression: snap(&buffer)
 ---
- ❓ Question
+ Question ────────────────────────────────────────
 
- Select features
-
- > [ ] Auth
-   [ ] API
-   [ ] Logging
+  Select features
+  > [ ] Auth
+    [ ] API
+    [ ] Logging
+  Space: toggle │ Enter: submit │ Esc: cancel

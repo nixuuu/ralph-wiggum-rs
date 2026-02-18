@@ -122,6 +122,7 @@ fn test_task_node_with_empty_profiles() {
     let yaml_content = r#"
 id: "2"
 name: "Task 2"
+acceptance_criteria: []
 profiles: []
 "#;
 
@@ -143,6 +144,7 @@ fn test_task_node_profiles_field_omitted_in_serialization() {
         description: None,
         related_files: vec![],
         implementation_steps: vec![],
+        acceptance_criteria: Vec::new(),
         profiles: vec![], // Puste
         subtasks: vec![],
     };

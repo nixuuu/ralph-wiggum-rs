@@ -2,8 +2,9 @@
 source: src/tui/widgets/ask_user.rs
 expression: snap(&buffer)
 ---
- ❓ Question
+ Question ────────────────────────────────────────
 
- Choose auth
-
- ● JWT  Token-based
+  Choose auth
+  ● JWT  Token-based
+  ○ Session  Cookie-based
+  ○ Other (type your answer...)

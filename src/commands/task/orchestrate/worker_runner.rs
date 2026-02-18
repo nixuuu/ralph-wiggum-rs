@@ -465,8 +465,9 @@ impl WorkerRunner {
             "{system_prompt}\n\n---\n\n\
              # Your Task\n\
              {task_desc}\n\n\
-             You are working in an isolated git worktree. Focus only on this task.\n\
-             Do not modify files outside the scope of this task.\n\
+             You are working in an isolated git worktree. Focus primarily on this task.\n\
+             Scout Rule: if you encounter obvious bugs, broken integrations, or pre-existing issues\n\
+             in files you are already working with, fix them — even if outside strict task scope.\n\
              Commit your changes when done."
         ));
 
@@ -480,11 +481,131 @@ impl WorkerRunner {
             .await
     }
 
+    /// Run a clean code review phase — agent inspects changes via git commands.
+    ///
+    /// The agent is NOT given the raw implementation output. Instead it uses git commands
+    /// to inspect what changed since `base_commit`, reads files for context, and writes
+    /// structured recommendations. This avoids "poisoned context" from the implementation session.
+    /// Returns phase result (review recommendations as output text).
+    pub async fn run_review_clean(
+        &mut self,
+        task_desc: &str,
+        base_commit: &str,
+        changed_files: &[String],
+        model: Option<&str>,
+        cwd: &Path,
+    ) -> Result<PhaseResult> {
+        let files_list = if changed_files.is_empty() {
+            "(no files detected — use git log to inspect commits)".to_string()
+        } else {
+            changed_files
+                .iter()
+                .map(|f| format!("- {f}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut prompt = String::new();
+
+        if let Some(prefix) = &self.config.prompt_prefix {
+            prompt.push_str(prefix);
+            prompt.push_str("\n\n");
+        }
+
+        prompt.push_str(&format!(
+            "# Code Review\n\n\
+             You are reviewing code changes for a task. Use git commands to inspect changes.\n\
+             Do NOT make any code changes — only analyze and write recommendations.\n\n\
+             ## Task Description\n\
+             {task_desc}\n\n\
+             ## Changed Files\n\
+             The following files were modified in this implementation:\n\
+             {files_list}\n\n\
+             ## How to Inspect Changes\n\
+             Run git commands to understand what was done:\n\
+             - `git log {base_commit}..HEAD --oneline` — see commits made\n\
+             - `git diff {base_commit}..HEAD -- <file>` — inspect specific file changes\n\
+             - Read files directly to understand the full context\n\n\
+             ## Your Review\n\
+             After inspecting the changes, analyze for:\n\
+             - Bugs or logic errors\n\
+             - Missing edge cases\n\
+             - Integration gaps: is new code properly wired to callers?\n\
+               (new function actually called from UI? new endpoint registered in router?\n\
+                new state connected to the component that needs it?)\n\
+             - Pre-existing issues in touched files that prevent this task from working\n\
+             - Code style issues\n\
+             - Incomplete implementations\n\n\
+             Write a structured review with specific, actionable recommendations.\n\
+             If the code looks good, say so explicitly."
+        ));
+
+        if let Some(suffix) = &self.config.prompt_suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(suffix);
+        }
+
+        self.run_phase(WorkerPhase::Review, &prompt, model, cwd)
+            .await
+    }
+
+    /// Run the fix phase — applies review recommendations in a clean session.
+    ///
+    /// If `verify_report` is Some, appends the verification failure report so the agent
+    /// also fixes issues found by direct verification commands.
+    /// Returns phase result including cost metrics.
+    pub async fn run_fix(
+        &mut self,
+        task_desc: &str,
+        review_output: &str,
+        model: Option<&str>,
+        cwd: &Path,
+        verify_report: Option<&str>,
+    ) -> Result<PhaseResult> {
+        let verify_section = if let Some(report) = verify_report {
+            format!(
+                "\n\n## Verification Failures\n\
+                 Fix the issues raised in the review AND the following verification failures.\n\n\
+                 <verify_report>\n{report}\n</verify_report>"
+            )
+        } else {
+            String::new()
+        };
+
+        let mut prompt = String::new();
+
+        if let Some(prefix) = &self.config.prompt_prefix {
+            prompt.push_str(prefix);
+            prompt.push_str("\n\n");
+        }
+
+        prompt.push_str(&format!(
+            "# Fix Phase\n\n\
+             Apply the code review recommendations below.\n\n\
+             ## Original Task\n\
+             {task_desc}\n\n\
+             ## Code Review Recommendations\n\
+             {review_output}{verify_section}\n\n\
+             Scout Rule: if you encounter obvious bugs in files you're working with, fix them.\n\
+             Commit your changes when done."
+        ));
+
+        if let Some(suffix) = &self.config.prompt_suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(suffix);
+        }
+
+        self.run_phase(WorkerPhase::Fix, &prompt, model, cwd).await
+    }
+
     /// Run the review+fix phase with implementation output from phase 1.
     ///
+    /// Deprecated: use `run_review_clean()` + `run_fix()` for a clean split.
+    /// Kept for backward compatibility.
     /// If `verify_report` is Some, appends the verification failure report to the prompt
     /// so the agent can fix the issues found by direct verification commands.
     /// Returns phase result including cost metrics.
+    #[allow(dead_code)]
     pub async fn run_review(
         &mut self,
         implementation_output: &str,
@@ -675,8 +796,9 @@ mod tests {
             "{system_prompt}\n\n---\n\n\
              # Your Task\n\
              {task_desc}\n\n\
-             You are working in an isolated git worktree. Focus only on this task.\n\
-             Do not modify files outside the scope of this task.\n\
+             You are working in an isolated git worktree. Focus primarily on this task.\n\
+             Scout Rule: if you encounter obvious bugs, broken integrations, or pre-existing issues\n\
+             in files you are already working with, fix them — even if outside strict task scope.\n\
              Commit your changes when done."
         ));
         if let Some(s) = &suffix {
@@ -708,8 +830,9 @@ mod tests {
             "{system_prompt}\n\n---\n\n\
              # Your Task\n\
              {task_desc}\n\n\
-             You are working in an isolated git worktree. Focus only on this task.\n\
-             Do not modify files outside the scope of this task.\n\
+             You are working in an isolated git worktree. Focus primarily on this task.\n\
+             Scout Rule: if you encounter obvious bugs, broken integrations, or pre-existing issues\n\
+             in files you are already working with, fix them — even if outside strict task scope.\n\
              Commit your changes when done."
         ));
         if let Some(s) = &suffix {
@@ -1095,5 +1218,272 @@ mod tests {
             runner.message_rx.is_none(),
             "message_rx should be None after take()"
         );
+    }
+
+    // ── run_review_clean prompt tests ────────────────────────────────────────
+
+    #[test]
+    fn test_review_clean_prompt_contains_task_desc_and_files() {
+        let task_desc = "Implement feature X";
+        let base_commit = "abc1234";
+        let changed_files = ["src/main.rs".to_string(), "src/lib.rs".to_string()];
+
+        let prefix: Option<String> = None;
+        let suffix: Option<String> = None;
+
+        let files_list = changed_files
+            .iter()
+            .map(|f| format!("- {f}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "# Code Review\n\n\
+             You are reviewing code changes for a task. Use git commands to inspect changes.\n\
+             Do NOT make any code changes — only analyze and write recommendations.\n\n\
+             ## Task Description\n\
+             {task_desc}\n\n\
+             ## Changed Files\n\
+             The following files were modified in this implementation:\n\
+             {files_list}\n\n\
+             ## How to Inspect Changes\n\
+             Run git commands to understand what was done:\n\
+             - `git log {base_commit}..HEAD --oneline` — see commits made\n\
+             - `git diff {base_commit}..HEAD -- <file>` — inspect specific file changes\n\
+             - Read files directly to understand the full context\n\n\
+             ## Your Review\n\
+             After inspecting the changes, analyze for:\n\
+             - Bugs or logic errors\n\
+             - Missing edge cases\n\
+             - Integration gaps: is new code properly wired to callers?\n\
+               (new function actually called from UI? new endpoint registered in router?\n\
+                new state connected to the component that needs it?)\n\
+             - Pre-existing issues in touched files that prevent this task from working\n\
+             - Code style issues\n\
+             - Incomplete implementations\n\n\
+             Write a structured review with specific, actionable recommendations.\n\
+             If the code looks good, say so explicitly."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.contains("# Code Review"));
+        assert!(prompt.contains("Implement feature X"));
+        assert!(prompt.contains("abc1234"));
+        assert!(prompt.contains("- src/main.rs"));
+        assert!(prompt.contains("- src/lib.rs"));
+        assert!(prompt.contains("Integration gaps"));
+        assert!(prompt.contains("Do NOT make any code changes"));
+        assert!(!prompt.contains("PREFIX TEXT"));
+        assert!(!prompt.contains("SUFFIX TEXT"));
+    }
+
+    #[test]
+    fn test_review_clean_prompt_with_prefix_suffix() {
+        let task_desc = "Implement feature X";
+        let base_commit = "abc1234";
+        let changed_files = ["src/main.rs".to_string()];
+
+        let prefix = Some("PREFIX TEXT".to_string());
+        let suffix = Some("SUFFIX TEXT".to_string());
+
+        let files_list = changed_files
+            .iter()
+            .map(|f| format!("- {f}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "# Code Review\n\n\
+             You are reviewing code changes for a task. Use git commands to inspect changes.\n\
+             Do NOT make any code changes — only analyze and write recommendations.\n\n\
+             ## Task Description\n\
+             {task_desc}\n\n\
+             ## Changed Files\n\
+             The following files were modified in this implementation:\n\
+             {files_list}\n\n\
+             ## How to Inspect Changes\n\
+             Run git commands to understand what was done:\n\
+             - `git log {base_commit}..HEAD --oneline` — see commits made\n\
+             - `git diff {base_commit}..HEAD -- <file>` — inspect specific file changes\n\
+             - Read files directly to understand the full context\n\n\
+             ## Your Review\n\
+             After inspecting the changes, analyze for:\n\
+             - Bugs or logic errors\n\
+             - Missing edge cases\n\
+             - Integration gaps: is new code properly wired to callers?\n\
+               (new function actually called from UI? new endpoint registered in router?\n\
+                new state connected to the component that needs it?)\n\
+             - Pre-existing issues in touched files that prevent this task from working\n\
+             - Code style issues\n\
+             - Incomplete implementations\n\n\
+             Write a structured review with specific, actionable recommendations.\n\
+             If the code looks good, say so explicitly."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.starts_with("PREFIX TEXT\n\n"));
+        assert!(prompt.contains("# Code Review"));
+        assert!(prompt.ends_with("\n\nSUFFIX TEXT"));
+    }
+
+    // ── run_fix prompt tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_fix_prompt_contains_review_output() {
+        let task_desc = "Implement feature X";
+        let review_output = "The function is not wired to the UI component.";
+
+        let prefix: Option<String> = None;
+        let suffix: Option<String> = None;
+        let verify_section = String::new();
+
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "# Fix Phase\n\n\
+             Apply the code review recommendations below.\n\n\
+             ## Original Task\n\
+             {task_desc}\n\n\
+             ## Code Review Recommendations\n\
+             {review_output}{verify_section}\n\n\
+             Scout Rule: if you encounter obvious bugs in files you're working with, fix them.\n\
+             Commit your changes when done."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.contains("# Fix Phase"));
+        assert!(prompt.contains("Implement feature X"));
+        assert!(prompt.contains("The function is not wired to the UI component."));
+        assert!(prompt.contains("Scout Rule"));
+        assert!(!prompt.contains("Verification Failures"));
+    }
+
+    #[test]
+    fn test_fix_prompt_with_verify_report() {
+        let task_desc = "Implement feature X";
+        let review_output = "Missing integration.";
+        let verify_report = "cargo test FAILED\ntest_foo: assertion failed";
+
+        let prefix: Option<String> = None;
+        let suffix: Option<String> = None;
+        let verify_section = format!(
+            "\n\n## Verification Failures\n\
+             Fix the issues raised in the review AND the following verification failures.\n\n\
+             <verify_report>\n{verify_report}\n</verify_report>"
+        );
+
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "# Fix Phase\n\n\
+             Apply the code review recommendations below.\n\n\
+             ## Original Task\n\
+             {task_desc}\n\n\
+             ## Code Review Recommendations\n\
+             {review_output}{verify_section}\n\n\
+             Scout Rule: if you encounter obvious bugs in files you're working with, fix them.\n\
+             Commit your changes when done."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.contains("# Fix Phase"));
+        assert!(prompt.contains("## Verification Failures"));
+        assert!(prompt.contains("cargo test FAILED"));
+        assert!(prompt.contains("Missing integration."));
+    }
+
+    #[test]
+    fn test_fix_prompt_with_prefix_suffix() {
+        let task_desc = "Implement feature X";
+        let review_output = "All good.";
+
+        let prefix = Some("PREFIX TEXT".to_string());
+        let suffix = Some("SUFFIX TEXT".to_string());
+        let verify_section = String::new();
+
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "# Fix Phase\n\n\
+             Apply the code review recommendations below.\n\n\
+             ## Original Task\n\
+             {task_desc}\n\n\
+             ## Code Review Recommendations\n\
+             {review_output}{verify_section}\n\n\
+             Scout Rule: if you encounter obvious bugs in files you're working with, fix them.\n\
+             Commit your changes when done."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.starts_with("PREFIX TEXT\n\n"));
+        assert!(prompt.contains("# Fix Phase"));
+        assert!(prompt.ends_with("\n\nSUFFIX TEXT"));
+    }
+
+    #[test]
+    fn test_implement_prompt_contains_scout_rule() {
+        let system_prompt = "# Development Agent\nYou are implementing a task.";
+        let task_desc = "Implement feature X";
+
+        let prefix: Option<String> = None;
+        let suffix: Option<String> = None;
+
+        let mut prompt = String::new();
+        if let Some(p) = &prefix {
+            prompt.push_str(p);
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&format!(
+            "{system_prompt}\n\n---\n\n\
+             # Your Task\n\
+             {task_desc}\n\n\
+             You are working in an isolated git worktree. Focus primarily on this task.\n\
+             Scout Rule: if you encounter obvious bugs, broken integrations, or pre-existing issues\n\
+             in files you are already working with, fix them — even if outside strict task scope.\n\
+             Commit your changes when done."
+        ));
+        if let Some(s) = &suffix {
+            prompt.push_str("\n\n");
+            prompt.push_str(s);
+        }
+
+        assert!(prompt.contains("Scout Rule"));
+        assert!(prompt.contains("Focus primarily on this task"));
+        assert!(!prompt.contains("Do not modify files outside the scope"));
+        assert!(!prompt.contains("Focus only on this task"));
     }
 }

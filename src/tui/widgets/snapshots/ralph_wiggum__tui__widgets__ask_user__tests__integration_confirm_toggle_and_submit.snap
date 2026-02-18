@@ -2,6 +2,7 @@
 source: src/tui/widgets/ask_user.rs
 expression: snap(&buffer)
 ---
- ❓ Question
+ Question ────────────────────────────────────────
 
- Are you sure?
+  Are you sure?
+  [Yes]  [No]

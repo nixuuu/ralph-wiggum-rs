@@ -7,7 +7,7 @@
 //! Wspólne handlery: Ctrl+C (shutdown), q (quit flow), resize.
 //! Per-command handlers definiowane przez trait `KeyHandler`.
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -25,6 +25,8 @@ pub enum AppEvent {
     Resize(u16, u16),
     /// Periodyczny tick (co interwał pollowania, gdy brak zdarzeń)
     Tick,
+    /// Zdarzenie myszy (kółko, klik, ruch)
+    Mouse(MouseEvent),
 }
 
 /// Wynik przetworzenia zdarzenia przez KeyHandler.
@@ -128,6 +130,11 @@ impl EventDispatcher {
                     }
                     Ok(Event::Resize(w, h)) => {
                         if tx.send(AppEvent::Resize(w, h)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Event::Mouse(mouse)) => {
+                        if tx.send(AppEvent::Mouse(mouse)).is_err() {
                             break;
                         }
                     }

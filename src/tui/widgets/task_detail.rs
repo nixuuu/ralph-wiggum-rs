@@ -327,6 +327,7 @@ mod tests {
                 "Zdefiniuj TaskDetailWidget z ref do TaskNode".to_string(),
                 "Renderuj: ID + Name (bold), Status (colored), Model, Component".to_string(),
             ],
+            acceptance_criteria: Vec::new(),
             profiles: vec![],
             subtasks: vec![],
         }
@@ -343,6 +344,7 @@ mod tests {
             description: None,
             related_files: vec![],
             implementation_steps: vec![],
+            acceptance_criteria: Vec::new(),
             profiles: vec![],
             subtasks: vec![],
         }

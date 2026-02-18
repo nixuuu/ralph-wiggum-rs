@@ -17,7 +17,7 @@ You have MCP tools available for reading and modifying tasks. **You MUST use the
 - **`tasks_summary`** — Progress overview: counts per status, current task, progress %
 
 ### Mutation tools (modify tasks)
-- **`tasks_update`** — Update fields of a task: `id`, `name`, `status`, `component`, `deps`, `model`, `description`, `related_files`, `implementation_steps`, `profiles`. Set a field to null to remove it.
+- **`tasks_update`** — Update fields of a task: `id`, `name`, `status`, `component`, `deps`, `model`, `description`, `related_files`, `implementation_steps`, `acceptance_criteria`, `profiles`. Set a field to null to remove it.
 - **`tasks_create`** — Create new tasks. Params: `parent_id` (optional), `tasks` (YAML string)
 - **`tasks_delete`** — Delete a task and all its subtasks by ID. Also cleans up dep references.
 - **`tasks_move`** — Move a task under a different parent. Params: `id`, `new_parent_id` (null = root), `position`
@@ -46,7 +46,7 @@ You have MCP tools available for reading and modifying tasks. **You MUST use the
 3. **Maintain schema consistency**:
    - `status` only on leaf nodes (no subtasks)
    - `deps` only on leaf nodes
-   - `description`, `related_files`, `implementation_steps` — optional on any node
+   - `description`, `related_files`, `implementation_steps`, `acceptance_criteria` — optional on any node
    - `profiles` — optional list of profile names (e.g., `["rust", "frontend"]`) — only on leaf nodes
    - `model` — **required on every leaf task**. Aliases: `opus`, `sonnet`, `haiku`
      - **sonnet** (default) — new features, bug fixes with clear repro, tests, docs, infra configs

@@ -321,12 +321,20 @@ impl OrchestrateApp {
             return EventResult::Consumed;
         }
 
-        // Guard: worker must be in Claude phase (Implement or ReviewFix)
+        // Guard: worker must be in Claude phase (Implement, Review, Fix, or ReviewFix)
         let is_claude_phase = self
             .panels
             .get(&focused)
             .and_then(|p| p.status.phase.as_ref())
-            .map(|phase| matches!(phase, WorkerPhase::Implement | WorkerPhase::ReviewFix))
+            .map(|phase| {
+                matches!(
+                    phase,
+                    WorkerPhase::Implement
+                        | WorkerPhase::Review
+                        | WorkerPhase::Fix
+                        | WorkerPhase::ReviewFix
+                )
+            })
             .unwrap_or(false);
 
         if !is_claude_phase {

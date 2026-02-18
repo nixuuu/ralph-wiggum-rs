@@ -11,6 +11,11 @@ use crate::shared::error::Result;
 pub enum WorkerPhase {
     Setup,
     Implement,
+    /// Clean code review phase (agent uses git commands to inspect changes).
+    Review,
+    /// Fix phase — applies review recommendations in a clean session.
+    Fix,
+    /// Deprecated: kept for backward compatibility with existing logs.
     ReviewFix,
     Verify,
 }
@@ -20,6 +25,8 @@ impl std::fmt::Display for WorkerPhase {
         match self {
             WorkerPhase::Setup => write!(f, "setup"),
             WorkerPhase::Implement => write!(f, "implement"),
+            WorkerPhase::Review => write!(f, "review"),
+            WorkerPhase::Fix => write!(f, "fix"),
             WorkerPhase::ReviewFix => write!(f, "review+fix"),
             WorkerPhase::Verify => write!(f, "verify"),
         }
@@ -336,6 +343,8 @@ mod tests {
     fn test_worker_phase_display() {
         assert_eq!(WorkerPhase::Setup.to_string(), "setup");
         assert_eq!(WorkerPhase::Implement.to_string(), "implement");
+        assert_eq!(WorkerPhase::Review.to_string(), "review");
+        assert_eq!(WorkerPhase::Fix.to_string(), "fix");
         assert_eq!(WorkerPhase::ReviewFix.to_string(), "review+fix");
         assert_eq!(WorkerPhase::Verify.to_string(), "verify");
     }
@@ -352,6 +361,20 @@ mod tests {
                 task_id: "T01".to_string(),
                 phase: WorkerPhase::Implement,
                 profiles: None,
+            },
+            WorkerEventKind::PhaseCompleted {
+                worker_id: 1,
+                task_id: "T01".to_string(),
+                phase: WorkerPhase::Review,
+                success: true,
+                profile_results: None,
+            },
+            WorkerEventKind::PhaseCompleted {
+                worker_id: 1,
+                task_id: "T01".to_string(),
+                phase: WorkerPhase::Fix,
+                success: true,
+                profile_results: None,
             },
             WorkerEventKind::PhaseCompleted {
                 worker_id: 1,

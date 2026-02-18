@@ -501,11 +501,22 @@ mod integration_tests {
 
     #[test]
     fn test_choice_wrap_around_up() {
+        // choice_question() ma 3 opcje: JWT(0), Session(1), OAuth(2) + "Other"(3)
+        // ↑ z JWT(0) → wrap na "Other"(3)
+        // Enter na "Other" aktywuje text input (Continue, nie Submit)
+        // Esc wraca do listy, ↑ daje OAuth(2)
         let state = AskUserTestState::new(choice_question());
-        let mut app = TestApp::new(state, 80, 10);
+        let mut app = TestApp::new(state, 80, 15);
 
-        // ↑ z pierwszej pozycji → wrap na ostatnią (OAuth)
-        app.inject_keys(vec![make_key(KeyCode::Up), make_key(KeyCode::Enter)]);
+        // ↑ z JWT → "Other", Enter → aktivuje text input, Esc → wróć do listy
+        // ↑ → OAuth, Enter → Submit("OAuth")
+        app.inject_keys(vec![
+            make_key(KeyCode::Up),   // → "Other" (index 3)
+            make_key(KeyCode::Enter), // aktywuje text input
+            make_key(KeyCode::Esc),  // wróć do listy
+            make_key(KeyCode::Up),   // → OAuth (index 2)
+            make_key(KeyCode::Enter), // Submit "OAuth"
+        ]);
         app.drain_events();
 
         assert_eq!(

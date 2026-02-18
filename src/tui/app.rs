@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::event::KeyEventKind;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Frame;
@@ -75,7 +75,7 @@ impl App {
         // Guard: jeśli kolejne operacje zawiodą, musimy wyłączyć raw mode
         let setup = || -> io::Result<ratatui::Terminal<CrosstermBackend<Stdout>>> {
             let mut stdout = io::stdout();
-            execute!(stdout, EnterAlternateScreen)?;
+            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
             let backend = CrosstermBackend::new(stdout);
             ratatui::Terminal::new(backend)
         };
@@ -85,7 +85,7 @@ impl App {
             Err(e) => {
                 // Cleanup raw mode — App nie istnieje więc Drop się nie odpali
                 let _ = crossterm::terminal::disable_raw_mode();
-                let _ = execute!(io::stdout(), LeaveAlternateScreen);
+                let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
                 return Err(e);
             }
         };
@@ -248,7 +248,7 @@ impl App {
         // Przywróć terminal
         if self.raw_mode_active {
             let _ = crossterm::terminal::disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
             let _ = self.terminal.show_cursor();
             self.raw_mode_active = false;
         }

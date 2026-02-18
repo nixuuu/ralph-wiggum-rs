@@ -200,6 +200,7 @@ fn trie_node_to_task_node(segment: &str, node: &TrieNode, parent_prefix: &str) -
                 description: None,
                 related_files: Vec::new(),
                 implementation_steps: Vec::new(),
+                acceptance_criteria: Vec::new(),
                 profiles: Vec::new(),
                 subtasks: Vec::new(),
             };
@@ -215,6 +216,7 @@ fn trie_node_to_task_node(segment: &str, node: &TrieNode, parent_prefix: &str) -
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: Vec::new(),
         };
@@ -246,6 +248,7 @@ fn trie_node_to_task_node(segment: &str, node: &TrieNode, parent_prefix: &str) -
         description: None,
         related_files: Vec::new(),
         implementation_steps: Vec::new(),
+        acceptance_criteria: Vec::new(),
         profiles: Vec::new(),
         subtasks,
     }
@@ -366,6 +369,7 @@ mod tests {
             description: None,
             related_files: Vec::new(),
             implementation_steps: Vec::new(),
+            acceptance_criteria: Vec::new(),
             profiles: Vec::new(),
             subtasks: Vec::new(),
         }];

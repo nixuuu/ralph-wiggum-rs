@@ -43,7 +43,7 @@ When starting a task, call task_update_status with status "in_progress".
 ## Rules
 - Max 3 attempts per approach. If stuck, try a different strategy
 - After 3 different strategies fail, report the problem in your output
-- Do not modify files outside the scope of your task
+- Scout Rule: if you encounter obvious bugs or broken integrations in files you are already working with, fix them
 - Emit `<promise>done</promise>` when the task is fully complete and tested
 
 ---

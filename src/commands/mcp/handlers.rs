@@ -71,7 +71,10 @@ pub fn tasks_list(tasks_path: &Path, params: &Value) -> Result<Value, String> {
                         "model": l.model,
                         "description": l.description,
                     });
-                    // Include profiles only when non-empty (consistent with YAML skip_serializing_if)
+                    // Include optional list fields only when non-empty (consistent with YAML skip_serializing_if)
+                    if !l.acceptance_criteria.is_empty() {
+                        obj["acceptance_criteria"] = json!(l.acceptance_criteria);
+                    }
                     if !l.profiles.is_empty() {
                         obj["profiles"] = json!(l.profiles);
                     }
@@ -253,6 +256,16 @@ pub fn tasks_update(tasks_path: &Path, params: &Value) -> Result<Value, String> 
                 node.implementation_steps = Vec::new();
             } else if let Some(arr) = is_val.as_array() {
                 node.implementation_steps = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+            }
+        }
+        if let Some(ac_val) = params.get("acceptance_criteria") {
+            if ac_val.is_null() {
+                node.acceptance_criteria = Vec::new();
+            } else if let Some(arr) = ac_val.as_array() {
+                node.acceptance_criteria = arr
                     .iter()
                     .filter_map(|v| v.as_str().map(String::from))
                     .collect();
@@ -1473,6 +1486,90 @@ name = "minimal"
         let tf = TasksFile::load(&path).unwrap();
         let node = tf.find_node("1.1").unwrap();
         assert_eq!(node.profiles, vec!["production", "staging"]);
+    }
+
+    // ── Tests for acceptance_criteria support in MCP ─────────────────────────
+
+    #[test]
+    fn test_tasks_update_acceptance_criteria() {
+        let (path, _dir) = setup_test_file();
+        let result = tasks_update(
+            &path,
+            &json!({"id": "1.1", "acceptance_criteria": ["Function is called from UI", "Test passes"]}),
+        )
+        .unwrap();
+        assert_eq!(result["updated"], "1.1");
+
+        let tf = TasksFile::load(&path).unwrap();
+        let node = tf.find_node("1.1").unwrap();
+        assert_eq!(
+            node.acceptance_criteria,
+            vec!["Function is called from UI", "Test passes"]
+        );
+    }
+
+    #[test]
+    fn test_tasks_update_acceptance_criteria_clear_with_null() {
+        let (path, _dir) = setup_test_file();
+        // First set acceptance_criteria
+        tasks_update(
+            &path,
+            &json!({"id": "1.1", "acceptance_criteria": ["Criterion A"]}),
+        )
+        .unwrap();
+
+        // Then clear with null
+        tasks_update(&path, &json!({"id": "1.1", "acceptance_criteria": null})).unwrap();
+
+        let tf = TasksFile::load(&path).unwrap();
+        let node = tf.find_node("1.1").unwrap();
+        assert!(node.acceptance_criteria.is_empty());
+    }
+
+    #[test]
+    fn test_tasks_list_flat_includes_acceptance_criteria() {
+        let (path, _dir) = setup_test_file();
+        // Set acceptance_criteria on task 1.1
+        tasks_update(
+            &path,
+            &json!({"id": "1.1", "acceptance_criteria": ["Handler registered", "UI renders"]}),
+        )
+        .unwrap();
+
+        let result = tasks_list(&path, &json!({"format": "flat"})).unwrap();
+        let tasks = result["tasks"].as_array().unwrap();
+        let task = tasks.iter().find(|t| t["id"] == "1.1").unwrap();
+
+        // acceptance_criteria should be present and correct
+        assert_eq!(
+            task["acceptance_criteria"],
+            json!(["Handler registered", "UI renders"])
+        );
+    }
+
+    #[test]
+    fn test_tasks_list_flat_omits_empty_acceptance_criteria() {
+        let (path, _dir) = setup_test_file();
+
+        let result = tasks_list(&path, &json!({"format": "flat"})).unwrap();
+        let tasks = result["tasks"].as_array().unwrap();
+        let task = tasks.iter().find(|t| t["id"] == "1.1").unwrap();
+
+        // acceptance_criteria should not appear when empty
+        assert!(task.get("acceptance_criteria").is_none());
+    }
+
+    #[test]
+    fn test_tasks_get_includes_acceptance_criteria() {
+        let (path, _dir) = setup_test_file();
+        tasks_update(
+            &path,
+            &json!({"id": "1.1", "acceptance_criteria": ["Done when X is true"]}),
+        )
+        .unwrap();
+
+        let result = tasks_get(&path, &json!({"id": "1.1"})).unwrap();
+        assert_eq!(result["acceptance_criteria"], json!(["Done when X is true"]));
     }
 
     #[test]

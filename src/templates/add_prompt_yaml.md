@@ -18,7 +18,7 @@ You have MCP tools available for reading and modifying tasks. **You MUST use the
 
 ### Mutation tools (modify tasks)
 - **`tasks_create`** — Create new tasks. Params: `parent_id` (optional), `tasks` (YAML string). Supports creating parent + subtasks hierarchy in one call.
-- **`tasks_update`** — Update fields of a task: `id`, `name`, `status`, `component`, `deps`, `model`, `description`, `related_files`, `implementation_steps`
+- **`tasks_update`** — Update fields of a task: `id`, `name`, `status`, `component`, `deps`, `model`, `description`, `related_files`, `implementation_steps`, `acceptance_criteria`
 - **`tasks_set_deps`** — Set dependency IDs for a leaf task
 - **`tasks_set_default_model`** — Set the global default model
 
@@ -39,9 +39,10 @@ You have MCP tools available for reading and modifying tasks. **You MUST use the
    - `deps` — only on leaf nodes: array of task IDs
    - `profiles` — only on leaf nodes: array of profile names (strings)
    - `subtasks` — array of child task nodes
-   - `description` — optional, detailed task description with context and acceptance criteria
+   - `description` — optional, detailed task description with context
    - `related_files` — optional list of files relevant to the task
    - `implementation_steps` — optional ordered list of implementation steps
+   - `acceptance_criteria` — **required on every leaf task**: list of specific, verifiable conditions that must ALL be true for the task to be done. Be concrete: "function is called from X", "UI renders Y", "test Z passes". Always check: is the new code actually wired to wherever it's needed?
    - `model` — **required on every leaf task**. Aliases: `opus`, `sonnet`, `haiku`
 
 3. **Use `tasks_set_deps`** if tasks depend on existing tasks.

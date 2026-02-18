@@ -78,9 +78,10 @@ Generate a hierarchical task plan following the ralph-wiggum tasks.yml schema.
 - `status` — **only on leaf nodes**: `todo`, `done`, `in_progress`, `blocked`
 - `deps` — **only on leaf nodes**: array of task IDs this task depends on. Prefer more deps over fewer — resolving conflicts later is expensive.
 - `component` — short identifier: `api`, `ui`, `infra`, `auth`, `db`, `tests`, etc. Inherited from parent if not specified.
-- `description` — detailed context with acceptance criteria and references to specific files/functions.
+- `description` — detailed context and references to specific files/functions.
 - `related_files` — list of files the implementer should read before starting.
 - `implementation_steps` — ordered list of concrete steps to implement the task.
+- `acceptance_criteria` — **required on every leaf task**: list of specific, verifiable conditions that must ALL be true for the task to be done. Be concrete: "function is called from X", "UI renders Y", "test Z passes". Always check: is the new code actually wired to wherever it's needed?
 - `model` — **required on every leaf task**. See model selection guide below.
 - `profiles` — **optional on leaf tasks**: array of verification profile names to run when this task completes. Profiles define targeted checks for specific path patterns. See "Available verification profiles" below.
 
@@ -163,7 +164,7 @@ Once the user confirms, save the plan using MCP tools.
 
 ### Mutation tools (modify tasks)
 - **`tasks_create`** — Create new tasks. Params: `parent_id` (optional), `tasks` (YAML string). Supports parent + subtasks hierarchy in one call.
-- **`tasks_update`** — Update fields of a task: `id`, `name`, `status`, `component`, `deps`, `model`, `description`, `related_files`, `implementation_steps`. Set field to null to remove.
+- **`tasks_update`** — Update fields of a task: `id`, `name`, `status`, `component`, `deps`, `model`, `description`, `related_files`, `implementation_steps`, `acceptance_criteria`. Set field to null to remove.
 - **`tasks_delete`** — Delete a task and all its subtasks. Cleans up dep references.
 - **`tasks_move`** — Move a task under a different parent. Params: `id`, `new_parent_id` (null = root), `position`.
 - **`tasks_batch_status`** — Batch update statuses. Params: `updates` (array of {id, status}).

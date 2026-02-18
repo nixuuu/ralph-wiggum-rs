@@ -135,6 +135,7 @@ impl TasksFile {
                 description: node.description.clone(),
                 related_files: node.related_files.clone(),
                 implementation_steps: node.implementation_steps.clone(),
+                acceptance_criteria: node.acceptance_criteria.clone(),
                 profiles: node.profiles.clone(),
             });
         } else {
@@ -982,6 +983,7 @@ tasks:
             description: Some("Deploy to production".to_string()),
             related_files: vec![],
             implementation_steps: vec![],
+            acceptance_criteria: vec![],
             profiles: vec!["production".to_string(), "eu-west".to_string()],
         };
 
@@ -1005,6 +1007,7 @@ tasks:
             description: None,
             related_files: vec![],
             implementation_steps: vec![],
+            acceptance_criteria: vec![],
             profiles: vec![],
         };
 

@@ -3,9 +3,10 @@ use std::collections::HashSet;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    prelude::StatefulWidget,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Padding, Paragraph, Widget},
+    widgets::{Block, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget},
 };
 
 use crate::shared::progress::TaskStatus;
@@ -246,6 +247,23 @@ impl<'a> TaskSidebar<'a> {
             let paragraph = Paragraph::new(line);
             let row_area = Rect::new(inner.x, y, inner.width, 1);
             paragraph.render(row_area, buf);
+        }
+
+        // Scrollbar (VerticalRight) — widoczny tylko gdy więcej wierszy niż viewport
+        if rows.len() > viewport_height {
+            let max_scroll = rows.len().saturating_sub(viewport_height);
+            let mut sb_state = ScrollbarState::default()
+                .content_length(max_scroll + 1)
+                .viewport_content_length(viewport_height)
+                .position(self.state.scroll_offset);
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .thumb_symbol("▐")
+                .track_symbol(Some("▐"))
+                .thumb_style(Style::default().fg(DEFAULT_THEME.secondary))
+                .track_style(Style::default().fg(DEFAULT_THEME.border_normal))
+                .begin_symbol(None)
+                .end_symbol(None)
+                .render(area, buf, &mut sb_state);
         }
     }
 }

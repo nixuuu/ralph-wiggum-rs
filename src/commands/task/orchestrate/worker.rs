@@ -235,19 +235,33 @@ impl Worker {
                 })
                 .await;
 
-                // Send PhaseStarted + PhaseCompleted for ReviewFix to maintain state tracking
+                // Send PhaseStarted + PhaseCompleted for Review + Fix to maintain state tracking
                 self.send_event(WorkerEventKind::PhaseStarted {
                     worker_id: self.id,
                     task_id: task_id.to_string(),
-                    phase: WorkerPhase::ReviewFix,
+                    phase: WorkerPhase::Review,
                     profiles: None,
                 })
                 .await;
-
                 self.send_event(WorkerEventKind::PhaseCompleted {
                     worker_id: self.id,
                     task_id: task_id.to_string(),
-                    phase: WorkerPhase::ReviewFix,
+                    phase: WorkerPhase::Review,
+                    success: true,
+                    profile_results: None,
+                })
+                .await;
+                self.send_event(WorkerEventKind::PhaseStarted {
+                    worker_id: self.id,
+                    task_id: task_id.to_string(),
+                    phase: WorkerPhase::Fix,
+                    profiles: None,
+                })
+                .await;
+                self.send_event(WorkerEventKind::PhaseCompleted {
+                    worker_id: self.id,
+                    task_id: task_id.to_string(),
+                    phase: WorkerPhase::Fix,
                     success: true,
                     profile_results: None,
                 })
@@ -283,18 +297,18 @@ impl Worker {
                 return Ok(result);
             }
 
-            // Phase 2: Review + Fix (with verify report if verify failed)
+            // Phase 2: Review — clean session, agent inspects via git commands.
             // CRITICAL: Use review_model from config instead of task's implementation model.
-            // This allows using a more capable model (e.g., opus) for code review,
-            // while using a faster/cheaper model (e.g., sonnet) for implementation.
-            // The review_model is resolved from CLI → config → default "opus" in ResolvedConfig.
+            // The reviewer gets task_desc + changed_files + base_commit (no impl output).
+            // This avoids "poisoned context" from the full implementation conversation.
+            let base_commit = self.config.base_commit.as_deref().unwrap_or("HEAD~1");
             let review_result = match runner
-                .run_review(
-                    &impl_result.output,
+                .run_review_clean(
                     task_desc,
+                    base_commit,
+                    &changed_files,
                     Some(&self.config.review_model),
                     worktree_path,
-                    verify_report.as_deref(),
                 )
                 .await
             {
@@ -311,22 +325,48 @@ impl Worker {
             total_input_tokens += review_result.input_tokens;
             total_output_tokens += review_result.output_tokens;
 
-            // Commit after review phase
+            // Phase 3: Fix — clean session, applies review recommendations.
+            // Passes verify_report (from post-implement verify) so the agent also
+            // fixes verification failures found after implementation.
+            let fix_result = match runner
+                .run_fix(
+                    task_desc,
+                    &review_result.output,
+                    model,
+                    worktree_path,
+                    verify_report.as_deref(),
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    return self
+                        .handle_failure(task_id, &e.to_string(), retries, total_cost)
+                        .await;
+                }
+            };
+
+            // Accumulate cost metrics
+            total_cost += fix_result.cost_usd;
+            total_input_tokens += fix_result.input_tokens;
+            total_output_tokens += fix_result.output_tokens;
+
+            // Commit after fix phase
             self.send_event(WorkerEventKind::OutputLines {
                 worker_id: self.id,
-                lines: vec!["Committing review changes...".to_string()],
+                lines: vec!["Committing fix changes...".to_string()],
             })
             .await;
 
-            let _review_committed = self
-                .git_commit(worktree_path, task_id, &WorkerPhase::ReviewFix)
+            let _fix_committed = self
+                .git_commit(worktree_path, task_id, &WorkerPhase::Fix)
                 .await
                 .unwrap_or(false);
 
-            // Rebuild verify plan after review (files may have changed)
-            let changed_files_post_review = self.get_changed_files_since_base(worktree_path).await;
+            // Rebuild verify plan after fix (files may have changed)
+            let changed_files_post_fix = self.get_changed_files_since_base(worktree_path).await;
             let verify_plan_post_review =
-                self.build_verify_plan(verify_commands, task_profiles, &changed_files_post_review);
+                self.build_verify_plan(verify_commands, task_profiles, &changed_files_post_fix);
 
             // Direct verify after review+fix (skipped when no verify plan)
             let verified = if let Some(ref plan) = verify_plan_post_review {

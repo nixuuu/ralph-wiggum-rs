@@ -8,13 +8,13 @@ Adding new feature...
 
 
 
- ❓ Question
+ Question ──────────────────────────────────────────────────────────────────────
 
- Select components to include
-
- > [ ] Authentication
-   [ ] API Gateway
-   [ ] Database
-   [ ] Logging
+  Select components to include
+  > [ ] Authentication
+    [ ] API Gateway
+    [ ] Database
+    [ ] Logging
+  Space: toggle │ Enter: submit │ Esc: cancel
 
 Multi-select active

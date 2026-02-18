@@ -11,7 +11,9 @@ use std::time::{Instant, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::Line;
+use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::tui::app::AppState;
 use crate::tui::events::{AppEvent, EventResult};
@@ -443,7 +445,12 @@ impl AppState for RunApp {
                 };
                 self.last_output_area = output_area;
                 let output_view = OutputView::new(&self.ring_buffer);
-                frame.render_stateful_widget(output_view, output_area, &mut self.output_view_state);
+                // Rezerwujemy 1 kolumnę po prawej dla scrollbara
+                let output_content_area = Rect {
+                    width: output_area.width.saturating_sub(1),
+                    ..output_area
+                };
+                frame.render_stateful_widget(output_view, output_content_area, &mut self.output_view_state);
             } else {
                 // Sidebar ukryty — output zajmuje pełną content width
                 let full_content = Rect {
@@ -453,9 +460,14 @@ impl AppState for RunApp {
                 };
                 self.last_output_area = full_content;
                 let output_view = OutputView::new(&self.ring_buffer);
+                // Rezerwujemy 1 kolumnę po prawej dla scrollbara
+                let output_content_area = Rect {
+                    width: full_content.width.saturating_sub(1),
+                    ..full_content
+                };
                 frame.render_stateful_widget(
                     output_view,
-                    full_content,
+                    output_content_area,
                     &mut self.output_view_state,
                 );
             }
@@ -463,7 +475,12 @@ impl AppState for RunApp {
             // Small breakpoint — output na pełną szerokość, sidebar jako overlay
             self.last_output_area = layout.content;
             let output_view = OutputView::new(&self.ring_buffer);
-            frame.render_stateful_widget(output_view, layout.content, &mut self.output_view_state);
+            // Rezerwujemy 1 kolumnę po prawej dla scrollbara
+            let output_content_area = Rect {
+                width: layout.content.width.saturating_sub(1),
+                ..layout.content
+            };
+            frame.render_stateful_widget(output_view, output_content_area, &mut self.output_view_state);
 
             // Overlay sidebar na wierzchu (jeśli visible)
             if self.sidebar.visible {
@@ -473,6 +490,34 @@ impl AppState for RunApp {
                     sidebar_focused,
                     layout.content,
                     frame.buffer_mut(),
+                );
+            }
+        }
+
+        // ── Output scrollbar (VerticalRight, widoczny tylko gdy content > viewport) ──
+        {
+            let output_area = self.last_output_area;
+            // Używamy zmniejszonej szerokości (content area bez kolumny scrollbara)
+            let content_width = output_area.width.saturating_sub(1);
+            let total_visual = self.ring_buffer.total_visual_rows(content_width);
+            let viewport_h = output_area.height as usize;
+            if total_visual > viewport_h {
+                let max_scroll = total_visual - viewport_h;
+                let pos = max_scroll.saturating_sub(self.output_view_state.scroll_offset);
+                let mut sb = ScrollbarState::default()
+                    .content_length(max_scroll + 1)
+                    .viewport_content_length(viewport_h)
+                    .position(pos);
+                frame.render_stateful_widget(
+                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                        .thumb_symbol("▐")
+                        .track_symbol(Some("▐"))
+                        .thumb_style(Style::default().fg(DEFAULT_THEME.secondary))
+                        .track_style(Style::default().fg(DEFAULT_THEME.border_normal))
+                        .begin_symbol(None)
+                        .end_symbol(None),
+                    output_area,
+                    &mut sb,
                 );
             }
         }
@@ -518,6 +563,7 @@ impl AppState for RunApp {
                 // Sidebar jest teraz dostępny jako overlay w Small mode — focus zachowany
                 EventResult::Consumed
             }
+            AppEvent::Mouse(_) => EventResult::Ignored,
             AppEvent::Tick => {
                 // Jeśli splash screen jest aktywny — sprawdź timer (1.5s)
                 if self.phase == RunPhase::Splash {

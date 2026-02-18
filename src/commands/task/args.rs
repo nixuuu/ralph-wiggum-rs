@@ -44,13 +44,14 @@ pub struct PrdArgs {
     pub model: Option<String>,
 }
 
+/// Shared args for task add / edit / plan — all three commands take the same flags.
 #[derive(Args, Debug)]
-pub struct AddArgs {
-    /// Path to requirements file
+pub struct SharedTaskArgs {
+    /// Path to input file (requirements / instructions / plan)
     #[arg(short, long)]
     pub file: Option<PathBuf>,
 
-    /// Requirements as text
+    /// Input as inline text
     #[arg(short, long)]
     pub prompt: Option<String>,
 
@@ -59,35 +60,9 @@ pub struct AddArgs {
     pub model: Option<String>,
 }
 
-#[derive(Args, Debug)]
-pub struct EditArgs {
-    /// Path to file with edit instructions
-    #[arg(short, long)]
-    pub file: Option<PathBuf>,
-
-    /// Edit instructions as text
-    #[arg(short, long)]
-    pub prompt: Option<String>,
-
-    /// Claude model to use
-    #[arg(short, long)]
-    pub model: Option<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct PlanArgs {
-    /// Path to plan file
-    #[arg(short, long)]
-    pub file: Option<PathBuf>,
-
-    /// Plan content as text
-    #[arg(short, long)]
-    pub prompt: Option<String>,
-
-    /// Claude model to use
-    #[arg(short, long)]
-    pub model: Option<String>,
-}
+pub type AddArgs = SharedTaskArgs;
+pub type EditArgs = SharedTaskArgs;
+pub type PlanArgs = SharedTaskArgs;
 
 #[derive(Args, Debug)]
 pub struct OrchestrateArgs {

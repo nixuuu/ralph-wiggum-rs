@@ -16,11 +16,12 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget};
 
 use tokio::sync::oneshot;
 
 use crate::commands::mcp::ask_user::{Answer, Question, QuestionType};
+use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::app::AppState;
 use crate::tui::events::{AppEvent, EventResult};
 use crate::tui::ring_buffer::OutputRingBuffer;
@@ -237,6 +238,10 @@ pub struct TaskCommandApp {
     output_state: OutputViewState,
     /// Whether the Claude runner has completed (TUI stays open for browsing)
     runner_completed: bool,
+    /// Viewport height dostępny dla ask_user widget (obliczony przy draw, 0 = nieznany)
+    ask_user_viewport_height: u16,
+    /// Szerokość terminala (obliczona przy draw, 80 = domyślna)
+    last_known_width: u16,
 }
 
 impl TaskCommandApp {
@@ -249,6 +254,8 @@ impl TaskCommandApp {
             question_tracker: None,
             output_state: OutputViewState::default(),
             runner_completed: false,
+            ask_user_viewport_height: 0,
+            last_known_width: 80,
         }
     }
 
@@ -333,9 +340,11 @@ impl TaskCommandApp {
         let has_more = tracker.advance(answer_text);
 
         if has_more {
-            // Create widget for next question
+            // Create widget for next question (reset scroll to top)
             let next_question = tracker.tui_questions[tracker.current_index].clone();
-            self.active_widget = Some(AskUserWidget::new(next_question));
+            let mut next_widget = AskUserWidget::new(next_question);
+            next_widget.reset_scroll();
+            self.active_widget = Some(next_widget);
         } else {
             // All questions answered — send answers and cleanup
             tracker.finish();
@@ -379,11 +388,19 @@ impl TaskCommandApp {
 
 impl AppState for TaskCommandApp {
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        // Calculate dynamic ask_user height from AskUserWidget (width-aware wrapping)
+        // Max wysokość dla ask_user widget: 75% terminala, min 5 wierszy, max area.height-3
+        // Zapisujemy dla handle_event() (scroll keys)
+        let max_ask_height = ((area.height * 3) / 4)
+            .max(5)
+            .min(area.height.saturating_sub(3));
+        self.ask_user_viewport_height = max_ask_height;
+        self.last_known_width = area.width;
+
+        // Calculate dynamic ask_user height from AskUserWidget (width-aware wrapping, capped)
         let ask_user_height = self
             .active_widget
             .as_ref()
-            .map(|w| w.height_for_width(area.width))
+            .map(|w| w.height_for_width_capped(area.width, max_ask_height))
             .unwrap_or(0);
 
         let constraints = vec![
@@ -400,8 +417,39 @@ impl AppState for TaskCommandApp {
         frame.render_widget(Paragraph::new(header_line), chunks[0]);
 
         // ── Output (delegated to OutputView StatefulWidget, fill remaining space) ──
-        let output_view = OutputView::new(&self.ring_buffer);
-        frame.render_stateful_widget(output_view, chunks[1], &mut self.output_state);
+        // Rezerwujemy 1 kolumnę po prawej dla scrollbara — tekst nie wchodzi pod scrollbar
+        let output_content_area = Rect {
+            width: chunks[1].width.saturating_sub(1),
+            ..chunks[1]
+        };
+        let output_view = OutputView::new(&self.ring_buffer)
+            .dimmed(self.active_widget.is_some());
+        frame.render_stateful_widget(output_view, output_content_area, &mut self.output_state);
+
+        // ── Output scrollbar (VerticalRight, widoczny tylko gdy content > viewport) ──
+        {
+            let total_visual = self.ring_buffer.total_visual_rows(output_content_area.width);
+            let viewport_h = output_content_area.height as usize;
+            if total_visual > viewport_h {
+                let max_scroll = total_visual.saturating_sub(viewport_h);
+                let pos = max_scroll.saturating_sub(self.output_state.scroll_offset);
+                let mut sb = ScrollbarState::default()
+                    .content_length(max_scroll + 1)
+                    .viewport_content_length(viewport_h)
+                    .position(pos);
+                frame.render_stateful_widget(
+                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                        .thumb_symbol("▐")
+                        .track_symbol(Some("▐"))
+                        .thumb_style(Style::default().fg(DEFAULT_THEME.secondary))
+                        .track_style(Style::default().fg(DEFAULT_THEME.border_normal))
+                        .begin_symbol(None)
+                        .end_symbol(None),
+                    chunks[1],
+                    &mut sb,
+                );
+            }
+        }
 
         // ── Ask user widget (if active, rendered via AskUserWidget::render) ──
         if let Some(ref widget) = self.active_widget {
@@ -415,10 +463,62 @@ impl AppState for TaskCommandApp {
     }
 
     fn handle_event(&mut self, event: AppEvent) -> EventResult {
+        // Obsługa scroll myszki — priorytet przed key handling
+        if let AppEvent::Mouse(mouse) = event {
+            use crossterm::event::MouseEventKind;
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if self.active_widget.is_some() {
+                        if let Some(w) = self.active_widget.as_mut() {
+                            w.scroll_up(3);
+                        }
+                    } else {
+                        self.output_state.scroll_up(3);
+                    }
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::ScrollDown => {
+                    if self.active_widget.is_some() {
+                        let max_h = self.ask_user_viewport_height;
+                        let width = self.last_known_width;
+                        if let Some(w) = self.active_widget.as_mut() {
+                            w.scroll_down(3, width, max_h);
+                        }
+                    } else {
+                        self.output_state.scroll_down(3);
+                    }
+                    return EventResult::Consumed;
+                }
+                _ => return EventResult::Ignored,
+            }
+        }
+
         // When ask_user widget is active, intercept keys for it
         if self.active_widget.is_some()
             && let AppEvent::Key(key) = event
         {
+            let max_h = self.ask_user_viewport_height;
+            let width = self.last_known_width;
+            // page = viewport - 2 (żeby zachować kontekst), min 1
+            let page = max_h.saturating_sub(2).max(1);
+
+            // Obsłuż scroll keys PRZED delegacją do widgetu
+            match key.code {
+                crossterm::event::KeyCode::PageUp => {
+                    if let Some(w) = self.active_widget.as_mut() {
+                        w.scroll_up(page);
+                    }
+                    return EventResult::Consumed;
+                }
+                crossterm::event::KeyCode::PageDown => {
+                    if let Some(w) = self.active_widget.as_mut() {
+                        w.scroll_down(page, width, max_h);
+                    }
+                    return EventResult::Consumed;
+                }
+                _ => {}
+            }
+
             let action = self.active_widget.as_mut().unwrap().handle_key(key.code);
             match action {
                 AskUserAction::Submit(answer) => {
@@ -965,7 +1065,7 @@ mod tests {
 
         assert!(app.has_active_question());
         let height = app.active_widget.as_ref().unwrap().height_for_width(80);
-        // AskUserWidget text: border(1) + question(1) + sep(1) + input(1) + hint(1) + border(1) = 6
+        // AskUserWidget text: border_top/title(1) + padding.top(1) + question(1) + input(1) + hint(1) + padding.bottom(1) = 6
         assert_eq!(height, 6u16);
     }
 
@@ -998,8 +1098,8 @@ mod tests {
 
         assert!(app.has_active_question());
         let height = app.active_widget.as_ref().unwrap().height_for_width(80);
-        // AskUserWidget choice: border(1) + question(1) + sep(1) + 3 options + border(1) = 7
-        assert_eq!(height, 7u16);
+        // AskUserWidget choice: title(1) + padding.top(1) + question(1) + 3 options + Other(1) + padding.bottom(1) = 8
+        assert_eq!(height, 8u16);
     }
 
     #[test]
