@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 #[cfg(not(test))]
 use crossterm::terminal;
-use termimad::{FmtText, MadSkin, crossterm::style::Color::*};
+use termimad::{FmtText, MadSkin, crossterm::style::Color};
 
 /// Cached MadSkin — created once, reused for all markdown rendering.
 static SKIN: LazyLock<MadSkin> = LazyLock::new(create_skin);
@@ -20,44 +20,44 @@ fn get_terminal_width() -> usize {
 fn create_skin() -> MadSkin {
     let mut skin = MadSkin::default();
 
-    // Headers - bold and colored
-    skin.headers[0].set_fg(Cyan);
+    // Headers — Catppuccin hierarchy: Lavender → Blue → Mauve
+    skin.headers[0].set_fg(Color::Rgb { r: 180, g: 190, b: 254 }); // Lavender #b4befe
     skin.headers[0].add_attr(termimad::crossterm::style::Attribute::Bold);
-    skin.headers[1].set_fg(Blue);
+    skin.headers[1].set_fg(Color::Rgb { r: 137, g: 180, b: 250 }); // Blue #89b4fa
     skin.headers[1].add_attr(termimad::crossterm::style::Attribute::Bold);
-    skin.headers[2].set_fg(Magenta);
+    skin.headers[2].set_fg(Color::Rgb { r: 203, g: 166, b: 247 }); // Mauve #cba6f7
     skin.headers[2].add_attr(termimad::crossterm::style::Attribute::Bold);
 
-    // Bold text
-    skin.bold.set_fg(White);
+    // Bold text — Text #cdd6f4
+    skin.bold.set_fg(Color::Rgb { r: 205, g: 214, b: 244 });
     skin.bold
         .add_attr(termimad::crossterm::style::Attribute::Bold);
 
-    // Italic
-    skin.italic.set_fg(Grey);
+    // Italic — Subtext0 #a6adc8
+    skin.italic.set_fg(Color::Rgb { r: 166, g: 173, b: 200 });
     skin.italic
         .add_attr(termimad::crossterm::style::Attribute::Italic);
 
-    // Inline code - cyan on dark background
-    skin.inline_code.set_fg(Yellow);
+    // Inline code — Yellow #f9e2af
+    skin.inline_code.set_fg(Color::Rgb { r: 249, g: 226, b: 175 });
 
-    // Code blocks - with background
-    skin.code_block.set_fg(Green);
+    // Code blocks — Green #a6e3a1
+    skin.code_block.set_fg(Color::Rgb { r: 166, g: 227, b: 161 });
 
-    // Quote blocks
-    skin.quote_mark.set_fg(DarkGrey);
+    // Quote blocks — Overlay0 #6c7086
+    skin.quote_mark.set_fg(Color::Rgb { r: 108, g: 112, b: 134 });
 
-    // Bullet points
-    skin.bullet.set_fg(Cyan);
+    // Bullet points — Sky #89dceb
+    skin.bullet.set_fg(Color::Rgb { r: 137, g: 220, b: 235 });
 
-    // Horizontal rule
-    skin.horizontal_rule.set_fg(DarkGrey);
+    // Horizontal rule — Surface1 #45475a
+    skin.horizontal_rule.set_fg(Color::Rgb { r: 69, g: 71, b: 90 });
 
-    // Table borders
-    skin.table.set_fg(DarkGrey);
+    // Table borders — Overlay0 #6c7086
+    skin.table.set_fg(Color::Rgb { r: 108, g: 112, b: 134 });
 
-    // Links
-    skin.paragraph.set_fg(Reset);
+    // Paragraph — reset to default
+    skin.paragraph.set_fg(Color::Reset);
 
     skin
 }
