@@ -1,10 +1,11 @@
 /// Widget dla inline multi-select w ask_user container.
 ///
 /// Renderuje pytanie (markdown) + listę opcji z checkboxami [✓]/[ ].
-/// Obsługuje nawigację ↑↓, toggle Space, submit Enter.
+/// Obsługuje nawigację ↑↓, toggle Space, submit Enter, oraz klik myszą.
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Widget,
@@ -12,6 +13,7 @@ use ratatui::{
 
 use crate::shared::markdown::render_markdown;
 use crate::tui::Theme;
+use crate::tui::widgets::text_input_overlay::InputAction;
 
 /// Jedna opcja w multi-select
 #[derive(Debug, Clone)]
@@ -85,6 +87,49 @@ impl MultiSelectState {
     /// Sprawdza czy jakakolwiek opcja jest zaznaczona
     pub fn has_selection(&self) -> bool {
         self.checked.iter().any(|&checked| checked)
+    }
+
+    /// Obsługuje kliknięcie myszą na opcję w liście.
+    ///
+    /// `area` — obszar renderowania opcji (content area bezpośrednio po pytaniu,
+    /// taki sam jak przekazywany do `render_multi_active`). Każda opcja zajmuje
+    /// jeden wiersz: opcja `i` jest na `area.y + i`.
+    ///
+    /// Zwraca:
+    /// - `Some(InputAction::Continue)` — klik trafił w opcję; kursor przesunięty,
+    ///   zaznaczenie toggled
+    /// - `None` — klik poza opcjami (ignorowany)
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> Option<InputAction> {
+        // Obsługujemy tylko lewy przycisk myszy (klik w dół)
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return None;
+        }
+
+        let pos = Position::new(mouse.column, mouse.row);
+
+        // Klik musi być w poziomych granicach obszaru
+        if pos.x < area.x || pos.x >= area.x.saturating_add(area.width) {
+            return None;
+        }
+
+        // Klik musi być w pionowych granicach obszaru
+        if pos.y < area.y || pos.y >= area.y.saturating_add(area.height) {
+            return None;
+        }
+
+        // Indeks opcji = przesunięcie od początku obszaru
+        let row_idx = (pos.y - area.y) as usize;
+
+        // Ignoruj klik na hint line (poza zakresem opcji) lub poza listą
+        if row_idx >= self.options.len() {
+            return None;
+        }
+
+        // Ustaw kursor na klikniętą opcję i toggluj zaznaczenie
+        self.cursor = row_idx;
+        self.toggle_current();
+
+        Some(InputAction::Continue)
     }
 }
 
@@ -560,6 +605,196 @@ mod tests {
           [ ] Item 5
           [ ] Item 6
         ");
+    }
+
+    // === Testy handle_mouse ===
+
+    fn make_left_click(col: u16, row: u16) -> MouseEvent {
+        use crossterm::event::KeyModifiers;
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn make_right_click(col: u16, row: u16) -> MouseEvent {
+        use crossterm::event::KeyModifiers;
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn make_options_area(x: u16, y: u16, width: u16, height: u16) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_click_first_option_toggles() {
+        let options = create_options(&["Auth", "API", "Logging"]);
+        let mut state = MultiSelectState::new(options);
+        let area = make_options_area(0, 5, 40, 5);
+
+        // Klik na pierwszą opcję (row=5 = area.y + 0)
+        let result = state.handle_mouse(make_left_click(5, 5), area);
+        assert_eq!(result, Some(InputAction::Continue));
+        assert_eq!(state.cursor, 0);
+        assert!(state.checked[0], "Opcja 0 powinna być zaznaczona");
+        assert!(!state.checked[1]);
+        assert!(!state.checked[2]);
+    }
+
+    #[test]
+    fn test_handle_mouse_click_second_option_toggles_and_moves_cursor() {
+        let options = create_options(&["Auth", "API", "Logging"]);
+        let mut state = MultiSelectState::new(options);
+        let area = make_options_area(0, 5, 40, 5);
+
+        // Klik na drugą opcję (row=6 = area.y + 1)
+        let result = state.handle_mouse(make_left_click(0, 6), area);
+        assert_eq!(result, Some(InputAction::Continue));
+        assert_eq!(state.cursor, 1, "Kursor powinien przesunąć się na indeks 1");
+        assert!(!state.checked[0]);
+        assert!(state.checked[1], "Opcja 1 powinna być zaznaczona");
+        assert!(!state.checked[2]);
+    }
+
+    #[test]
+    fn test_handle_mouse_click_same_option_twice_toggles_off() {
+        let options = create_options(&["Auth", "API"]);
+        let mut state = MultiSelectState::new(options);
+        let area = make_options_area(0, 0, 40, 4);
+
+        // Zaznacz (row=0)
+        state.handle_mouse(make_left_click(0, 0), area);
+        assert!(state.checked[0]);
+
+        // Odznacz (row=0 ponownie)
+        let result = state.handle_mouse(make_left_click(0, 0), area);
+        assert_eq!(result, Some(InputAction::Continue));
+        assert!(
+            !state.checked[0],
+            "Opcja 0 powinna być odznaczona po drugim kliku"
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_click_outside_area_ignored() {
+        let options = create_options(&["Auth", "API"]);
+        let mut state = MultiSelectState::new(options);
+        let area = make_options_area(0, 5, 40, 4);
+
+        // Klik powyżej obszaru (row=4 < area.y=5)
+        let result = state.handle_mouse(make_left_click(5, 4), area);
+        assert_eq!(result, None, "Klik powyżej obszaru powinien być ignorowany");
+
+        // Klik poniżej obszaru (row=9 >= area.y + area.height = 9)
+        let result = state.handle_mouse(make_left_click(5, 9), area);
+        assert_eq!(result, None, "Klik poniżej obszaru powinien być ignorowany");
+    }
+
+    #[test]
+    fn test_handle_mouse_click_on_hint_line_ignored() {
+        // Opcji jest 3, hint line jest na area.y + 3
+        let options = create_options(&["Auth", "API", "Logging"]);
+        let mut state = MultiSelectState::new(options);
+        let area = make_options_area(0, 0, 40, 5);
+
+        // Klik na hint line (row=3 = area.y + 3 = options.len())
+        let result = state.handle_mouse(make_left_click(5, 3), area);
+        assert_eq!(result, None, "Klik na hint line powinien być ignorowany");
+        assert_eq!(
+            state.checked,
+            vec![false, false, false],
+            "Żadna opcja nie powinna się zmienić"
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_right_click_ignored() {
+        let options = create_options(&["Auth", "API"]);
+        let mut state = MultiSelectState::new(options);
+        let area = make_options_area(0, 0, 40, 4);
+
+        let result = state.handle_mouse(make_right_click(5, 0), area);
+        assert_eq!(result, None, "Prawy klik powinien być ignorowany");
+        assert!(!state.checked[0], "Stan nie powinien się zmienić");
+    }
+
+    #[test]
+    fn test_handle_mouse_click_outside_x_bounds_ignored() {
+        let options = create_options(&["Auth"]);
+        let mut state = MultiSelectState::new(options);
+        // area.x=10, width=20 → x-range: [10, 30)
+        let area = make_options_area(10, 0, 20, 3);
+
+        // Klik po lewej stronie obszaru (col=9 < area.x=10)
+        let result = state.handle_mouse(make_left_click(9, 0), area);
+        assert_eq!(
+            result, None,
+            "Klik poza lewą krawędzią powinien być ignorowany"
+        );
+
+        // Klik po prawej stronie obszaru (col=30 >= area.x + area.width=30)
+        let result = state.handle_mouse(make_left_click(30, 0), area);
+        assert_eq!(
+            result, None,
+            "Klik poza prawą krawędzią powinien być ignorowany"
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_click_with_area_offset() {
+        // Area z offsetem — jak w prawdziwym TUI wewnątrz widgetu
+        let options = create_options(&["Auth", "API", "Logging"]);
+        let mut state = MultiSelectState::new(options);
+        let area = make_options_area(10, 5, 60, 5);
+
+        // Klik na trzecią opcję (row=7 = area.y + 2, col=15 ∈ [10, 70))
+        let result = state.handle_mouse(make_left_click(15, 7), area);
+        assert_eq!(result, Some(InputAction::Continue));
+        assert_eq!(state.cursor, 2);
+        assert!(state.checked[2], "Opcja 2 powinna być zaznaczona");
+    }
+
+    #[test]
+    fn test_handle_mouse_on_empty_options_ignored() {
+        let mut state = MultiSelectState::new(vec![]);
+        let area = make_options_area(0, 0, 40, 4);
+
+        let result = state.handle_mouse(make_left_click(0, 0), area);
+        assert_eq!(
+            result, None,
+            "Klik przy pustej liście powinien być ignorowany"
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_multiple_clicks_sequence() {
+        let options = create_options(&["Auth", "API", "Logging"]);
+        let mut state = MultiSelectState::new(options);
+        let area = make_options_area(0, 0, 40, 5);
+
+        // Zaznacz Auth (row=0)
+        state.handle_mouse(make_left_click(5, 0), area);
+        // Zaznacz Logging (row=2)
+        state.handle_mouse(make_left_click(5, 2), area);
+        // Odznacz Auth (row=0)
+        state.handle_mouse(make_left_click(5, 0), area);
+
+        assert!(!state.checked[0], "Auth powinien być odznaczony");
+        assert!(!state.checked[1], "API nie był klikany");
+        assert!(state.checked[2], "Logging powinien być zaznaczony");
+        assert_eq!(state.cursor, 0, "Kursor na ostatnio klikniętej pozycji");
     }
 
     #[test]

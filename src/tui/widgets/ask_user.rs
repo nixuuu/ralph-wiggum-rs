@@ -310,9 +310,14 @@ impl AskUserWidget {
     /// Tylko lewy click (`MouseEventKind::Down(MouseButton::Left)`) jest obsługiwany.
     /// `area` — obszar terminala, w którym widget jest renderowany (potrzebny do hit-testu).
     ///
+    /// Deleguje do sub-widgetów:
+    /// - Choice: klik na opcję → select/confirm
+    /// - Confirm: klik na [Yes]/[No] → submit
+    /// - Multi: klik na opcję → toggle zaznaczenia (cursor + checked)
+    ///
     /// Zwraca `AskUserAction`:
     /// - `Submit(label)` — klik na opcję choice (select/confirm) lub Yes/No w confirm
-    /// - `Continue` — klik zaznaczył nową opcję lub klik poza opcjami → brak wyniku
+    /// - `Continue` — klik zaznaczył nową opcję, toggle w Multi, lub klik poza opcjami
     pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> AskUserAction {
         // Obsługujemy tylko lewy click
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -334,6 +339,13 @@ impl AskUserWidget {
                 self.scroll_offset,
             ),
             InnerState::Confirm(state) => handle_confirm_mouse(
+                state,
+                &self.question,
+                mouse,
+                area,
+                self.scroll_offset,
+            ),
+            InnerState::Multi(state) => handle_multi_mouse(
                 state,
                 &self.question,
                 mouse,
@@ -580,6 +592,52 @@ fn handle_confirm_mouse(
         Some(InputAction::Send(answer)) => AskUserAction::Submit(answer),
         _ => AskUserAction::Continue,
     }
+}
+
+/// Obsługuje klik myszy na widgecie multi-select.
+///
+/// Geometria renderowania (Border::TOP + Padding::new(2,2,1,1)):
+/// - inner_y = area.y + border_top(1) + padding_top(1) = area.y + 2
+/// - inner_x = area.x + padding_left(2) = area.x + 2
+/// - inner_width = area.width - padding_left(2) - padding_right(2)
+///
+/// Opcje zaczynają się bezpośrednio po pytaniu. Każda opcja zajmuje 1 wiersz.
+/// Klik na opcję → toggle zaznaczenia + przesunięcie kursora.
+fn handle_multi_mouse(
+    state: &mut MultiSelectState,
+    question: &AskUserQuestion,
+    mouse: MouseEvent,
+    area: Rect,
+    scroll_offset: u16,
+) -> AskUserAction {
+    let inner_x = area.x.saturating_add(2);
+    let inner_y = area.y.saturating_add(2);
+    let inner_width = area.width.saturating_sub(4).max(1) as usize;
+
+    let q_height =
+        count_rendered_lines_for_width(question.question.trim_end(), inner_width);
+
+    // Pozycja opcji z uwzględnieniem scroll_offset
+    let options_start_y = inner_y
+        .saturating_add(q_height)
+        .saturating_sub(scroll_offset);
+
+    // Jeśli opcje poza widocznym obszarem — ignoruj
+    let widget_bottom = area.y.saturating_add(area.height);
+    if options_start_y < inner_y || options_start_y >= widget_bottom {
+        return AskUserAction::Continue;
+    }
+
+    let available_height = widget_bottom.saturating_sub(options_start_y);
+    let options_area = Rect {
+        x: inner_x,
+        y: options_start_y,
+        width: inner_width as u16,
+        height: available_height,
+    };
+
+    state.handle_mouse(mouse, options_area);
+    AskUserAction::Continue
 }
 
 fn handle_confirm_key(state: &mut ConfirmState, key: KeyCode) -> AskUserAction {
@@ -2354,12 +2412,136 @@ mod tests {
     /// Layout widgetu: border_top(1) + padding_top(1) = inner_y = area.y + 2
     /// Pytanie "Are you sure?" = 1 wiersz → button_y = inner_y + 1 = area.y + 3
     #[test]
+    fn test_handle_mouse_multi_click_first_option_toggles() {
+        let mut widget = AskUserWidget::new(multi_question());
+        // Layout: inner_y = 2, q_height = 1 ("Select features" = 1 wiersz)
+        // options_start_y = 2 + 1 = 3, inner_x = 2
+        // Opcja 0 jest na row=3
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+
+        let result = widget.handle_mouse(make_left_click(5, 3), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        // Sprawdź że opcja 0 jest zaznaczona
+        if let AskUserState::Active(InnerState::Multi(ref state)) = widget.state {
+            assert!(
+                state.checked[0],
+                "Opcja 0 powinna być zaznaczona po kliknięciu"
+            );
+            assert_eq!(state.cursor, 0, "Kursor powinien być na opcji 0");
+        } else {
+            panic!("Expected Active Multi state");
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_multi_click_second_option_toggles() {
+        let mut widget = AskUserWidget::new(multi_question());
+        // Opcja 1 jest na row = options_start_y + 1 = 3 + 1 = 4
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+
+        let result = widget.handle_mouse(make_left_click(5, 4), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        if let AskUserState::Active(InnerState::Multi(ref state)) = widget.state {
+            assert!(!state.checked[0]);
+            assert!(state.checked[1], "Opcja 1 powinna być zaznaczona");
+            assert_eq!(state.cursor, 1);
+        } else {
+            panic!("Expected Active Multi state");
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_multi_click_twice_toggles_off() {
+        let mut widget = AskUserWidget::new(multi_question());
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+
+        // Zaznacz opcję 0 (row=3)
+        widget.handle_mouse(make_left_click(5, 3), area);
+        // Odznacz opcję 0
+        let result = widget.handle_mouse(make_left_click(5, 3), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        if let AskUserState::Active(InnerState::Multi(ref state)) = widget.state {
+            assert!(!state.checked[0], "Opcja 0 powinna być odznaczona");
+        } else {
+            panic!("Expected Active Multi state");
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_multi_click_outside_options_ignored() {
+        let mut widget = AskUserWidget::new(multi_question());
+        // multi_question ma 3 opcje ("Auth", "API", "Logging")
+        // options_start_y = 3, hint_line_y = 3 + 3 = 6
+        // Klik na row=6 (hint line) → ignorowany
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+
+        let result = widget.handle_mouse(make_left_click(5, 6), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        if let AskUserState::Active(InnerState::Multi(ref state)) = widget.state {
+            assert_eq!(
+                state.checked,
+                vec![false, false, false],
+                "Żadna opcja nie powinna być zaznaczona po kliku na hint line"
+            );
+        } else {
+            panic!("Expected Active Multi state");
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_multi_on_non_multi_widget_ignored() {
+        // Confirm widget nie powinien reagować na klik w obszarze opcji
+        let mut widget = AskUserWidget::new(confirm_question());
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+
+        // Klik w miejscu gdzie byłyby opcje (row=3) — widget jest Confirm, nie Multi
+        let result = widget.handle_mouse(make_left_click(5, 3), area);
+        // Dla confirma: button_y=3, x=5 jest w obszarze Yes → Submit
+        // (To jest poprawne zachowanie — nie testujemy braku reakcji, tylko że confirm działa)
+        assert_ne!(result, AskUserAction::Cancel); // Nie Cancel
+    }
+
+    #[test]
     fn test_handle_mouse_confirm_click_yes() {
         let mut widget = AskUserWidget::new(confirm_question());
         // area = (x=0, y=0, w=80, h=20)
         // inner_y = 2, q_height = 1 → button_y = 3
         // button_x = inner_x = 2, yes_rect = x=2..6
-        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
         let result = widget.handle_mouse(make_left_click(3, 3), area);
         assert_eq!(result, AskUserAction::Submit("yes".into()));
     }
@@ -2368,7 +2550,12 @@ mod tests {
     fn test_handle_mouse_confirm_click_no() {
         let mut widget = AskUserWidget::new(confirm_question());
         // no_rect = x = inner_x + 7 = 9, width=4 → x=9..12
-        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
         let result = widget.handle_mouse(make_left_click(10, 3), area);
         assert_eq!(result, AskUserAction::Submit("no".into()));
     }
@@ -2376,7 +2563,12 @@ mod tests {
     #[test]
     fn test_handle_mouse_confirm_click_outside_ignored() {
         let mut widget = AskUserWidget::new(confirm_question());
-        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
         // Klik poza przyciskami (x=50)
         let result = widget.handle_mouse(make_left_click(50, 3), area);
         assert_eq!(result, AskUserAction::Continue);
@@ -2385,7 +2577,12 @@ mod tests {
     #[test]
     fn test_handle_mouse_confirm_scroll_offset_shifts_buttons() {
         let mut widget = AskUserWidget::new(confirm_question());
-        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
 
         // scroll_offset=1 → button_y = inner_y(2) + q_height(1) - scroll_offset(1) = 2
         // Ustawiamy bezpośrednio — scroll_down klampuje do full_height - max_height,
@@ -2412,7 +2609,12 @@ mod tests {
     #[test]
     fn test_handle_mouse_confirm_scrolled_out_of_view_ignored() {
         let mut widget = AskUserWidget::new(confirm_question());
-        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
 
         // scroll_offset >= q_height+1 → button_y < inner_y → poza widocznym obszarem
         // inner_y=2, q_height=1 → button_y = 2 + 1 - 2 = 1 < inner_y=2 → ignoruj

@@ -487,7 +487,7 @@ impl AppState for TaskCommandApp {
         if let AppEvent::Mouse(mouse) = event {
             use crossterm::event::{MouseButton, MouseEventKind};
             match mouse.kind {
-                // Lewy klik — delegacja do aktywnego AskUserWidget (choice, confirm)
+                // Lewy klik — delegacja do aktywnego AskUserWidget (choice, confirm, multi)
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(widget) = self.active_widget.as_mut() {
                         let area = self.last_known_ask_user_rect;
