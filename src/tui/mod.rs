@@ -46,8 +46,8 @@ pub use formatter::{
 // Re-eksport tool formatting utilities — Span-based output dla tool calls
 #[allow(unused_imports)] // Re-exporty — będą używane przez per-command widoki TUI
 pub use keybindings::{
-    ExplorerBindings, GlobalBindings, KeyAction, KeyCombo, KeybindingsConfig, OrchestrateBindings,
-    RunBindings,
+    ExplorerBindings, GlobalBindings, KeyAction, KeyCombo, KeybindingResolver, KeybindingsConfig,
+    OrchestrateBindings, RunBindings, View,
 };
 #[allow(unused_imports)]
 pub use responsive::{Breakpoint, LayoutAreas};

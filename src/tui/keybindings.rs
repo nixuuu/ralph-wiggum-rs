@@ -13,7 +13,7 @@
 //! ```
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
@@ -165,6 +165,16 @@ impl fmt::Display for KeyCombo {
     }
 }
 
+/// Custom serde serializer — serializuje KeyCombo do stringa (via Display).
+impl Serialize for KeyCombo {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
 /// Custom serde deserializer — parsuje KeyCombo ze stringa TOML.
 impl<'de> Deserialize<'de> for KeyCombo {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
@@ -232,7 +242,7 @@ pub enum KeyAction {
 /// Globalne skróty klawiszowe (dostępne we wszystkich widokach).
 ///
 /// Odpowiada sekcji `[keybindings.global]` w .ralph.toml.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct GlobalBindings {
     pub quit: KeyCombo,
@@ -277,7 +287,7 @@ impl Default for GlobalBindings {
 /// Orchestrate-specific skróty klawiszowe.
 ///
 /// Odpowiada sekcji `[keybindings.orchestrate]` w .ralph.toml.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct OrchestrateBindings {
     pub focus_next: KeyCombo,
@@ -310,7 +320,7 @@ impl Default for OrchestrateBindings {
 /// Run-specific skróty klawiszowe.
 ///
 /// Odpowiada sekcji `[keybindings.run]` w .ralph.toml.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RunBindings {
     pub toggle_expand: KeyCombo,
@@ -327,7 +337,7 @@ impl Default for RunBindings {
 /// Explorer-specific skróty klawiszowe.
 ///
 /// Odpowiada sekcji `[keybindings.explorer]` w .ralph.toml.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ExplorerBindings {
     pub cycle_sort: KeyCombo,
@@ -366,7 +376,7 @@ impl Default for ExplorerBindings {
 /// Odpowiada sekcji `[keybindings]` w .ralph.toml z podsekcjami:
 /// `[keybindings.global]`, `[keybindings.orchestrate]`, `[keybindings.run]`,
 /// `[keybindings.explorer]`.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct KeybindingsConfig {
     pub global: GlobalBindings,
@@ -457,6 +467,20 @@ macro_rules! resolve_bindings {
     }};
 }
 
+/// Macro do generowania pairs() — zwraca wszystkie pary (KeyCombo, KeyAction).
+///
+/// Używane przez `KeybindingResolver::key_for_action()` do reverse lookup.
+macro_rules! impl_pairs {
+    ($t:ty; $($field:ident => $action:expr),+ $(,)?) => {
+        impl $t {
+            /// Zwraca wszystkie pary (KeyCombo, KeyAction) dla tej sekcji bindingów.
+            pub fn pairs(&self) -> Vec<(KeyCombo, KeyAction)> {
+                vec![$( (self.$field.clone(), $action) ),+]
+            }
+        }
+    };
+}
+
 impl GlobalBindings {
     /// Rozwiąż KeyEvent na globalną KeyAction, jeśli pasuje do któregoś bindingu.
     pub fn resolve(&self, event: &KeyEvent) -> Option<KeyAction> {
@@ -521,6 +545,231 @@ impl ExplorerBindings {
             vim_left => KeyAction::VimLeft,
             vim_right => KeyAction::VimRight,
         )
+    }
+}
+
+// ── Pairs: action→combo reverse-lookup ──────────────────────────────
+
+impl_pairs!(GlobalBindings;
+    quit => KeyAction::Quit,
+    force_quit => KeyAction::ForceQuit,
+    cancel => KeyAction::Cancel,
+    confirm => KeyAction::Confirm,
+    toggle_sidebar => KeyAction::ToggleSidebar,
+    scroll_up => KeyAction::ScrollUp,
+    scroll_down => KeyAction::ScrollDown,
+    scroll_page_up => KeyAction::ScrollPageUp,
+    scroll_page_down => KeyAction::ScrollPageDown,
+    scroll_to_top => KeyAction::ScrollToTop,
+    scroll_to_bottom => KeyAction::ScrollToBottom,
+    switch_focus => KeyAction::SwitchFocus,
+    command_palette => KeyAction::CommandPalette,
+    shrink_sidebar => KeyAction::ShrinkSidebar,
+    grow_sidebar => KeyAction::GrowSidebar,
+);
+
+impl_pairs!(OrchestrateBindings;
+    focus_next => KeyAction::FocusNext,
+    focus_prev => KeyAction::FocusPrev,
+    toggle_preview => KeyAction::TogglePreview,
+    send_message => KeyAction::SendMessage,
+    reload => KeyAction::Reload,
+    restart => KeyAction::Restart,
+    confirm_restart => KeyAction::ConfirmRestart,
+    cancel_restart => KeyAction::CancelRestart,
+    toggle_idle_workers => KeyAction::ToggleIdleWorkers,
+);
+
+impl_pairs!(RunBindings;
+    toggle_expand => KeyAction::ToggleExpand,
+);
+
+impl_pairs!(ExplorerBindings;
+    cycle_sort => KeyAction::CycleSort,
+    reload_tasks => KeyAction::ReloadTasks,
+    enter_filter => KeyAction::EnterFilter,
+    expand_all => KeyAction::ExpandAll,
+    collapse_all => KeyAction::CollapseAll,
+    expand_or_enter => KeyAction::ExpandOrEnter,
+    vim_up => KeyAction::VimUp,
+    vim_down => KeyAction::VimDown,
+    vim_left => KeyAction::VimLeft,
+    vim_right => KeyAction::VimRight,
+);
+
+// ── View ─────────────────────────────────────────────────────────────
+
+/// Widok aplikacji — określa kontekst dla resolwowania keybindingów.
+///
+/// Przekazywany do `KeybindingResolver::resolve()` żeby wybrać właściwe
+/// view-specific bindingi przed globalnym fallbackiem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum View {
+    /// Brak specyficznego widoku — tylko globalne bindingi.
+    Global,
+    /// Widok orkiestracji (orchestrate).
+    Orchestrate,
+    /// Widok uruchomienia (run).
+    Run,
+    /// Widok eksploratora tasków (explorer).
+    Explorer,
+}
+
+// ── KeybindingResolver ────────────────────────────────────────────────
+
+/// Resolver keybindingów — lookup chain: view-specific → global.
+///
+/// Zbudowany z `KeybindingsConfig` (zmerge'owanego z FileConfig + defaults).
+///
+/// # Lookup chain
+/// 1. View-specific bindings (orchestrate / run / explorer)
+/// 2. Global bindings (dostępne we wszystkich widokach)
+///
+/// View-specific wygrywa nad globalnym gdy oba pasują do tego samego klawisza.
+///
+/// # Przykład
+/// ```rust,ignore
+/// let resolver = KeybindingResolver::new(config);
+///
+/// // Forward lookup
+/// if let Some(action) = resolver.resolve(&key_event, View::Orchestrate) {
+///     // obsłuż akcję
+/// }
+///
+/// // Reverse lookup dla hint display
+/// if let Some(combo) = resolver.key_for_action(KeyAction::Quit) {
+///     println!("Naciśnij {} aby wyjść", KeybindingResolver::format_key(&combo));
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct KeybindingResolver {
+    config: KeybindingsConfig,
+}
+
+impl KeybindingResolver {
+    /// Utwórz resolver z loaded config.
+    ///
+    /// Config powinien być już zmerge'owany z defaults (np. z `FileConfig.keybindings`).
+    pub fn new(config: KeybindingsConfig) -> Self {
+        Self { config }
+    }
+
+    /// Utwórz resolver z samych defaults (bez żadnych customizacji).
+    pub fn with_defaults() -> Self {
+        Self::new(KeybindingsConfig::default())
+    }
+
+    /// Utwórz resolver z customizacji użytkownika nałożonych na defaults.
+    ///
+    /// `user_config` to keybindings z FileConfig — nadpisują defaults tylko
+    /// dla pól które użytkownik faktycznie zmienił (non-default values).
+    pub fn from_user_config(user_config: KeybindingsConfig) -> Self {
+        // defaults jako base, user_config jako overlay
+        let merged = KeybindingsConfig::merge(KeybindingsConfig::default(), user_config);
+        Self::new(merged)
+    }
+
+    /// Rozwiąż KeyEvent na KeyAction w kontekście podanego widoku.
+    ///
+    /// Lookup chain: view-specific → global.
+    /// View-specific binding wygrywa gdy istnieje dla danego klawisza.
+    pub fn resolve(&self, key: &KeyEvent, view: View) -> Option<KeyAction> {
+        // 1. View-specific (ma priorytet nad globalnym)
+        let view_action = match view {
+            View::Orchestrate => self.config.orchestrate.resolve(key),
+            View::Run => self.config.run.resolve(key),
+            View::Explorer => self.config.explorer.resolve(key),
+            View::Global => None,
+        };
+
+        if view_action.is_some() {
+            return view_action;
+        }
+
+        // 2. Global fallback
+        self.config.global.resolve(key)
+    }
+
+    /// Reverse lookup: znajdź KeyCombo przypisany do podanej akcji.
+    ///
+    /// Przeszukuje wszystkie sekcje bindingów (global → orchestrate → run → explorer).
+    /// Zwraca pierwsze znalezione combo — używane do wyświetlania hints w UI.
+    pub fn key_for_action(&self, action: KeyAction) -> Option<KeyCombo> {
+        self.config
+            .global
+            .pairs()
+            .into_iter()
+            .chain(self.config.orchestrate.pairs())
+            .chain(self.config.run.pairs())
+            .chain(self.config.explorer.pairs())
+            .find(|(_, a)| *a == action)
+            .map(|(combo, _)| combo)
+    }
+
+    /// Format KeyCombo jako human-readable string z unicode symbolami.
+    ///
+    /// Modyfikatory używają unicode: Shift → `⇧`, Alt → `⌥`.
+    /// Ctrl zachowany jako tekst: `Ctrl`.
+    /// Klawisze strzałek jako unicode: `↑`, `↓`, `←`, `→`.
+    /// Backspace jako `⌫`.
+    ///
+    /// Przykłady:
+    /// - `Ctrl+p` → `"Ctrl+p"`
+    /// - `Shift+Tab` → `"⇧+Tab"`
+    /// - `Alt+Enter` → `"⌥+Enter"`
+    /// - `Ctrl+Shift+a` → `"Ctrl+⇧+a"`
+    /// - `Up` → `"↑"`
+    pub fn format_key(combo: &KeyCombo) -> String {
+        // Buduj prefiks modyfikatorów (Ctrl jako tekst, Shift/Alt jako symbole)
+        let mut parts: Vec<&str> = Vec::new();
+        if combo.modifiers.contains(KeyModifiers::CONTROL) {
+            parts.push("Ctrl");
+        }
+        if combo.modifiers.contains(KeyModifiers::SHIFT) {
+            parts.push("⇧");
+        }
+        if combo.modifiers.contains(KeyModifiers::ALT) {
+            parts.push("⌥");
+        }
+
+        // Klucz jako string — dynamiczne klucze (Char, F-keys) wymagają alloc
+        let key_str: String = match combo.key {
+            KeyCode::Char(' ') => "Space".to_string(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::F(n) => format!("F{n}"),
+            KeyCode::Up => "↑".to_string(),
+            KeyCode::Down => "↓".to_string(),
+            KeyCode::Left => "←".to_string(),
+            KeyCode::Right => "→".to_string(),
+            KeyCode::Enter => "Enter".to_string(),
+            KeyCode::Esc => "Esc".to_string(),
+            KeyCode::Tab => "Tab".to_string(),
+            KeyCode::BackTab => "Tab".to_string(), // BackTab = Shift+Tab, Shift już w parts
+            KeyCode::Backspace => "⌫".to_string(),
+            KeyCode::Delete => "Del".to_string(),
+            KeyCode::Home => "Home".to_string(),
+            KeyCode::End => "End".to_string(),
+            KeyCode::PageUp => "PgUp".to_string(),
+            KeyCode::PageDown => "PgDn".to_string(),
+            _ => "?".to_string(),
+        };
+
+        if parts.is_empty() {
+            key_str
+        } else {
+            format!("{}+{}", parts.join("+"), key_str)
+        }
+    }
+
+    /// Zwraca referencję do wewnętrznej konfiguracji.
+    pub fn config(&self) -> &KeybindingsConfig {
+        &self.config
+    }
+}
+
+impl Default for KeybindingResolver {
+    fn default() -> Self {
+        Self::with_defaults()
     }
 }
 
@@ -782,7 +1031,36 @@ mod tests {
         assert_eq!(combo.to_string(), "Shift+Tab");
     }
 
-    // ── KeyCombo round-trip ──
+    // ── KeyCombo serde round-trip ──
+
+    #[test]
+    fn keycombo_serialize_round_trip() {
+        // Serialize KeyCombo → TOML string → deserialize → powinno wrócić do identycznej wartości
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Wrapper {
+            key: KeyCombo,
+        }
+        let combo = KeyCombo::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        let wrapper = Wrapper { key: combo.clone() };
+        let s = toml::to_string(&wrapper).unwrap();
+        let back: Wrapper = toml::from_str(&s).unwrap();
+        assert_eq!(combo, back.key);
+    }
+
+    #[test]
+    fn keycombo_serialize_round_trip_named_key() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Wrapper {
+            key: KeyCombo,
+        }
+        let combo = KeyCombo::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        let wrapper = Wrapper { key: combo.clone() };
+        let s = toml::to_string(&wrapper).unwrap();
+        let back: Wrapper = toml::from_str(&s).unwrap();
+        assert_eq!(combo, back.key);
+    }
+
+    // ── KeyCombo Display round-trip ──
 
     #[test]
     fn round_trip_simple_char() {
@@ -1274,5 +1552,326 @@ restart = "F5"
         let bindings = ExplorerBindings::default();
         let event = make_event(KeyCode::Char('s'), KeyModifiers::NONE);
         assert_eq!(bindings.resolve(&event), Some(KeyAction::CycleSort));
+    }
+
+    // ── KeybindingResolver: forward lookup ──
+
+    #[test]
+    fn resolver_default_global_quit() {
+        let resolver = KeybindingResolver::with_defaults();
+        let event = make_event(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&event, View::Global),
+            Some(KeyAction::Quit)
+        );
+    }
+
+    #[test]
+    fn resolver_global_fallback_from_orchestrate_view() {
+        // 'q' nie jest w orchestrate-specific → fallback do global
+        let resolver = KeybindingResolver::with_defaults();
+        let event = make_event(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&event, View::Orchestrate),
+            Some(KeyAction::Quit)
+        );
+    }
+
+    #[test]
+    fn resolver_view_specific_wins_over_global() {
+        // 'Enter' jest zarówno global::confirm jak i run::toggle_expand
+        // W widoku Run → ToggleExpand (view-specific wygrywa)
+        let resolver = KeybindingResolver::with_defaults();
+        let event = make_event(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&event, View::Run),
+            Some(KeyAction::ToggleExpand)
+        );
+        // W widoku Global → Confirm (tylko globalny)
+        assert_eq!(
+            resolver.resolve(&event, View::Global),
+            Some(KeyAction::Confirm)
+        );
+    }
+
+    #[test]
+    fn resolver_orchestrate_view_specific() {
+        let resolver = KeybindingResolver::with_defaults();
+        // 'p' w orchestrate → TogglePreview (view-specific)
+        let event = make_event(KeyCode::Char('p'), KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&event, View::Orchestrate),
+            Some(KeyAction::TogglePreview)
+        );
+        // 'p' w widoku Global → nic (nie ma 'p' w global bez Ctrl)
+        assert_eq!(resolver.resolve(&event, View::Global), None);
+    }
+
+    #[test]
+    fn resolver_explorer_view_specific() {
+        let resolver = KeybindingResolver::with_defaults();
+        let event = make_event(KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&event, View::Explorer),
+            Some(KeyAction::VimUp)
+        );
+    }
+
+    #[test]
+    fn resolver_unknown_key_returns_none() {
+        let resolver = KeybindingResolver::with_defaults();
+        let event = make_event(KeyCode::Char('z'), KeyModifiers::NONE);
+        assert_eq!(resolver.resolve(&event, View::Global), None);
+        assert_eq!(resolver.resolve(&event, View::Orchestrate), None);
+        assert_eq!(resolver.resolve(&event, View::Explorer), None);
+    }
+
+    #[test]
+    fn resolver_custom_keybinding_used() {
+        // Użytkownik zmapował 'q' na Esc
+        let mut user_config = KeybindingsConfig::default();
+        user_config.global.quit = KeyCombo::new(KeyCode::Esc, KeyModifiers::NONE);
+        let resolver = KeybindingResolver::from_user_config(user_config);
+
+        // Esc → Quit (custom binding działa)
+        let esc = make_event(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(resolver.resolve(&esc, View::Global), Some(KeyAction::Quit));
+
+        // Stary 'q' już nie daje Quit (ale może dać Cancel przez global::cancel = Esc... hmm)
+        // Uwaga: cancel też jest Esc w defaults, więc sprawdzamy 'q' bez Esc
+        let q = make_event(KeyCode::Char('q'), KeyModifiers::NONE);
+        // 'q' nie jest już quit (zmienione), a nie jest też inną akcją globalną
+        assert_eq!(resolver.resolve(&q, View::Global), None);
+    }
+
+    #[test]
+    fn resolver_no_custom_keybinding_uses_default() {
+        // Pusta customizacja → defaults powinny działać
+        let resolver = KeybindingResolver::from_user_config(KeybindingsConfig::default());
+        let event = make_event(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(
+            resolver.resolve(&event, View::Global),
+            Some(KeyAction::CommandPalette)
+        );
+    }
+
+    #[test]
+    fn resolver_global_view_no_view_specific() {
+        // View::Global nigdy nie sprawdza view-specific bindingów
+        let resolver = KeybindingResolver::with_defaults();
+        // 's' jest tylko w ExplorerBindings
+        let event = make_event(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert_eq!(resolver.resolve(&event, View::Global), None);
+    }
+
+    // ── KeybindingResolver: reverse lookup ──
+
+    #[test]
+    fn resolver_key_for_action_global() {
+        let resolver = KeybindingResolver::with_defaults();
+        let combo = resolver.key_for_action(KeyAction::Quit).unwrap();
+        assert_eq!(combo.key, KeyCode::Char('q'));
+        assert_eq!(combo.modifiers, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn resolver_key_for_action_orchestrate() {
+        let resolver = KeybindingResolver::with_defaults();
+        let combo = resolver.key_for_action(KeyAction::TogglePreview).unwrap();
+        assert_eq!(combo.key, KeyCode::Char('p'));
+        assert_eq!(combo.modifiers, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn resolver_key_for_action_explorer() {
+        let resolver = KeybindingResolver::with_defaults();
+        let combo = resolver.key_for_action(KeyAction::VimUp).unwrap();
+        assert_eq!(combo.key, KeyCode::Char('k'));
+    }
+
+    #[test]
+    fn resolver_key_for_action_run() {
+        let resolver = KeybindingResolver::with_defaults();
+        let combo = resolver.key_for_action(KeyAction::ToggleExpand).unwrap();
+        assert_eq!(combo.key, KeyCode::Enter);
+    }
+
+    #[test]
+    fn resolver_key_for_action_custom() {
+        // Użytkownik zmienił quit na F1
+        let mut user_config = KeybindingsConfig::default();
+        user_config.global.quit = KeyCombo::new(KeyCode::F(1), KeyModifiers::NONE);
+        let resolver = KeybindingResolver::from_user_config(user_config);
+
+        let combo = resolver.key_for_action(KeyAction::Quit).unwrap();
+        assert_eq!(combo.key, KeyCode::F(1));
+    }
+
+    // ── KeybindingResolver: pairs() ──
+
+    #[test]
+    fn global_pairs_covers_all_actions() {
+        let bindings = GlobalBindings::default();
+        let pairs = bindings.pairs();
+        // Sprawdź że Quit jest w parach
+        assert!(pairs.iter().any(|(_, a)| *a == KeyAction::Quit));
+        assert!(pairs.iter().any(|(_, a)| *a == KeyAction::CommandPalette));
+        assert!(pairs.iter().any(|(_, a)| *a == KeyAction::ScrollUp));
+    }
+
+    #[test]
+    fn explorer_pairs_covers_vim_keys() {
+        let bindings = ExplorerBindings::default();
+        let pairs = bindings.pairs();
+        assert!(pairs.iter().any(|(_, a)| *a == KeyAction::VimUp));
+        assert!(pairs.iter().any(|(_, a)| *a == KeyAction::VimDown));
+        assert!(pairs.iter().any(|(_, a)| *a == KeyAction::VimLeft));
+        assert!(pairs.iter().any(|(_, a)| *a == KeyAction::VimRight));
+    }
+
+    // ── KeybindingResolver: format_key ──
+
+    #[test]
+    fn format_key_simple_char() {
+        let combo = KeyCombo::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(KeybindingResolver::format_key(&combo), "q");
+    }
+
+    #[test]
+    fn format_key_ctrl() {
+        let combo = KeyCombo::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(KeybindingResolver::format_key(&combo), "Ctrl+p");
+    }
+
+    #[test]
+    fn format_key_shift() {
+        let combo = KeyCombo::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(KeybindingResolver::format_key(&combo), "⇧+Enter");
+    }
+
+    #[test]
+    fn format_key_alt() {
+        let combo = KeyCombo::new(KeyCode::Char('x'), KeyModifiers::ALT);
+        assert_eq!(KeybindingResolver::format_key(&combo), "⌥+x");
+    }
+
+    #[test]
+    fn format_key_ctrl_shift() {
+        let combo = KeyCombo::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(KeybindingResolver::format_key(&combo), "Ctrl+⇧+a");
+    }
+
+    #[test]
+    fn format_key_arrow_unicode() {
+        assert_eq!(
+            KeybindingResolver::format_key(&KeyCombo::new(KeyCode::Up, KeyModifiers::NONE)),
+            "↑"
+        );
+        assert_eq!(
+            KeybindingResolver::format_key(&KeyCombo::new(KeyCode::Down, KeyModifiers::NONE)),
+            "↓"
+        );
+        assert_eq!(
+            KeybindingResolver::format_key(&KeyCombo::new(KeyCode::Left, KeyModifiers::NONE)),
+            "←"
+        );
+        assert_eq!(
+            KeybindingResolver::format_key(&KeyCombo::new(KeyCode::Right, KeyModifiers::NONE)),
+            "→"
+        );
+    }
+
+    #[test]
+    fn format_key_special_keys() {
+        assert_eq!(
+            KeybindingResolver::format_key(&KeyCombo::new(KeyCode::Enter, KeyModifiers::NONE)),
+            "Enter"
+        );
+        assert_eq!(
+            KeybindingResolver::format_key(&KeyCombo::new(KeyCode::Esc, KeyModifiers::NONE)),
+            "Esc"
+        );
+        assert_eq!(
+            KeybindingResolver::format_key(&KeyCombo::new(KeyCode::Tab, KeyModifiers::NONE)),
+            "Tab"
+        );
+        assert_eq!(
+            KeybindingResolver::format_key(&KeyCombo::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            "⌫"
+        );
+        assert_eq!(
+            KeybindingResolver::format_key(&KeyCombo::new(KeyCode::PageUp, KeyModifiers::NONE)),
+            "PgUp"
+        );
+        assert_eq!(
+            KeybindingResolver::format_key(&KeyCombo::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            "PgDn"
+        );
+    }
+
+    #[test]
+    fn format_key_f_key() {
+        let combo = KeyCombo::new(KeyCode::F(5), KeyModifiers::NONE);
+        assert_eq!(KeybindingResolver::format_key(&combo), "F5");
+    }
+
+    #[test]
+    fn format_key_shift_tab() {
+        // BackTab = Shift+Tab
+        let combo = KeyCombo::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(KeybindingResolver::format_key(&combo), "⇧+Tab");
+    }
+
+    #[test]
+    fn format_key_space() {
+        let combo = KeyCombo::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(KeybindingResolver::format_key(&combo), "Space");
+    }
+
+    // ── Lookup chain priority (collision global vs view-specific) ──
+
+    #[test]
+    fn lookup_chain_view_specific_wins_collision() {
+        // Stwórz resolver gdzie 'Enter' jest zarówno global::confirm (default)
+        // jak i run::toggle_expand (default) — view-specific musi wygrać
+        let resolver = KeybindingResolver::with_defaults();
+        let enter = make_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        // View::Run → ToggleExpand (view-specific)
+        assert_eq!(
+            resolver.resolve(&enter, View::Run),
+            Some(KeyAction::ToggleExpand)
+        );
+        // View::Orchestrate → Confirm (global fallback, bo Orchestrate nie ma Enter)
+        assert_eq!(
+            resolver.resolve(&enter, View::Orchestrate),
+            Some(KeyAction::Confirm)
+        );
+        // View::Explorer → ExpandOrEnter (view-specific)
+        assert_eq!(
+            resolver.resolve(&enter, View::Explorer),
+            Some(KeyAction::ExpandOrEnter)
+        );
+    }
+
+    #[test]
+    fn lookup_chain_custom_global_overrides_default() {
+        // Użytkownik ustawił 'g' jako scroll_to_top (zamiast Home)
+        let mut user_config = KeybindingsConfig::default();
+        user_config.global.scroll_to_top = KeyCombo::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        let resolver = KeybindingResolver::from_user_config(user_config);
+
+        let g = make_event(KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&g, View::Global),
+            Some(KeyAction::ScrollToTop)
+        );
+
+        // Home nie jest już scroll_to_top (zastąpione przez 'g')
+        let home = make_event(KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(resolver.resolve(&home, View::Global), None);
     }
 }
