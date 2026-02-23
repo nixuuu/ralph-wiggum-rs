@@ -456,6 +456,26 @@ impl RunApp {
     fn cancel_quit_pending(&mut self) {
         self.quit_pending = false;
     }
+
+    /// Obsługa zdarzenia myszy.
+    ///
+    /// Dla `MouseDown Left` w obszarze output → zmień focus na `FocusArea::Output`.
+    /// Pozostałe zdarzenia są ignorowane.
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> EventResult {
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            let pos = Position::new(mouse.column, mouse.row);
+            // Click w output_rect → focus na Output
+            if let Some(output_rect) = self.output_rect
+                && output_rect.contains(pos)
+            {
+                // Anuluj quit_pending dla spójności z resztą handlera
+                self.cancel_quit_pending();
+                self.focus = FocusArea::Output;
+                return EventResult::Consumed;
+            }
+        }
+        EventResult::Ignored
+    }
 }
 
 // ── AppState impl ───────────────────────────────────────────────────
@@ -1530,6 +1550,137 @@ tasks:
                 app.draw(frame, area);
             })
             .expect("draw zero area should not panic");
+    }
+
+    // ── Mouse handling tests (task 13.4.3) ──────────────────────────
+
+    /// Helper: tworzy MouseEvent dla testów.
+    fn make_mouse_click(col: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    /// Pomocnik tworzący MouseEvent innego rodzaju (nie Left click).
+    fn make_mouse_scroll_up(col: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    /// Left click w output_rect → focus zmienia się na Output.
+    #[test]
+    fn mouse_left_click_in_output_rect_sets_focus_to_output() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Ustaw focus na Sidebar i skonfiguruj output_rect
+        app.focus = FocusArea::Sidebar;
+        app.output_rect = Some(Rect::new(0, 2, 60, 20));
+
+        // Click wewnątrz output_rect (5, 5)
+        let mouse = make_mouse_click(5, 5);
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.focus, FocusArea::Output);
+    }
+
+    /// Left click poza output_rect → focus bez zmian.
+    #[test]
+    fn mouse_left_click_outside_output_rect_ignores_focus() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Ustaw focus na Sidebar i skonfiguruj output_rect
+        app.focus = FocusArea::Sidebar;
+        app.output_rect = Some(Rect::new(0, 2, 60, 20));
+
+        // Click poza output_rect (70, 5) — poza zakresem szerokości
+        let mouse = make_mouse_click(70, 5);
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(
+            app.focus,
+            FocusArea::Sidebar,
+            "Focus nie powinien zmienić się przy kliku poza output_rect"
+        );
+    }
+
+    /// Gdy output_rect jest None → mouse click nie zmienia focusu.
+    #[test]
+    fn mouse_left_click_without_output_rect_is_ignored() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // output_rect jest None (np. przed pierwszym draw)
+        app.focus = FocusArea::Sidebar;
+        assert!(app.output_rect.is_none());
+
+        let mouse = make_mouse_click(10, 10);
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.focus, FocusArea::Sidebar);
+    }
+
+    /// ScrollUp (nie Left click) → zawsze ignorowany przez handle_mouse.
+    #[test]
+    fn mouse_scroll_up_in_output_rect_is_ignored() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        app.focus = FocusArea::Sidebar;
+        app.output_rect = Some(Rect::new(0, 2, 60, 20));
+
+        // Scroll w obszarze output_rect — powinien być ignorowany (handle_mouse nie obsługuje scroll)
+        let mouse = make_mouse_scroll_up(5, 5);
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.focus, FocusArea::Sidebar);
+    }
+
+    /// Left click w output_rect gdy quit_pending → anuluje quit_pending i ustawia focus Output.
+    #[test]
+    fn mouse_left_click_in_output_rect_cancels_quit_pending() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        app.focus = FocusArea::Sidebar;
+        app.quit_pending = true;
+        app.output_rect = Some(Rect::new(0, 2, 60, 20));
+
+        let mouse = make_mouse_click(5, 5);
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.focus, FocusArea::Output);
+        assert!(!app.quit_pending, "Mouse click powinien anulować quit_pending");
+    }
+
+    /// Left click gdy focus już Output → focus pozostaje Output, wynik Consumed.
+    #[test]
+    fn mouse_left_click_in_output_rect_when_already_focused_stays_output() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Focus już Output, output_rect ustawiony
+        assert_eq!(app.focus, FocusArea::Output);
+        app.output_rect = Some(Rect::new(0, 2, 60, 20));
+
+        let mouse = make_mouse_click(5, 5);
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.focus, FocusArea::Output);
     }
 
     // ── Snapshot tests: run layout w różnych breakpointach ──────────
