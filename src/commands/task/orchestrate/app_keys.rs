@@ -63,8 +63,8 @@ impl OrchestrateApp {
             KeyCode::Char('p') => self.handle_toggle_preview(),
             KeyCode::Char('t') => self.handle_toggle_sidebar(),
             KeyCode::Char('i') => self.handle_input_overlay_key(),
-            KeyCode::Up => self.handle_scroll(-1),
-            KeyCode::Down => self.handle_scroll(1),
+            KeyCode::Up => self.handle_scroll(-(self.scroll_step as i32)),
+            KeyCode::Down => self.handle_scroll(self.scroll_step as i32),
             KeyCode::Left => self.handle_scroll(i32::MIN),
             KeyCode::Right => self.handle_scroll(i32::MAX),
             KeyCode::Char('r') => {
@@ -1282,8 +1282,8 @@ mod tests {
         let up = make_key(KeyCode::Up, KeyModifiers::NONE);
         app.handle_key(up);
 
-        // Should scroll worker panel, not sidebar
-        assert_eq!(app.panels[&1].scroll_offset, 1);
+        // Should scroll worker panel by scroll_step (default=3), not sidebar
+        assert_eq!(app.panels[&1].scroll_offset, 3);
     }
 
     #[test]

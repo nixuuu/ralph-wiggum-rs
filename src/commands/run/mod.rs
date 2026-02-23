@@ -112,7 +112,8 @@ fn setup_run_app(config: &Config) -> Arc<Mutex<RunApp>> {
         config.use_nerd_font,
         5000,              // ring buffer capacity
         !config.no_splash, // show_splash (negacja no_splash)
-    );
+    )
+    .with_scroll_step(config.scroll_step);
     app.output_formatter
         .set_min_iterations(config.min_iterations);
     app.output_formatter

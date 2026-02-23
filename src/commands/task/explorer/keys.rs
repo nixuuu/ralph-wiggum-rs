@@ -170,15 +170,13 @@ impl TaskExplorerApp {
     fn handle_detail_key(&mut self, key: KeyEvent) -> EventResult {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                self.detail_scroll = self.detail_scroll.saturating_sub(self.scroll_step);
                 EventResult::Consumed
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 // Upper bound: nie scrolluj poza zawartość detail lines
                 let max_scroll = self.detail_line_count().saturating_sub(1);
-                if self.detail_scroll < max_scroll {
-                    self.detail_scroll += 1;
-                }
+                self.detail_scroll = (self.detail_scroll + self.scroll_step).min(max_scroll);
                 EventResult::Consumed
             }
             KeyCode::Left | KeyCode::Char('h') => {

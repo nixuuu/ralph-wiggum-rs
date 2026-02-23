@@ -95,6 +95,8 @@ pub struct RunApp {
     last_tasks_check: Instant,
     /// Aktualny responsywny breakpoint (Large/Medium/Small).
     current_breakpoint: Breakpoint,
+    /// Liczba linii przewijana przy zdarzeniu scroll myszy (z TuiConfig)
+    pub scroll_step: usize,
 }
 
 impl RunApp {
@@ -149,7 +151,14 @@ impl RunApp {
             last_tasks_mtime: None,
             last_tasks_check: Instant::now(),
             current_breakpoint: Breakpoint::Large, // domyślnie Large
+            scroll_step: 3,
         }
+    }
+
+    /// Ustaw konfigurowalny scroll step (z TuiConfig). Builder pattern.
+    pub fn with_scroll_step(mut self, step: u16) -> Self {
+        self.scroll_step = step.max(1) as usize;
+        self
     }
 
     /// Ustaw ścieżkę do tasks.yml i załaduj początkowy stan (opcjonalnie).
@@ -263,22 +272,22 @@ impl RunApp {
         match key.code {
             KeyCode::Up => {
                 self.cancel_quit_pending();
-                self.output_view_state.scroll_up(1);
+                self.output_view_state.scroll_up(self.scroll_step);
                 EventResult::Consumed
             }
             KeyCode::Down => {
                 self.cancel_quit_pending();
-                self.output_view_state.scroll_down(1);
+                self.output_view_state.scroll_down(self.scroll_step);
                 EventResult::Consumed
             }
             KeyCode::PageUp => {
                 self.cancel_quit_pending();
-                self.output_view_state.scroll_up(10);
+                self.output_view_state.scroll_up(self.scroll_step * 3);
                 EventResult::Consumed
             }
             KeyCode::PageDown => {
                 self.cancel_quit_pending();
-                self.output_view_state.scroll_down(10);
+                self.output_view_state.scroll_down(self.scroll_step * 3);
                 EventResult::Consumed
             }
             KeyCode::Home => {
@@ -773,7 +782,8 @@ mod tests {
         let result = app.handle_event(AppEvent::Key(key(KeyCode::Up)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert!(!app.output_view_state.auto_follow);
-        assert_eq!(app.output_view_state.scroll_offset, 1);
+        // scroll_step domyślnie = 3
+        assert_eq!(app.output_view_state.scroll_offset, 3);
     }
 
     #[test]
@@ -783,12 +793,13 @@ mod tests {
         for i in 0..20 {
             app.push_lines(vec![Line::raw(format!("Line {i}"))]);
         }
-        app.output_view_state.scroll_up(3);
-        assert_eq!(app.output_view_state.scroll_offset, 3);
+        // scroll_up(6) → offset=6, potem Down (scroll_step=3) → offset=3
+        app.output_view_state.scroll_up(6);
+        assert_eq!(app.output_view_state.scroll_offset, 6);
 
         let result = app.handle_event(AppEvent::Key(key(KeyCode::Down)), &resolver);
         assert_eq!(result, EventResult::Consumed);
-        assert_eq!(app.output_view_state.scroll_offset, 2);
+        assert_eq!(app.output_view_state.scroll_offset, 3);
     }
 
     #[test]
@@ -814,7 +825,8 @@ mod tests {
 
         let result = app.handle_event(AppEvent::Key(key(KeyCode::PageUp)), &resolver);
         assert_eq!(result, EventResult::Consumed);
-        assert_eq!(app.output_view_state.scroll_offset, 10);
+        // PageUp = scroll_step * 3 = 3 * 3 = 9
+        assert_eq!(app.output_view_state.scroll_offset, 9);
     }
 
     // ── handle_event: sidebar focus keys ────────────────────────
@@ -2065,29 +2077,29 @@ tasks:
         app.assert_state(|s| s.output_view_state.auto_follow);
         app.assert_state(|s| s.output_view_state.scroll_offset == 0);
 
-        // Krok 1: Strzałka w górę → scroll_offset = 1, auto_follow wyłączony
+        // Krok 1: Strzałka w górę → scroll_offset = 3 (scroll_step=3), auto_follow wyłączony
         app.inject_key(make_key(KeyCode::Up));
         app.step();
         app.assert_state(|s| !s.output_view_state.auto_follow);
-        app.assert_state(|s| s.output_view_state.scroll_offset == 1);
-
-        // Krok 2: Kolejne strzałki w górę → scroll_offset rośnie
-        app.inject_key(make_key(KeyCode::Up));
-        app.step();
-        app.assert_state(|s| s.output_view_state.scroll_offset == 2);
-
-        app.inject_key(make_key(KeyCode::Up));
-        app.step();
         app.assert_state(|s| s.output_view_state.scroll_offset == 3);
 
-        // Krok 3: Strzałka w dół → scroll_offset maleje
+        // Krok 2: Kolejne strzałki w górę → scroll_offset rośnie o scroll_step=3
+        app.inject_key(make_key(KeyCode::Up));
+        app.step();
+        app.assert_state(|s| s.output_view_state.scroll_offset == 6);
+
+        app.inject_key(make_key(KeyCode::Up));
+        app.step();
+        app.assert_state(|s| s.output_view_state.scroll_offset == 9);
+
+        // Krok 3: Strzałka w dół → scroll_offset maleje o scroll_step=3
         app.inject_key(make_key(KeyCode::Down));
         app.step();
-        app.assert_state(|s| s.output_view_state.scroll_offset == 2);
+        app.assert_state(|s| s.output_view_state.scroll_offset == 6);
 
         app.inject_key(make_key(KeyCode::Down));
         app.step();
-        app.assert_state(|s| s.output_view_state.scroll_offset == 1);
+        app.assert_state(|s| s.output_view_state.scroll_offset == 3);
 
         // Krok 4: End → auto_follow włączony, scroll_offset = 0
         app.inject_key(make_key(KeyCode::End));
@@ -2114,20 +2126,20 @@ tasks:
         // Stan początkowy
         app.assert_state(|s| s.output_view_state.scroll_offset == 0);
 
-        // Krok 1: PageUp → scroll_offset = 10
+        // Krok 1: PageUp → scroll_offset = 9 (scroll_step * 3 = 3 * 3 = 9)
         app.inject_key(make_key(KeyCode::PageUp));
         app.step();
-        app.assert_state(|s| s.output_view_state.scroll_offset == 10);
+        app.assert_state(|s| s.output_view_state.scroll_offset == 9);
 
-        // Krok 2: Kolejny PageUp → scroll_offset = 20
+        // Krok 2: Kolejny PageUp → scroll_offset = 18
         app.inject_key(make_key(KeyCode::PageUp));
         app.step();
-        app.assert_state(|s| s.output_view_state.scroll_offset == 20);
+        app.assert_state(|s| s.output_view_state.scroll_offset == 18);
 
-        // Krok 3: PageDown → scroll_offset = 10
+        // Krok 3: PageDown → scroll_offset = 9
         app.inject_key(make_key(KeyCode::PageDown));
         app.step();
-        app.assert_state(|s| s.output_view_state.scroll_offset == 10);
+        app.assert_state(|s| s.output_view_state.scroll_offset == 9);
     }
 
     /// Integration test: Home → scroll to top
@@ -2260,14 +2272,14 @@ tasks:
         app.step();
         app.assert_state(|s| !s.sidebar.visible);
 
-        // 2. Scroll w górę (↑ x3)
+        // 2. Scroll w górę (↑ x3) — każdy krok = scroll_step=3, razem = 9
         app.inject_keys(vec![
             make_key(KeyCode::Up),
             make_key(KeyCode::Up),
             make_key(KeyCode::Up),
         ]);
         app.drain_events();
-        app.assert_state(|s| s.output_view_state.scroll_offset == 3);
+        app.assert_state(|s| s.output_view_state.scroll_offset == 9);
         app.assert_state(|s| !s.output_view_state.auto_follow);
 
         // 3. Pokaż sidebar ('t')

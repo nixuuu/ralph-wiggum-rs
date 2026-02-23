@@ -46,7 +46,9 @@ pub async fn execute(args: PrdArgs, file_config: &FileConfig) -> Result<()> {
         .or_else(|| file_config.task.default_model.clone());
 
     // Initialize TaskCommandApp with shared state
-    let app_state = Arc::new(Mutex::new(TaskCommandApp::new("task prd")));
+    let app_state = Arc::new(Mutex::new(
+        TaskCommandApp::new("task prd").with_scroll_step(file_config.tui.scroll_step),
+    ));
     if let Some(ref m) = model {
         app_state.lock().unwrap().set_model(m);
     }

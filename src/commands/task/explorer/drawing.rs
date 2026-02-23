@@ -329,6 +329,7 @@ mod tests {
             filter: String::new(),
             sort_mode: SortMode::Id,
             detail_scroll: 0,
+            scroll_step: 3,
         }
     }
 
@@ -488,6 +489,7 @@ mod tests {
             filter: String::new(),
             sort_mode: SortMode::Id,
             detail_scroll: 0,
+            scroll_step: 3,
         };
 
         let backend = TestBackend::new(80, 24);
@@ -654,6 +656,7 @@ tasks:
             filter: String::new(),
             sort_mode: SortMode::Id,
             detail_scroll: 0,
+            scroll_step: 3,
         };
 
         // Progress: 2/4 done (50%)
@@ -752,6 +755,7 @@ tasks:
             filter: String::new(),
             sort_mode: SortMode::Component,
             detail_scroll: 0,
+            scroll_step: 3,
         };
 
         // Powinno być: alpha (3) → beta (2) → zebra (1)

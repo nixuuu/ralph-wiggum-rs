@@ -90,6 +90,7 @@ pub async fn execute_task_command(
         model: resolved_model,
         use_nerd_font: file_config.ui.nerd_font,
         tasks_path: tasks_path.clone(),
+        scroll_step: file_config.tui.scroll_step,
     })
     .await?;
 

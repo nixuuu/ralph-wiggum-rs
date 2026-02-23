@@ -25,6 +25,8 @@ pub struct Config {
     pub no_splash: bool,
     /// Command name for TUI header (default: "run")
     pub command_name: String,
+    /// Liczba linii przewijana przy scroll myszy (z TuiConfig)
+    pub scroll_step: u16,
 }
 
 impl Config {
@@ -82,6 +84,7 @@ impl Config {
                 progress_file: args.progress_file,
                 no_splash: args.no_splash,
                 command_name: args.command_name.unwrap_or_else(|| "run".to_string()),
+                scroll_step: file_config.tui.scroll_step,
             });
         }
 
@@ -108,6 +111,7 @@ impl Config {
             progress_file: args.progress_file,
             no_splash: args.no_splash,
             command_name: args.command_name.unwrap_or_else(|| "run".to_string()),
+            scroll_step: file_config.tui.scroll_step,
         })
     }
 }

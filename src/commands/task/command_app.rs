@@ -242,6 +242,8 @@ pub struct TaskCommandApp {
     ask_user_viewport_height: u16,
     /// Szerokość terminala (obliczona przy draw, 80 = domyślna)
     last_known_width: u16,
+    /// Liczba linii przewijana przy zdarzeniu scroll myszy (z TuiConfig)
+    scroll_step: usize,
 }
 
 impl TaskCommandApp {
@@ -256,7 +258,14 @@ impl TaskCommandApp {
             runner_completed: false,
             ask_user_viewport_height: 0,
             last_known_width: 80,
+            scroll_step: 3,
         }
+    }
+
+    /// Ustaw konfigurowalny scroll step (z TuiConfig). Builder pattern.
+    pub fn with_scroll_step(mut self, step: u16) -> Self {
+        self.scroll_step = step.max(1) as usize;
+        self
     }
 
     /// Set model name in header
@@ -476,10 +485,11 @@ impl AppState for TaskCommandApp {
                 MouseEventKind::ScrollUp => {
                     if self.active_widget.is_some() {
                         if let Some(w) = self.active_widget.as_mut() {
-                            w.scroll_up(3);
+                            // AskUserWidget::scroll_up przyjmuje u16
+                            w.scroll_up(self.scroll_step as u16);
                         }
                     } else {
-                        self.output_state.scroll_up(3);
+                        self.output_state.scroll_up(self.scroll_step);
                     }
                     return EventResult::Consumed;
                 }
@@ -488,10 +498,11 @@ impl AppState for TaskCommandApp {
                         let max_h = self.ask_user_viewport_height;
                         let width = self.last_known_width;
                         if let Some(w) = self.active_widget.as_mut() {
-                            w.scroll_down(3, width, max_h);
+                            // AskUserWidget::scroll_down przyjmuje u16
+                            w.scroll_down(self.scroll_step as u16, width, max_h);
                         }
                     } else {
-                        self.output_state.scroll_down(3);
+                        self.output_state.scroll_down(self.scroll_step);
                     }
                     return EventResult::Consumed;
                 }

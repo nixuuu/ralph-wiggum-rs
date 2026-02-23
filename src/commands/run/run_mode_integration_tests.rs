@@ -125,24 +125,24 @@ fn test_arrow_keys_scroll_output() {
     app.assert_state(|s| s.output_view_state.auto_follow);
     app.assert_state(|s| s.output_view_state.scroll_offset == 0);
 
-    // Strzałka w górę → scroll_offset += 1, auto_follow = false
+    // Strzałka w górę → scroll_offset += scroll_step=3, auto_follow = false
     app.inject_key(make_key(KeyCode::Up));
     app.step();
 
     app.assert_state(|s| !s.output_view_state.auto_follow);
-    app.assert_state(|s| s.output_view_state.scroll_offset == 1);
+    app.assert_state(|s| s.output_view_state.scroll_offset == 3);
 
-    // Strzałka w górę ponownie → scroll_offset += 1
+    // Strzałka w górę ponownie → scroll_offset += scroll_step=3
     app.inject_key(make_key(KeyCode::Up));
     app.step();
 
-    app.assert_state(|s| s.output_view_state.scroll_offset == 2);
+    app.assert_state(|s| s.output_view_state.scroll_offset == 6);
 
-    // Strzałka w dół → scroll_offset -= 1
+    // Strzałka w dół → scroll_offset -= scroll_step=3
     app.inject_key(make_key(KeyCode::Down));
     app.step();
 
-    app.assert_state(|s| s.output_view_state.scroll_offset == 1);
+    app.assert_state(|s| s.output_view_state.scroll_offset == 3);
 
     // End → auto_follow = true, scroll_offset = 0
     app.inject_key(make_key(KeyCode::End));
@@ -196,21 +196,21 @@ fn test_scroll_stress() {
     // Renderuj żeby wypełnić last_output_area
     let _ = app.render();
 
-    // Scroll w górę 50 razy → offset == 50
+    // Scroll w górę 50 razy → offset == 50 * scroll_step=3 = 150
     for _ in 0..50 {
         app.inject_key(make_key(KeyCode::Up));
         app.step();
     }
 
-    app.assert_state(|s| s.output_view_state.scroll_offset == 50);
+    app.assert_state(|s| s.output_view_state.scroll_offset == 150);
 
-    // Scroll w dół 25 razy → offset == 25
+    // Scroll w dół 25 razy → offset == 150 - 25 * scroll_step=3 = 75
     for _ in 0..25 {
         app.inject_key(make_key(KeyCode::Down));
         app.step();
     }
 
-    app.assert_state(|s| s.output_view_state.scroll_offset == 25);
+    app.assert_state(|s| s.output_view_state.scroll_offset == 75);
 
     // Home → max scroll
     app.inject_key(make_key(KeyCode::Home));

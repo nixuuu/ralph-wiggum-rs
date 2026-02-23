@@ -17,7 +17,7 @@ pub fn execute(file_config: &FileConfig) -> Result<()> {
         return print_empty_state();
     }
 
-    launch_explorer(tasks_path)
+    launch_explorer(tasks_path, file_config.tui.scroll_step)
 }
 
 /// Wyświetl komunikat gdy brak tasków.
@@ -32,8 +32,8 @@ fn print_empty_state() -> Result<()> {
 }
 
 /// Uruchom fullscreen TUI explorer.
-fn launch_explorer(tasks_path: &Path) -> Result<()> {
-    let mut explorer = TaskExplorerApp::load(tasks_path)?;
+fn launch_explorer(tasks_path: &Path, scroll_step: u16) -> Result<()> {
+    let mut explorer = TaskExplorerApp::load(tasks_path)?.with_scroll_step(scroll_step);
     let mut tui_app = App::new(Duration::from_millis(100))?;
     tui_app.run(&mut explorer)?;
     Ok(())
@@ -197,6 +197,7 @@ tasks:
             filter: String::new(),
             sort_mode: crate::commands::task::explorer::state::SortMode::Id,
             detail_scroll: 0,
+            scroll_step: 3,
         }
     }
 

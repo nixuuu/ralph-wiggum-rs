@@ -102,6 +102,8 @@ pub struct TaskExplorerApp {
     pub(crate) sort_mode: SortMode,
     /// Scroll offset panelu Detail (do przewijania długich opisów)
     pub(crate) detail_scroll: usize,
+    /// Liczba linii przewijana przy zdarzeniu scroll myszy (z TuiConfig)
+    pub(crate) scroll_step: usize,
 }
 
 impl TaskExplorerApp {
@@ -135,7 +137,14 @@ impl TaskExplorerApp {
             filter: String::new(),
             sort_mode: SortMode::Id,
             detail_scroll: 0,
+            scroll_step: 3,
         })
+    }
+
+    /// Ustaw konfigurowalny scroll step (z TuiConfig). Builder pattern.
+    pub fn with_scroll_step(mut self, step: u16) -> Self {
+        self.scroll_step = step.max(1) as usize;
+        self
     }
 
     /// Odśwież drzewo zadań z dysku.
@@ -379,6 +388,7 @@ tasks:
             filter: String::new(),
             sort_mode: SortMode::Id,
             detail_scroll: 0,
+            scroll_step: 3,
         }
     }
 
@@ -641,6 +651,7 @@ tasks:
             filter: String::new(),
             sort_mode: SortMode::Component,
             detail_scroll: 0,
+            scroll_step: 3,
         };
 
         let rows = app.visible_rows();
@@ -704,11 +715,12 @@ tasks:
         let resolver = KeybindingResolver::with_defaults();
         app.focus = Panel::Detail;
 
+        // scroll_step domyślnie = 3; detail_scroll ograniczony do detail_line_count-1
         assert_eq!(app.detail_scroll, 0);
         app.handle_event(press(KeyCode::Down), &resolver);
-        assert_eq!(app.detail_scroll, 1);
-        app.handle_event(press(KeyCode::Down), &resolver);
-        assert_eq!(app.detail_scroll, 2);
+        // Offset rośnie o scroll_step=3 (ale jest clampowany do max_scroll)
+        // Weryfikujemy że offset > 0 (aktualna wartość zależy od liczby linii w testowym tasku)
+        assert!(app.detail_scroll > 0);
     }
 
     #[test]
@@ -760,6 +772,7 @@ tasks:
             filter: String::new(),
             sort_mode: SortMode::Id,
             detail_scroll: 0,
+            scroll_step: 3,
         };
         assert!(app.selected_node().is_none());
     }

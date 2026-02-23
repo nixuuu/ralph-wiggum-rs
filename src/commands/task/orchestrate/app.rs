@@ -158,6 +158,10 @@ pub struct OrchestrateApp {
     pub(crate) sidebar_rect: Option<Rect>,
     /// Rect overlaya (gdy aktywny), aktualizowany w każdym draw().
     pub(crate) overlay_rect: Option<Rect>,
+
+    // ── Scroll ──
+    /// Liczba linii przewijana przy zdarzeniu scroll myszy (z TuiConfig)
+    pub(crate) scroll_step: usize,
 }
 
 #[allow(dead_code)] // Public API — zostanie podłączony w task 6.9
@@ -196,6 +200,7 @@ impl OrchestrateApp {
             grid_rects: Vec::new(),
             sidebar_rect: None,
             overlay_rect: None,
+            scroll_step: 3,
         }
     }
 
@@ -204,6 +209,12 @@ impl OrchestrateApp {
     /// Pozwala na konfigurowalny klawisz command palette (domyślnie Ctrl+P).
     pub fn with_resolver(mut self, resolver: KeybindingResolver) -> Self {
         self.resolver = resolver;
+        self
+    }
+
+    /// Ustaw konfigurowalny scroll step (z TuiConfig). Builder pattern.
+    pub fn with_scroll_step(mut self, step: u16) -> Self {
+        self.scroll_step = step.max(1) as usize;
         self
     }
 

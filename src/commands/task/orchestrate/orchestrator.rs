@@ -47,6 +47,8 @@ pub struct Orchestrator {
     pub(super) profiles: Vec<VerifyProfile>,
     /// Keybindings config — used to create KeybindingResolver for the TUI.
     pub(super) keybindings_config: KeybindingsConfig,
+    /// Liczba linii przewijana przy scroll myszy (z TuiConfig)
+    pub(super) scroll_step: u16,
 }
 
 impl Orchestrator {
@@ -103,6 +105,7 @@ impl Orchestrator {
             prompt_suffix,
             profiles,
             keybindings_config: file_config.keybindings.clone(),
+            scroll_step: file_config.tui.scroll_step,
         })
     }
 
@@ -209,7 +212,8 @@ impl Orchestrator {
         let resolver = KeybindingResolver::from_user_config(self.keybindings_config.clone());
         let mut tui = TuiContext {
             app: OrchestrateApp::new(worker_count, Arc::clone(&shared_overlay))
-                .with_resolver(resolver),
+                .with_resolver(resolver)
+                .with_scroll_step(self.scroll_step),
             terminal,
             mux_output: MultiplexedOutput::new(),
             task_start_times: HashMap::new(),
@@ -353,7 +357,11 @@ mod tests {
             prompt_prefix: None,
             prompt_suffix: None,
             profiles: Vec::new(),
+<<<<<<< HEAD
             keybindings_config: KeybindingsConfig::default(),
+=======
+            scroll_step: 3,
+>>>>>>> ralph/task/13.2.2
         };
 
         assert_eq!(
@@ -420,7 +428,11 @@ mod tests {
             prompt_prefix: None,
             prompt_suffix: None,
             profiles: Vec::new(),
+<<<<<<< HEAD
             keybindings_config: KeybindingsConfig::default(),
+=======
+            scroll_step: 3,
+>>>>>>> ralph/task/13.2.2
         };
 
         assert_eq!(

@@ -22,6 +22,8 @@ pub struct TaskRunOptions {
     pub use_nerd_font: bool,
     /// Path to tasks.yml for MCP server
     pub tasks_path: PathBuf,
+    /// Liczba linii przewijana przy scroll myszy (z TuiConfig, domyślnie 3)
+    pub scroll_step: u16,
 }
 
 /// Run a task command with streaming TUI output.
@@ -42,6 +44,7 @@ pub async fn run_task_command(options: TaskRunOptions) -> Result<()> {
         mcp_config: None,
         question_rx: None,
         tasks_path: Some(options.tasks_path),
+        scroll_step: options.scroll_step,
     })
     .await
 }
@@ -58,6 +61,7 @@ mod tests {
             model: Some("claude-sonnet-4-5".to_string()),
             use_nerd_font: true,
             tasks_path: PathBuf::from("/tmp/tasks.yml"),
+            scroll_step: 3,
         };
 
         assert_eq!(options.prompt, "Test prompt");
@@ -65,5 +69,6 @@ mod tests {
         assert_eq!(options.model, Some("claude-sonnet-4-5".to_string()));
         assert!(options.use_nerd_font);
         assert_eq!(options.tasks_path, PathBuf::from("/tmp/tasks.yml"));
+        assert_eq!(options.scroll_step, 3);
     }
 }

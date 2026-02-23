@@ -38,6 +38,8 @@ pub(crate) struct RunOnceOptions {
     pub question_rx: Option<mpsc::Receiver<QuestionEnvelope>>,
     /// Path to tasks.yml for auto-starting MCP server.
     pub tasks_path: Option<PathBuf>,
+    /// Liczba linii przewijana przy scroll myszy (z TuiConfig, domyślnie 3)
+    pub scroll_step: u16,
 }
 
 /// Run Claude CLI once with fullscreen TUI (App + TaskCommandApp).
@@ -65,6 +67,7 @@ pub(crate) async fn run_once(options: RunOnceOptions) -> Result<()> {
         mcp_config,
         question_rx,
         tasks_path,
+        scroll_step,
     } = options;
 
     // ── Resolve MCP config ──
@@ -82,7 +85,9 @@ pub(crate) async fn run_once(options: RunOnceOptions) -> Result<()> {
             first_line.to_string()
         }
     });
-    let state = Arc::new(Mutex::new(TaskCommandApp::new(header_name)));
+    let state = Arc::new(Mutex::new(
+        TaskCommandApp::new(header_name).with_scroll_step(scroll_step),
+    ));
     let formatter = Arc::new(Mutex::new(OutputFormatter::new(use_nerd_font)));
     formatter.lock().unwrap().start_iteration();
 
@@ -307,6 +312,7 @@ mod tests {
             mcp_config: None,
             question_rx: None,
             tasks_path: None,
+            scroll_step: 3,
         };
     }
 
@@ -324,6 +330,7 @@ mod tests {
             mcp_config: None,
             question_rx: Some(rx),
             tasks_path: None,
+            scroll_step: 3,
         };
     }
 
@@ -340,6 +347,7 @@ mod tests {
             mcp_config: None,
             question_rx: None,
             tasks_path: Some(PathBuf::from(".ralph/tasks.yml")),
+            scroll_step: 3,
         };
     }
 
@@ -357,6 +365,7 @@ mod tests {
             mcp_config: Some(custom_config),
             question_rx: None,
             tasks_path: Some(PathBuf::from(".ralph/tasks.yml")),
+            scroll_step: 3,
         };
     }
 
@@ -373,6 +382,7 @@ mod tests {
             mcp_config: None,
             question_rx: None,
             tasks_path: None,
+            scroll_step: 3,
         };
     }
 

@@ -36,6 +36,7 @@ pub async fn execute(args: GenerateDepsArgs, file_config: &FileConfig) -> Result
         mcp_config: None,
         question_rx: None,
         tasks_path: None, // generate_deps uses built-in tools, not MCP
+        scroll_step: file_config.tui.scroll_step,
     })
     .await?;
 
