@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::shared::error::{RalphError, Result};
+use crate::tui::keybindings::KeybindingsConfig;
 
 // ── Merge helpers ──────────────────────────────────────────────────────
 // Semantyka: overlay nadpisuje base tylko gdy wartość jest inna niż default.
@@ -186,6 +187,10 @@ pub struct FileConfig {
     pub task: TaskConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Konfiguracja skrótów klawiszowych (`[keybindings]` w .ralph.toml)
+    #[serde(default)]
+    #[allow(dead_code)] // Will be consumed by TUI event handlers
+    pub keybindings: KeybindingsConfig,
 }
 
 /// UI configuration
@@ -678,6 +683,23 @@ impl FileConfig {
             tui: TuiConfig::merge(base.tui, overlay.tui),
             task: TaskConfig::merge(base.task, overlay.task),
             logging: LoggingConfig::merge(base.logging, overlay.logging),
+        }
+    }
+
+    /// Merge dwóch warstw konfiguracji: overlay nadpisuje base (non-default only).
+    ///
+    /// Semantyka:
+    /// - Scalar fields: overlay zastępuje base jeśli overlay ≠ default
+    /// - Option fields: overlay Some > base Some > None
+    /// - Vec fields: overlay zastępuje base w całości jeśli niepusty
+    pub fn merge(base: Self, overlay: Self) -> Self {
+        Self {
+            prompt: PromptConfig::merge(base.prompt, overlay.prompt),
+            ui: UiConfig::merge(base.ui, overlay.ui),
+            tui: TuiConfig::merge(base.tui, overlay.tui),
+            task: TaskConfig::merge(base.task, overlay.task),
+            logging: LoggingConfig::merge(base.logging, overlay.logging),
+            keybindings: KeybindingsConfig::merge(base.keybindings, overlay.keybindings),
         }
     }
 
@@ -2938,7 +2960,6 @@ includes = ["keybindings.toml", "notifications.toml"]
             vec!["keybindings.toml", "notifications.toml"]
         );
     }
-
 
     #[test]
     fn test_merge_empty_vec_overlay_keeps_base() {

@@ -961,6 +961,7 @@ mod tests {
         use crate::shared::file_config::{
             LoggingConfig, PromptConfig, TaskConfig, TuiConfig, UiConfig,
         };
+        use crate::tui::keybindings::KeybindingsConfig;
 
         let file_config = FileConfig {
             includes: vec![],
@@ -973,6 +974,7 @@ mod tests {
             tui: TuiConfig::default(),
             task: TaskConfig::default(),
             logging: LoggingConfig::default(),
+            keybindings: KeybindingsConfig::default(),
         };
 
         let config = ResolvedConfig {
@@ -1027,6 +1029,7 @@ mod tests {
         use crate::shared::file_config::{
             LoggingConfig, PromptConfig, TaskConfig, TuiConfig, UiConfig,
         };
+        use crate::tui::keybindings::KeybindingsConfig;
 
         let file_config = FileConfig {
             includes: vec![],
@@ -1039,6 +1042,7 @@ mod tests {
             tui: TuiConfig::default(),
             task: TaskConfig::default(),
             logging: LoggingConfig::default(),
+            keybindings: KeybindingsConfig::default(),
         };
 
         let config = ResolvedConfig {
@@ -1083,6 +1087,7 @@ mod tests {
         use crate::shared::file_config::{
             LoggingConfig, PromptConfig, TaskConfig, TuiConfig, UiConfig,
         };
+        use crate::tui::keybindings::KeybindingsConfig;
 
         let file_config = FileConfig {
             includes: vec![],
@@ -1095,6 +1100,7 @@ mod tests {
             tui: TuiConfig::default(),
             task: TaskConfig::default(),
             logging: LoggingConfig::default(),
+            keybindings: KeybindingsConfig::default(),
         };
 
         let config = ResolvedConfig {

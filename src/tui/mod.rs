@@ -7,6 +7,8 @@ pub mod formatter;
 pub mod formatting;
 #[allow(dead_code)]
 pub mod fuzzy;
+#[allow(dead_code)]
+pub mod keybindings;
 pub mod responsive;
 pub mod ring_buffer;
 #[allow(dead_code)]
@@ -39,6 +41,11 @@ pub use formatter::{
     RatuiFormatter, bold_span, colored_bold_span, colored_span, icon_span, muted_span, styled_span,
 };
 // Re-eksport tool formatting utilities — Span-based output dla tool calls
+#[allow(unused_imports)] // Re-exporty — będą używane przez per-command widoki TUI
+pub use keybindings::{
+    ExplorerBindings, GlobalBindings, KeyAction, KeyCombo, KeybindingsConfig, OrchestrateBindings,
+    RunBindings,
+};
 #[allow(unused_imports)]
 pub use responsive::{Breakpoint, LayoutAreas};
 #[allow(unused_imports)]
