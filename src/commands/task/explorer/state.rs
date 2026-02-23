@@ -983,4 +983,218 @@ tasks:
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "2.2");
     }
+
+    // ── Mouse click tests ──
+
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    fn make_mouse_click(column: u16, row: u16) -> AppEvent {
+        AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn make_mouse_move(column: u16, row: u16) -> AppEvent {
+        AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// Ustaw recty wierszy ręcznie (symulacja po draw()).
+    /// Każdy wiersz ma szerokość 40, zaczyna od kolumny 0.
+    fn setup_row_rects(app: &mut TaskExplorerApp, rows: usize) {
+        app.task_row_rects.clear();
+        for i in 0..rows {
+            let rect = ratatui::layout::Rect::new(0, i as u16, 40, 1);
+            app.task_row_rects.push((i, rect));
+        }
+    }
+
+    #[test]
+    fn click_on_second_row_selects_it() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Wiersze: 1, 1.1, 1.2, 2, 2.1, 2.2 (6 wierszy, indeksy 0-5)
+        setup_row_rects(&mut app, 6);
+        assert_eq!(app.tree_state.selected, 0); // Zaczynamy na "1"
+
+        // Klik w row=1 (wiersz "1.1", abs_index=1)
+        app.handle_event(make_mouse_click(5, 1), &resolver);
+
+        assert_eq!(app.tree_state.selected, 1);
+        assert_eq!(app.selected_id, Some("1.1".to_string()));
+    }
+
+    #[test]
+    fn click_on_last_row_selects_it() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        setup_row_rects(&mut app, 6);
+
+        // Klik na ostatni wiersz (abs_index=5, "2.2")
+        app.handle_event(make_mouse_click(10, 5), &resolver);
+
+        assert_eq!(app.tree_state.selected, 5);
+        assert_eq!(app.selected_id, Some("2.2".to_string()));
+    }
+
+    #[test]
+    fn click_outside_rows_does_not_change_selection() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Tylko 6 wierszy (row 0-5), klikamy poza nimi (row=10)
+        setup_row_rects(&mut app, 6);
+        assert_eq!(app.tree_state.selected, 0);
+
+        app.handle_event(make_mouse_click(5, 10), &resolver);
+
+        // Selekcja bez zmian
+        assert_eq!(app.tree_state.selected, 0);
+        assert_eq!(app.selected_id, Some("1".to_string()));
+    }
+
+    #[test]
+    fn click_on_selected_parent_toggles_expand() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // "1" jest rodzicem (abs_index=0), domyślnie expanded
+        setup_row_rects(&mut app, 6);
+        assert_eq!(app.tree_state.selected, 0);
+        assert!(app.tree_state.expanded.contains("1"));
+
+        // Klik na row=0 (zaznaczony task "1") → collapse
+        app.handle_event(make_mouse_click(5, 0), &resolver);
+
+        // "1" powinno być zwinięte
+        assert!(!app.tree_state.expanded.contains("1"));
+    }
+
+    #[test]
+    fn click_on_selected_parent_toggles_expand_collapse_then_expand() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        setup_row_rects(&mut app, 6);
+
+        // Collapse "1"
+        app.handle_event(make_mouse_click(5, 0), &resolver);
+        assert!(!app.tree_state.expanded.contains("1"));
+
+        // Rebuild rects after collapse (teraz tylko 4 wiersze: 1, 2, 2.1, 2.2)
+        setup_row_rects(&mut app, 4);
+
+        // Expand "1" ponownie
+        app.handle_event(make_mouse_click(5, 0), &resolver);
+        assert!(app.tree_state.expanded.contains("1"));
+    }
+
+    #[test]
+    fn click_on_selected_leaf_does_not_change_expand() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Wybierz "1.1" (leaf, abs_index=1)
+        app.tree_state.selected = 1;
+        app.sync_selected_id();
+        setup_row_rects(&mut app, 6);
+
+        // Klik na zaznaczony leaf → toggle_expand() na leaf nie robi nic
+        app.handle_event(make_mouse_click(5, 1), &resolver);
+
+        // Selekcja bez zmian, expanded bez zmian
+        assert_eq!(app.tree_state.selected, 1);
+        assert_eq!(app.selected_id, Some("1.1".to_string()));
+    }
+
+    #[test]
+    fn mouse_move_does_not_change_selection() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        setup_row_rects(&mut app, 6);
+        assert_eq!(app.tree_state.selected, 0);
+
+        // MouseMove (nie Down) → Ignored
+        let result = app.handle_event(make_mouse_move(5, 2), &resolver);
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.tree_state.selected, 0);
+    }
+
+    #[test]
+    fn click_returns_consumed_when_row_hit() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        setup_row_rects(&mut app, 6);
+
+        let result = app.handle_event(make_mouse_click(5, 2), &resolver);
+        assert_eq!(result, EventResult::Consumed);
+    }
+
+    #[test]
+    fn click_returns_ignored_when_no_row_hit() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        setup_row_rects(&mut app, 6);
+
+        // Poza zakresem wierszy
+        let result = app.handle_event(make_mouse_click(5, 20), &resolver);
+        assert_eq!(result, EventResult::Ignored);
+    }
+
+    #[test]
+    fn click_outside_rect_width_does_not_change_selection() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Recty mają szerokość 40, od col=0. Klik w col=41 jest poza zakresem.
+        setup_row_rects(&mut app, 6);
+        assert_eq!(app.tree_state.selected, 0);
+
+        let result = app.handle_event(make_mouse_click(41, 2), &resolver);
+
+        // Poza szerokością recta → Ignored, selekcja bez zmian
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.tree_state.selected, 0);
+    }
+
+    #[test]
+    fn click_on_tree_row_switches_focus_to_tree() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Zaczynamy z focusem na Detail
+        app.focus = Panel::Detail;
+        setup_row_rects(&mut app, 6);
+
+        // Klik na wiersz drzewa → focus powinien wrócić do Tree
+        app.handle_event(make_mouse_click(5, 2), &resolver);
+
+        assert_eq!(app.focus, Panel::Tree);
+    }
+
+    #[test]
+    fn click_resets_detail_scroll_on_new_selection() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        app.detail_scroll = 7;
+        setup_row_rects(&mut app, 6);
+
+        // Klik na inny task → sync_selected_id() resetuje detail_scroll
+        app.handle_event(make_mouse_click(5, 3), &resolver);
+
+        assert_eq!(app.detail_scroll, 0);
+    }
 }

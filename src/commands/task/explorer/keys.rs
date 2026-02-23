@@ -1,9 +1,10 @@
-//! Key handling dla TaskExplorerApp.
+//! Key i mouse handling dla TaskExplorerApp.
 //!
 //! Dispatch klawiszy do odpowiedniego panelu (Tree/Detail).
 //! Globalne skróty (Tab, s, r) obsługiwane niezależnie od focus.
+//! Obsługa kliknięć myszy: lewy klik na wiersz → zaznacz task lub toggle expand.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::tui::events::EventResult;
 
@@ -198,5 +199,54 @@ impl TaskExplorerApp {
             Some(node) => super::drawing::detail_line_count(node),
             None => 1,
         }
+    }
+
+    /// Obsłuż zdarzenie myszy.
+    ///
+    /// Lewy klik na wiersz drzewa → zaznacz task (zmień selected_index).
+    /// Kliknięcie na już zaznaczony task → toggle expand/collapse.
+    /// Klik poza wierszami drzewa → bez zmian.
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> EventResult {
+        // Obsługujemy tylko lewy MouseDown
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return EventResult::Ignored;
+        }
+
+        let col = mouse.column;
+        let row = mouse.row;
+
+        // Hit-test na cache'owane recty wierszy drzewa.
+        // Kopiujemy abs_index (usize) żeby nie trzymać referencji do self.
+        let clicked_index = self
+            .task_row_rects
+            .iter()
+            .find(|(_, rect)| {
+                row >= rect.y
+                    && row < rect.y + rect.height
+                    && col >= rect.x
+                    && col < rect.x + rect.width
+            })
+            .map(|&(abs_index, _)| abs_index);
+
+        let Some(abs_index) = clicked_index else {
+            // Klik poza taskami — brak zmiany
+            return EventResult::Ignored;
+        };
+
+        // Klik na drzewo zawsze przenosi focus na panel Tree
+        self.focus = Panel::Tree;
+
+        if abs_index == self.tree_state.selected {
+            // Klik na zaznaczony task → toggle expand/collapse
+            let rows = self.visible_rows();
+            self.tree_state.toggle_expand(&rows);
+            self.sync_selected_id();
+        } else {
+            // Klik na inny task → zaznacz go
+            self.tree_state.selected = abs_index;
+            self.sync_selected_id();
+        }
+
+        EventResult::Consumed
     }
 }

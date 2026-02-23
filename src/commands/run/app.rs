@@ -410,6 +410,7 @@ impl RunApp {
     ///
     /// Routing:
     /// - Lewy klik w `sidebar_rect` → focus Sidebar + zaznaczenie tasku pod kursorem
+    /// - Lewy klik w `output_rect` → focus Output
     /// - ScrollUp/ScrollDown nad sidebar → nawigacja po task tree (krok=1)
     /// - ScrollUp/ScrollDown nad output → scroll output buffera (krok=`scroll_step` z config)
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> EventResult {
@@ -463,27 +464,35 @@ impl RunApp {
 
     /// Obsługa lewego kliknięcia myszy.
     ///
-    /// Klik w sidebar_rect → focus Sidebar + zaznaczenie tasku pod kursorem.
+    /// - Klik w `output_rect` → focus Output
+    /// - Klik w `sidebar_rect` → focus Sidebar + zaznaczenie tasku pod kursorem
     fn handle_mouse_left_click(&mut self, col: u16, row: u16) -> EventResult {
-        // Hit-test na sidebar (wymaga sidebar_rect z ostatniego draw())
+        let pos = Position::new(col, row);
+
+        // Klik w output_rect → focus Output
+        if let Some(output_rect) = self.output_rect
+            && output_rect.contains(pos)
+        {
+            self.cancel_quit_pending();
+            self.focus = FocusArea::Output;
+            return EventResult::Consumed;
+        }
+
+        // Klik w sidebar_rect → focus Sidebar + zaznaczenie tasku pod kursorem
         let Some(sidebar_rect) = self.sidebar_rect else {
             return EventResult::Ignored;
         };
 
-        let pos = Position::new(col, row);
         if !sidebar_rect.contains(pos) {
-            // Klik poza sidebar — nie zmieniaj focusu
             return EventResult::Ignored;
         }
 
-        // Focus sidebar
         self.focus = FocusArea::Sidebar;
 
         // Oblicz task index z row pozycji.
         // inner_y = sidebar_rect.y + SIDEBAR_PADDING_TOP (z task_sidebar.rs).
         // Task i jest renderowany w wierszu inner_y + i (uwzględniając scroll_offset).
         let inner_y = sidebar_rect.y.saturating_add(SIDEBAR_PADDING_TOP);
-
         if row >= inner_y {
             let row_within_inner = (row - inner_y) as usize;
             let task_index = self.sidebar.scroll_offset + row_within_inner;
@@ -496,26 +505,6 @@ impl RunApp {
     /// Anuluj stan quit_pending (wywołuj przy innych akcjach).
     fn cancel_quit_pending(&mut self) {
         self.quit_pending = false;
-    }
-
-    /// Obsługa zdarzenia myszy.
-    ///
-    /// Dla `MouseDown Left` w obszarze output → zmień focus na `FocusArea::Output`.
-    /// Pozostałe zdarzenia są ignorowane.
-    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> EventResult {
-        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            let pos = Position::new(mouse.column, mouse.row);
-            // Click w output_rect → focus na Output
-            if let Some(output_rect) = self.output_rect
-                && output_rect.contains(pos)
-            {
-                // Anuluj quit_pending dla spójności z resztą handlera
-                self.cancel_quit_pending();
-                self.focus = FocusArea::Output;
-                return EventResult::Consumed;
-            }
-        }
-        EventResult::Ignored
     }
 }
 
@@ -1704,7 +1693,10 @@ tasks:
 
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.focus, FocusArea::Output);
-        assert!(!app.quit_pending, "Mouse click powinien anulować quit_pending");
+        assert!(
+            !app.quit_pending,
+            "Mouse click powinien anulować quit_pending"
+        );
     }
 
     /// Left click gdy focus już Output → focus pozostaje Output, wynik Consumed.
