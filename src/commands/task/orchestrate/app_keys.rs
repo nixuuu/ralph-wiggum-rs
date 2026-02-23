@@ -382,20 +382,27 @@ impl OrchestrateApp {
 
         // Overlay aktywny — obsłuż tylko MouseDown Left.
         // Click poza overlay_rect zamyka overlay (jak Esc, bez generowania pending message).
-        // Click wewnątrz overlay_rect jest ignorowany — overlay obsługuje własny input klawiaturą.
+        // Click wewnątrz overlay_rect → forward do overlay.handle_mouse (pozycja kursora).
         if self.is_overlay_active() {
             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
                 let pos = Position::new(mouse.column, mouse.row);
-                // Click poza overlay_rect zamyka overlay bez generowania wiadomości
-                if let Some(overlay_rect) = self.overlay_rect
-                    && !overlay_rect.contains(pos)
-                {
-                    if let Ok(mut guard) = self.shared_overlay.lock() {
-                        *guard = None;
+                if let Some(overlay_rect) = self.overlay_rect {
+                    if !overlay_rect.contains(pos) {
+                        // Click poza overlay_rect zamyka overlay bez generowania wiadomości
+                        if let Ok(mut guard) = self.shared_overlay.lock() {
+                            *guard = None;
+                        }
+                        return EventResult::Consumed;
+                    }
+                    // Click wewnątrz overlay_rect → ustaw kursor przez handle_mouse
+                    if let Ok(mut guard) = self.shared_overlay.lock()
+                        && let Some(ref mut overlay) = *guard
+                    {
+                        overlay.handle_mouse(mouse, overlay_rect);
                     }
                     return EventResult::Consumed;
                 }
-                // Click wewnątrz overlay (lub overlay_rect niezainicjalizowany) — ignoruj
+                // overlay_rect niezainicjalizowany (draw() nie był wywołany) — ignoruj
             }
             return EventResult::Ignored;
         }
@@ -2366,7 +2373,7 @@ tasks:
 
     #[test]
     fn mouse_left_click_inside_overlay_rect_does_not_close() {
-        // Overlay aktywny, click wewnątrz overlay_rect → overlay nadal aktywny, Ignored
+        // Overlay aktywny, click wewnątrz overlay_rect → overlay nadal aktywny, Consumed
         let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
         let mut app = OrchestrateApp::new(2, overlay);
         // Symuluj overlay_rect (20,10)-(59,19)
@@ -2376,7 +2383,7 @@ tasks:
         let mouse = make_mouse_click(30, 14);
         let result = app.handle_mouse(mouse);
 
-        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(result, EventResult::Consumed);
         assert!(app.is_overlay_active()); // overlay nadal aktywny
     }
 
@@ -2403,11 +2410,11 @@ tasks:
         // overlay_rect: x=20, y=10, width=40, height=10 → zawiera (20,10)..(59,19)
         app.overlay_rect = Some(ratatui::layout::Rect::new(20, 10, 40, 10));
 
-        // Lewy górny róg overlay (x=20, y=10) — contains() zwraca true
+        // Lewy górny róg overlay (x=20, y=10) — contains() zwraca true → Consumed
         let mouse = make_mouse_click(20, 10);
         let result = app.handle_mouse(mouse);
 
-        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(result, EventResult::Consumed);
         assert!(app.is_overlay_active());
     }
 
@@ -2440,5 +2447,41 @@ tasks:
 
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(app.panels[&1].scroll_offset, 0);
+    }
+
+    #[test]
+    fn mouse_left_click_inside_overlay_sets_cursor_pos() {
+        // Click wewnątrz overlay_rect → cursor_pos ustawiony przez handle_mouse.
+        // overlay_rect: x=20, y=10, width=40, height=10
+        // content_y_start = 10+1 = 11, padding_left = 1 → inner_x = 21
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+
+        // Wpisz "Hello" używając handle_key (cursor_pos = 5 po wpisaniu)
+        if let Ok(mut guard) = overlay.lock()
+            && let Some(ref mut o) = *guard
+        {
+            use crossterm::event::KeyCode;
+            for c in "Hello".chars() {
+                o.handle_key(crossterm::event::KeyEvent::from(KeyCode::Char(c)));
+            }
+        }
+
+        let mut app = OrchestrateApp::new(1, overlay.clone());
+        app.overlay_rect = Some(ratatui::layout::Rect::new(20, 10, 40, 10));
+
+        // cursor_pos = 5 (po wpisaniu "Hello"). Klik na (24, 11):
+        // line_in_view=0, actual_line_idx=0, col_in_content = 24-21=3 → char 3 ("l")
+        let mouse = make_mouse_click(24, 11);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert!(app.is_overlay_active()); // overlay nie zamknięty
+
+        // cursor_pos przesunięty na char 3 przez klik
+        if let Ok(guard) = overlay.lock()
+            && let Some(ref o) = *guard
+        {
+            assert_eq!(o.cursor_pos(), 3);
+        }
     }
 }

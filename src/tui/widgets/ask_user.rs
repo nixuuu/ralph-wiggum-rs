@@ -344,7 +344,7 @@ impl AskUserWidget {
             InnerState::Multi(state) => {
                 handle_multi_mouse(state, &self.question, mouse, area, self.scroll_offset)
             }
-            _ => AskUserAction::Continue,
+            InnerState::Text(_) => AskUserAction::Continue,
         }
     }
 
@@ -483,19 +483,22 @@ fn handle_choice_mouse(
         let inner_width = area.width.saturating_sub(4).max(1) as usize;
         let q_height = count_rendered_lines_for_width(question.question.trim_end(), inner_width);
 
-        let virt_row =
-            mouse.row as i32 - area.y as i32 + scroll_offset as i32;
+        let virt_row = mouse.row as i32 - area.y as i32 + scroll_offset as i32;
 
         // Text input jest na wirtualnym wierszu: border+pad(2) + q_height + options.len() + 1
         let text_input_virt_row = 2i32 + q_height as i32 + question.options.len() as i32 + 1;
 
         if virt_row == text_input_virt_row {
-            // Klik na wierszu pola tekstowego — ustaw kursor przez unicode_column_to_char_index
-            // Tekst zaczyna się po padding_left(2) + prompt "> "(2) = 4 kolumny od area.x
-            let text_x_start = area.x.saturating_add(4) as usize;
-            let col_in_text = (mouse.column as usize).saturating_sub(text_x_start);
-            let available_width = inner_width.saturating_sub(2); // minus prompt "> "
-            text_state.set_cursor_from_click(col_in_text, available_width);
+            // Klik na wierszu pola tekstowego — deleguj do TextInputState::handle_mouse.
+            // area_of_input_line: x = area.x + 2 (padding_left), width = inner_width
+            // TextInputState::handle_mouse dodaje kolejne 2 za prompt "> ".
+            let input_line_area = ratatui::layout::Rect {
+                x: area.x.saturating_add(2),
+                y: mouse.row,
+                width: inner_width as u16,
+                height: 1,
+            };
+            text_state.handle_mouse(mouse, input_line_area);
         }
 
         return AskUserAction::Continue;

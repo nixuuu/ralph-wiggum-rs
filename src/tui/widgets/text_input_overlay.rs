@@ -9,7 +9,7 @@
 //! - Cursor positioning and backspace
 //! - Vertical scrolling when content exceeds visible area
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 
 use crate::tui::Theme;
+use crate::tui::formatting::unicode_column_to_char_index;
 
 /// Action returned by handle_key to signal what should happen next.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +181,11 @@ impl TextInputOverlay {
         &self.content
     }
 
+    /// Get the current cursor position (char index).
+    pub fn cursor_pos(&self) -> usize {
+        self.cursor_pos
+    }
+
     /// Get the target worker ID for this overlay.
     pub fn target_worker_id(&self) -> u32 {
         self.target_worker_id
@@ -193,6 +199,59 @@ impl TextInputOverlay {
         let overlay_width = (area.width * 6 / 10).clamp(40, 80);
         let overlay_height = (area.height / 2).clamp(10, 20);
         centered_rect(overlay_width, overlay_height, area)
+    }
+
+    /// Obsługuje zdarzenie myszy w obszarze overlaya.
+    ///
+    /// `area` — Rect overlaya (jak zwrócony przez `compute_rect()`, czyli po wycentrowaniu).
+    ///
+    /// Geometria (`Block::default().padding(Padding::uniform(1))`):
+    /// - Tytuł: wiersz `area.y` (padding_top = 1)
+    /// - Treść: wiersze `area.y+1 .. area.y+height-2` (viewport_height = height-2)
+    /// - Hint: wiersz `area.y+height-1` (padding_bottom = 1)
+    /// - Kolumna treści: `area.x+1` (padding_left = 1)
+    ///
+    /// Dla `MouseDown Left` w obszarze treści: ustawia `cursor_pos` na char index
+    /// odpowiadający klikniętemu wierszowi i kolumnie (unicode-aware). Uwzględnia
+    /// `scroll_offset`. Click poza treścią (tytuł, hint, poza zasięgiem) jest ignorowany.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+
+        // Obszar treści: padding_top=1, dolny wiersz (hint) = y+height-1
+        let content_y_start = area.y.saturating_add(1);
+        let content_y_end_excl = area.y.saturating_add(area.height).saturating_sub(1);
+
+        // Klik na tytule lub poniżej hinta → ignoruj
+        if mouse.row < content_y_start || mouse.row >= content_y_end_excl {
+            return;
+        }
+
+        let line_in_view = (mouse.row - content_y_start) as usize;
+        let actual_line_idx = line_in_view + self.scroll_offset;
+
+        let text_lines: Vec<&str> = self.content.split('\n').collect();
+        let total_chars = self.content.chars().count();
+
+        // Click poza zawartością → kursor na końcu
+        if actual_line_idx >= text_lines.len() {
+            self.cursor_pos = total_chars;
+            return;
+        }
+
+        let line = text_lines[actual_line_idx];
+        // Kolumna w treści: odejmij padding_left=1
+        let col_in_content = (mouse.column as usize).saturating_sub(area.x as usize + 1);
+        let char_idx_in_line = unicode_column_to_char_index(line, col_in_content);
+
+        // Absolutna pozycja kursora: suma długości linii poprzednich + znaki '\n'
+        let line_start_char: usize = text_lines[..actual_line_idx]
+            .iter()
+            .map(|l| l.chars().count() + 1) // +1 za '\n'
+            .sum();
+
+        self.cursor_pos = (line_start_char + char_idx_in_line).min(total_chars);
     }
 
     /// Render the overlay widget onto the given frame at the specified area.
@@ -1763,5 +1822,157 @@ mod tests {
         assert_eq!(overlay.content(), "🎉");
         assert_eq!(overlay.cursor_pos, 1);
         assert_eq!(overlay.content.len(), 4);
+    }
+
+    // ── handle_mouse tests ────────────────────────────────────────────
+
+    fn make_left_click_overlay(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn make_right_click_overlay(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    // Overlay area używana w testach: x=20, y=10, width=40, height=10
+    fn test_overlay_area() -> Rect {
+        Rect::new(20, 10, 40, 10)
+    }
+
+    #[test]
+    fn test_handle_mouse_click_first_line_first_char() {
+        // overlay: x=20, y=10, h=10 → content starts y=11, x=21
+        let area = test_overlay_area();
+        let mut overlay = TextInputOverlay::new(1);
+        overlay.content = "Hello\nWorld".to_string();
+        overlay.cursor_pos = overlay.content.chars().count();
+
+        // Klik na (21, 11) → line 0, col 0 ("H")
+        overlay.handle_mouse(make_left_click_overlay(21, 11), area);
+        assert_eq!(overlay.cursor_pos, 0);
+    }
+
+    #[test]
+    fn test_handle_mouse_click_first_line_offset() {
+        let area = test_overlay_area();
+        let mut overlay = TextInputOverlay::new(1);
+        overlay.content = "Hello\nWorld".to_string();
+        overlay.cursor_pos = 0;
+
+        // Klik na (24, 11) → line 0, col = 24-21=3 ("l" at char 3)
+        overlay.handle_mouse(make_left_click_overlay(24, 11), area);
+        assert_eq!(overlay.cursor_pos, 3);
+    }
+
+    #[test]
+    fn test_handle_mouse_click_second_line() {
+        let area = test_overlay_area();
+        let mut overlay = TextInputOverlay::new(1);
+        overlay.content = "Hello\nWorld".to_string();
+        overlay.cursor_pos = 0;
+
+        // Klik na (22, 12) → line 1 ("World"), col = 22-21=1 → "o" (char 1)
+        // line_start_char = "Hello".len()+1 = 6, char_idx = 1
+        overlay.handle_mouse(make_left_click_overlay(22, 12), area);
+        assert_eq!(overlay.cursor_pos, 7); // 6 + 1
+    }
+
+    #[test]
+    fn test_handle_mouse_right_click_ignored() {
+        let area = test_overlay_area();
+        let mut overlay = TextInputOverlay::new(1);
+        overlay.content = "Hello".to_string();
+        overlay.cursor_pos = 3;
+
+        overlay.handle_mouse(make_right_click_overlay(22, 11), area);
+        assert_eq!(overlay.cursor_pos, 3); // bez zmian
+    }
+
+    #[test]
+    fn test_handle_mouse_click_on_title_ignored() {
+        let area = test_overlay_area();
+        let mut overlay = TextInputOverlay::new(1);
+        overlay.content = "Hello".to_string();
+        overlay.cursor_pos = 3;
+
+        // Tytuł jest w wierszu area.y=10 (poza content_y_start=11)
+        overlay.handle_mouse(make_left_click_overlay(22, 10), area);
+        assert_eq!(overlay.cursor_pos, 3); // bez zmian
+    }
+
+    #[test]
+    fn test_handle_mouse_click_on_hint_ignored() {
+        let area = test_overlay_area(); // y=10, height=10 → hint row = y+height-1 = 19
+        let mut overlay = TextInputOverlay::new(1);
+        overlay.content = "Hello".to_string();
+        overlay.cursor_pos = 3;
+
+        // Hint w wierszu y+height-1 = 19 (poza content_y_end_excl=19)
+        overlay.handle_mouse(make_left_click_overlay(22, 19), area);
+        assert_eq!(overlay.cursor_pos, 3); // bez zmian
+    }
+
+    #[test]
+    fn test_handle_mouse_click_beyond_content_sets_end() {
+        let area = test_overlay_area();
+        let mut overlay = TextInputOverlay::new(1);
+        overlay.content = "Hi".to_string();
+        overlay.cursor_pos = 0;
+
+        // Klik na wierszu 15 (poza "Hi" → tylko 1 linia)
+        overlay.handle_mouse(make_left_click_overlay(22, 15), area);
+        assert_eq!(overlay.cursor_pos, 2); // koniec
+    }
+
+    #[test]
+    fn test_handle_mouse_with_scroll_offset() {
+        let area = test_overlay_area();
+        let mut overlay = TextInputOverlay::new(1);
+        // 5 linii, scroll_offset=2 → line_in_view=0 → actual=2
+        overlay.content = "line0\nline1\nline2\nline3\nline4".to_string();
+        overlay.scroll_offset = 2;
+        overlay.cursor_pos = 0;
+
+        // Klik na pierwszej widocznej linii (row=11=content_y_start)
+        // → line_in_view=0, actual_line_idx=2 ("line2")
+        // line_start_char = (5+1)*2 = 12
+        overlay.handle_mouse(make_left_click_overlay(21, 11), area);
+        assert_eq!(overlay.cursor_pos, 12);
+    }
+
+    #[test]
+    fn test_handle_mouse_cjk_aware() {
+        let area = test_overlay_area();
+        let mut overlay = TextInputOverlay::new(1);
+        overlay.content = "你好".to_string(); // 2 CJK = 4 kolumny
+        overlay.cursor_pos = 0;
+
+        // col=21 → col_in_content = 0 → char 0 (你)
+        overlay.handle_mouse(make_left_click_overlay(21, 11), area);
+        assert_eq!(overlay.cursor_pos, 0);
+
+        // col=23 → col_in_content = 2 → char 1 (好) [CJK = 2 cols each]
+        overlay.handle_mouse(make_left_click_overlay(23, 11), area);
+        assert_eq!(overlay.cursor_pos, 1);
+    }
+
+    #[test]
+    fn test_handle_mouse_empty_content_sets_zero() {
+        let area = test_overlay_area();
+        let mut overlay = TextInputOverlay::new(1);
+        overlay.cursor_pos = 0;
+
+        overlay.handle_mouse(make_left_click_overlay(22, 11), area);
+        assert_eq!(overlay.cursor_pos, 0);
     }
 }

@@ -2,6 +2,7 @@
 ///
 /// Renderuje pytanie (markdown) + pole input z kursorem.
 /// Obsługuje single-line input: wpisywanie, backspace, strzałki, Enter=submit, Esc=cancel.
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -12,8 +13,8 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::shared::markdown::render_markdown;
-use crate::tui::formatting::unicode_column_to_char_index;
 use crate::tui::Theme;
+use crate::tui::formatting::unicode_column_to_char_index;
 
 /// Stan text input widget
 #[derive(Debug, Clone)]
@@ -113,6 +114,24 @@ impl TextInputState {
         let visible_text: String = chars[visible_start..].iter().collect();
         let relative_idx = unicode_column_to_char_index(&visible_text, col_in_text);
         self.cursor_pos = (visible_start + relative_idx).min(char_count);
+    }
+
+    /// Obsługuje zdarzenie myszy na wierszu input widgetu.
+    ///
+    /// `area` — Rect wiersza input (y = wiersz z `"> " + text`, width = szerokość widgetu).
+    /// Padding: prompt `"> "` = 2 kolumny.
+    ///
+    /// Dla `MouseDown Left`: oblicza char index odpowiadający kolumnie kliknięcia
+    /// i ustawia `cursor_pos`. Click poza tekstem (lub na prawo) ustawia kursor na końcu.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        // Prompt "> " = 2 kolumny — offset od lewej krawędzi pola input
+        const PROMPT_WIDTH: usize = 2;
+        let col_in_text = (mouse.column as usize).saturating_sub(area.x as usize + PROMPT_WIDTH);
+        let available_width = (area.width as usize).saturating_sub(PROMPT_WIDTH);
+        self.set_cursor_from_click(col_in_text, available_width);
     }
 
     /// Czyści buffer
@@ -511,6 +530,108 @@ mod tests {
     }
 
     // ── set_cursor_from_click tests ─────────────────────────────────
+
+    // ── handle_mouse tests ───────────────────────────────────────────
+
+    fn left_click(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn right_click(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_ascii_sets_cursor() {
+        let mut state = TextInputState::new(None);
+        "Hello".chars().for_each(|c| state.insert_char(c));
+        let area = Rect::new(0, 2, 80, 1); // input row y=2
+
+        // Klik na col=2 → "H" (col 0+2 offset = col 2, text col = 0)
+        state.handle_mouse(left_click(2, 2), area);
+        assert_eq!(state.cursor_pos, 0);
+
+        // Klik na col=3 → "e" (col 3 - 2 prompt = col 1)
+        state.handle_mouse(left_click(3, 2), area);
+        assert_eq!(state.cursor_pos, 1);
+
+        // Klik na col=7 → po "Hello" (col 7-2=5)
+        state.handle_mouse(left_click(7, 2), area);
+        assert_eq!(state.cursor_pos, 5);
+    }
+
+    #[test]
+    fn test_handle_mouse_right_click_ignored() {
+        let mut state = TextInputState::new(None);
+        "Hello".chars().for_each(|c| state.insert_char(c));
+        let initial = state.cursor_pos;
+        let area = Rect::new(0, 2, 80, 1);
+
+        state.handle_mouse(right_click(2, 2), area);
+        // Prawy klik — cursor_pos bez zmian
+        assert_eq!(state.cursor_pos, initial);
+    }
+
+    #[test]
+    fn test_handle_mouse_out_of_range_sets_end() {
+        let mut state = TextInputState::new(None);
+        "Hi".chars().for_each(|c| state.insert_char(c));
+        let area = Rect::new(0, 2, 80, 1);
+
+        // Klik na col=100 — poza zakresem → koniec
+        state.handle_mouse(left_click(100, 2), area);
+        assert_eq!(state.cursor_pos, 2);
+    }
+
+    #[test]
+    fn test_handle_mouse_cjk_aware() {
+        let mut state = TextInputState::new(None);
+        "你好".chars().for_each(|c| state.insert_char(c)); // 2 CJK = 4 kolumny
+        let area = Rect::new(0, 2, 80, 1);
+
+        // col=2 → prompt "> " = 2, text col = 0 → char 0 (你)
+        state.handle_mouse(left_click(2, 2), area);
+        assert_eq!(state.cursor_pos, 0);
+
+        // col=4 → text col = 2 → char 1 (好)
+        state.handle_mouse(left_click(4, 2), area);
+        assert_eq!(state.cursor_pos, 1);
+    }
+
+    #[test]
+    fn test_handle_mouse_area_with_offset() {
+        // Area zaczyna się od x=10 (nie 0)
+        let mut state = TextInputState::new(None);
+        "ABC".chars().for_each(|c| state.insert_char(c));
+        let area = Rect::new(10, 5, 40, 1); // x=10
+
+        // col=12 → 12 - 10 - 2(prompt) = 0 → char 0 (A)
+        state.handle_mouse(left_click(12, 5), area);
+        assert_eq!(state.cursor_pos, 0);
+
+        // col=13 → 13 - 10 - 2 = 1 → char 1 (B)
+        state.handle_mouse(left_click(13, 5), area);
+        assert_eq!(state.cursor_pos, 1);
+    }
+
+    #[test]
+    fn test_handle_mouse_empty_buffer() {
+        let mut state = TextInputState::new(None);
+        let area = Rect::new(0, 2, 80, 1);
+
+        state.handle_mouse(left_click(5, 2), area);
+        assert_eq!(state.cursor_pos, 0); // pusty → cursor na 0
+    }
 
     #[test]
     fn test_set_cursor_from_click_ascii() {
