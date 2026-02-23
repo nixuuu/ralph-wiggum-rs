@@ -198,6 +198,7 @@ tasks:
             sort_mode: crate::commands::task::explorer::state::SortMode::Id,
             detail_scroll: 0,
             scroll_step: 3,
+            task_row_rects: Vec::new(),
         }
     }
 

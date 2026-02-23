@@ -25,6 +25,9 @@ use super::state::{InputMode, Panel, TaskExplorerApp};
 ///
 /// Bottom bar: Filter input (gdy InputMode::Filter) lub Progress bar (gdy Normal)
 pub(crate) fn draw_all(frame: &mut Frame, area: Rect, app: &mut TaskExplorerApp) {
+    // Wyczyść cache rectów z poprzedniego draw() przed renderowaniem nowej klatki
+    app.task_row_rects.clear();
+
     let breakpoint = Breakpoint::detect(area.width);
 
     // Layout vertikalny: Content (Min) + Bottom bar (1 line)
@@ -94,8 +97,23 @@ fn draw_tree_panel(frame: &mut Frame, area: Rect, app: &mut TaskExplorerApp) {
     // Render tree widget z posortowanymi i przefiltrowanymi wierszami
     if inner.width > 0 && inner.height > 0 {
         let rows = app.visible_rows();
+        let row_count = rows.len();
         let widget = TaskTreeWidget::from_rows(rows);
         frame.render_stateful_widget(widget, inner, &mut app.tree_state);
+
+        // Cache rect każdego widocznego wiersza drzewa (po render, gdy scroll_offset jest aktualny)
+        let viewport_height = inner.height as usize;
+        let scroll_offset = app.tree_state.scroll_offset;
+        // Zarezerwuj pojemność z góry — eliminuje realokacje przy pierwszym renderze
+        app.task_row_rects.reserve(viewport_height);
+        for i in 0..viewport_height {
+            let abs_index = scroll_offset + i;
+            if abs_index >= row_count {
+                break;
+            }
+            let row_rect = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
+            app.task_row_rects.push((abs_index, row_rect));
+        }
     }
 }
 
@@ -330,6 +348,7 @@ mod tests {
             sort_mode: SortMode::Id,
             detail_scroll: 0,
             scroll_step: 3,
+            task_row_rects: Vec::new(),
         }
     }
 
@@ -490,6 +509,7 @@ mod tests {
             sort_mode: SortMode::Id,
             detail_scroll: 0,
             scroll_step: 3,
+            task_row_rects: Vec::new(),
         };
 
         let backend = TestBackend::new(80, 24);
@@ -548,6 +568,88 @@ tasks:
         component: dag
         deps: ["2.1", "1.2"]
 "#;
+
+    // ── Cache tests ──
+
+    #[test]
+    fn task_row_rects_populated_after_draw() {
+        let mut app = make_sample_app();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_all(frame, area, &mut app);
+            })
+            .unwrap();
+
+        // Cache powinien zawierać recty dla widocznych wierszy
+        assert!(!app.task_row_rects.is_empty());
+
+        // Każdy rect ma wysokość 1 (jeden wiersz drzewa)
+        for (_, rect) in &app.task_row_rects {
+            assert_eq!(rect.height, 1);
+        }
+
+        // Indeksy są sekwencyjne (scroll_offset=0, więc abs_index = i)
+        for (i, (abs_idx, _)) in app.task_row_rects.iter().enumerate() {
+            assert_eq!(*abs_idx, i);
+        }
+    }
+
+    #[test]
+    fn task_row_rects_cleared_between_draws() {
+        let mut app = make_sample_app();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Pierwszy draw
+        terminal
+            .draw(|frame| draw_all(frame, frame.area(), &mut app))
+            .unwrap();
+        let count_after_first = app.task_row_rects.len();
+        assert!(count_after_first > 0);
+
+        // Drugi draw — cache powinien zostać odświeżony (nie zduplikowany)
+        terminal
+            .draw(|frame| draw_all(frame, frame.area(), &mut app))
+            .unwrap();
+        let count_after_second = app.task_row_rects.len();
+        assert_eq!(count_after_first, count_after_second);
+    }
+
+    #[test]
+    fn task_row_rects_empty_when_no_tasks() {
+        let mut app = TaskExplorerApp {
+            tasks: TasksFile {
+                default_model: None,
+                tasks: vec![],
+            },
+            tasks_path: PathBuf::from("test.yml"),
+            tree_state: TreeState::default(),
+            selected_id: None,
+            focus: Panel::Tree,
+            input_mode: InputMode::Normal,
+            filter: String::new(),
+            sort_mode: SortMode::Id,
+            detail_scroll: 0,
+            scroll_step: 3,
+            task_row_rects: Vec::new(),
+        };
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| draw_all(frame, frame.area(), &mut app))
+            .unwrap();
+
+        // Brak tasków → brak rectów w cache
+        assert!(app.task_row_rects.is_empty());
+    }
 
     // ── Snapshot tests: Responsive layout ──
 
@@ -657,6 +759,7 @@ tasks:
             sort_mode: SortMode::Id,
             detail_scroll: 0,
             scroll_step: 3,
+            task_row_rects: Vec::new(),
         };
 
         // Progress: 2/4 done (50%)
@@ -756,6 +859,7 @@ tasks:
             sort_mode: SortMode::Component,
             detail_scroll: 0,
             scroll_step: 3,
+            task_row_rects: Vec::new(),
         };
 
         // Powinno być: alpha (3) → beta (2) → zebra (1)

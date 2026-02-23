@@ -7,6 +7,8 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use ratatui::layout::Rect;
+
 use crate::shared::progress::TaskStatus;
 use crate::shared::tasks::{TaskNode, TasksFile};
 use crate::tui::widgets::task_tree::{self, FlatRow, TreeState};
@@ -104,6 +106,9 @@ pub struct TaskExplorerApp {
     pub(crate) detail_scroll: usize,
     /// Liczba linii przewijana przy zdarzeniu scroll myszy (z TuiConfig)
     pub(crate) scroll_step: usize,
+    /// Cache prostokątów wierszy drzewa: (visible_index, Rect).
+    /// Aktualizowany w każdym draw() — używany do wykrywania kliknięć myszy.
+    pub(crate) task_row_rects: Vec<(usize, Rect)>,
 }
 
 impl TaskExplorerApp {
@@ -138,6 +143,7 @@ impl TaskExplorerApp {
             sort_mode: SortMode::Id,
             detail_scroll: 0,
             scroll_step: 3,
+            task_row_rects: Vec::new(),
         })
     }
 
@@ -389,6 +395,7 @@ tasks:
             sort_mode: SortMode::Id,
             detail_scroll: 0,
             scroll_step: 3,
+            task_row_rects: Vec::new(),
         }
     }
 
@@ -652,6 +659,7 @@ tasks:
             sort_mode: SortMode::Component,
             detail_scroll: 0,
             scroll_step: 3,
+            task_row_rects: Vec::new(),
         };
 
         let rows = app.visible_rows();
@@ -773,6 +781,7 @@ tasks:
             sort_mode: SortMode::Id,
             detail_scroll: 0,
             scroll_step: 3,
+            task_row_rects: Vec::new(),
         };
         assert!(app.selected_node().is_none());
     }
