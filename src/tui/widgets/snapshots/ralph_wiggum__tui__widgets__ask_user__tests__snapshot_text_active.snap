@@ -6,4 +6,4 @@ expression: snap(&buffer)
 
   What is your name?
   > █ohn Doe
-  Enter: submit │ Esc: cancel
+  Enter: submit │ Shift+Enter: newline │ Esc: ca

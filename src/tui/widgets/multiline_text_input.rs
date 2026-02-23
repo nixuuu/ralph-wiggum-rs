@@ -912,6 +912,8 @@ pub struct MultilineTextInput {
     theme: Theme,
     /// Czy widget jest aktywny (focused) — determinuje renderowanie kursora.
     focused: bool,
+    /// Placeholder wyświetlany gdy bufor jest pusty (opcjonalny).
+    placeholder: Option<String>,
 }
 
 #[allow(dead_code)] // TUI component methods — will be used when widget is integrated
@@ -928,6 +930,7 @@ impl MultilineTextInput {
             state,
             theme: DEFAULT_THEME,
             focused: true,
+            placeholder: None,
         }
     }
 
@@ -940,6 +943,12 @@ impl MultilineTextInput {
     /// Ustawia theme widgetu (domyślnie `DEFAULT_THEME`).
     pub fn with_theme(mut self, theme: Theme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    /// Ustawia placeholder wyświetlany gdy bufor jest pusty.
+    pub fn with_placeholder(mut self, placeholder: String) -> Self {
+        self.placeholder = Some(placeholder);
         self
     }
 }
@@ -959,13 +968,36 @@ impl Widget for MultilineTextInput {
         self.state.set_wrap_width(content_width);
         self.state.set_viewport_height(area.height as usize);
 
-        // Pusty bufor — renderuj tylko prefix i ewentualnie kursor
+        // Pusty bufor — renderuj prefix + kursor + placeholder (gdy ustawiony)
         if self.state.buffer().is_empty() {
             buf.set_string(area.x, area.y, Self::PREFIX, prefix_style);
-            if self.focused {
-                let cx = area.x + Self::PREFIX_WIDTH;
-                if cx < area.x + area.width {
+            let cx = area.x + Self::PREFIX_WIDTH;
+            if cx < area.x + area.width {
+                if self.focused {
+                    // Kursor blokowy, placeholder jako muted italic za kursorem
                     buf.set_string(cx, area.y, "█", self.theme.primary_style());
+                    if let Some(ref ph) = self.placeholder {
+                        let rest: String = ph.chars().skip(1).collect();
+                        if !rest.is_empty() {
+                            let px = cx + 1;
+                            if px < area.x + area.width {
+                                buf.set_string(
+                                    px,
+                                    area.y,
+                                    &rest,
+                                    self.theme.muted_style().add_modifier(Modifier::ITALIC),
+                                );
+                            }
+                        }
+                    }
+                } else if let Some(ref ph) = self.placeholder {
+                    // Unfocused — pokaż cały placeholder bez kursora
+                    buf.set_string(
+                        cx,
+                        area.y,
+                        ph.as_str(),
+                        self.theme.muted_style().add_modifier(Modifier::ITALIC),
+                    );
                 }
             }
             return;

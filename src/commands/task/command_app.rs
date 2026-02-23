@@ -520,7 +520,8 @@ impl AppState for TaskCommandApp {
                 _ => {}
             }
 
-            let action = self.active_widget.as_mut().unwrap().handle_key(key.code);
+            // Przekazujemy cały KeyEvent (z modyfikatorami) — konieczne dla Shift+Enter
+            let action = self.active_widget.as_mut().unwrap().handle_key(key);
             match action {
                 AskUserAction::Submit(answer) => {
                     self.advance_question(answer);

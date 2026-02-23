@@ -12,7 +12,7 @@
 // Konwersja z MCP Question → AskUserQuestion odbywa się w warstwie integracyjnej.
 
 use ansi_to_tui::IntoText;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -25,8 +25,10 @@ use ratatui::{
 use crate::shared::markdown::render_markdown_for_width;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::ask_user_choice::QuestionOption;
+use crate::tui::widgets::multiline_text_input::MultilineTextInput;
 use crate::tui::widgets::{
-    ChoiceState, ConfirmState, MultiSelectOption, MultiSelectState, TextInputState,
+    ChoiceState, ConfirmState, MultiSelectOption, MultiSelectState, MultilineTextInputState,
+    TextInputState,
 };
 
 // ── AskUserAction ────────────────────────────────────────────────────
@@ -80,7 +82,8 @@ pub struct AskUserQuestion {
 /// Wewnętrzny stan interakcji — odpowiada typowi pytania
 #[derive(Debug, Clone)]
 pub(super) enum InnerState {
-    Text(TextInputState),
+    /// Multiline text input (Shift+Enter = newline, Enter = submit)
+    Text(MultilineTextInputState),
     /// (choice state, text input when "Other" option is being typed)
     Choice(ChoiceState, Option<TextInputState>),
     Multi(MultiSelectState),
@@ -125,7 +128,8 @@ impl AskUserWidget {
     pub fn new(question: AskUserQuestion) -> Self {
         let inner = match question.kind {
             QuestionKind::Text => {
-                InnerState::Text(TextInputState::new(question.placeholder.clone()))
+                // MultilineTextInputState: Shift+Enter = newline, Enter = submit
+                InnerState::Text(MultilineTextInputState::new())
             }
             QuestionKind::Choice => {
                 let default_index = question
@@ -190,8 +194,19 @@ impl AskUserWidget {
         match &self.state {
             AskUserState::Active(inner) => {
                 let content_height = match inner {
-                    // Text: pytanie + input line + hint line
-                    InnerState::Text(_) => question_lines + 1 + 1,
+                    // Text: pytanie + linie multiline contentu + hint line
+                    // Wrap width = inner_width - 2 (odejmujemy "> " prefix)
+                    InnerState::Text(state) => {
+                        let content_width = inner_width.saturating_sub(2).max(1);
+                        let vl_count = if state.buffer().is_empty() {
+                            1u16
+                        } else {
+                            let mut tmp = state.clone();
+                            tmp.set_wrap_width(content_width);
+                            tmp.visual_lines().len().max(1) as u16
+                        };
+                        question_lines + vl_count + 1 // +1 dla hint line
+                    }
                     // Choice: pytanie + opcje + wiersz "Other"
                     //         + 2 dodatkowe (text input + hint) gdy tryb "Other" aktywny
                     InnerState::Choice(_, other_input) => {
@@ -256,11 +271,14 @@ impl AskUserWidget {
 
     /// Obsługuje zdarzenie klawiatury w stanie Active.
     ///
+    /// Przyjmuje `KeyEvent` (z modyfikatorami) — konieczne dla obsługi Shift+Enter
+    /// w trybie multiline text input.
+    ///
     /// Zwraca `AskUserAction`:
     /// - `Continue` — klawisz obsłużony, kontynuuj interakcję
     /// - `Submit(answer)` — użytkownik zaakceptował odpowiedź (Enter)
     /// - `Cancel` — użytkownik anulował (Esc)
-    pub fn handle_key(&mut self, key: KeyCode) -> AskUserAction {
+    pub fn handle_key(&mut self, key: KeyEvent) -> AskUserAction {
         let inner = match &mut self.state {
             AskUserState::Active(inner) => inner,
             AskUserState::Answered(_) => return AskUserAction::Continue,
@@ -270,17 +288,19 @@ impl AskUserWidget {
         // Wyjątek: gdy jesteśmy w trybie "Other" text input, Esc musi dotrzeć
         // do handle_choice_key żeby wrócić do listy (nie anulować całego widgetu)
         let in_other_mode = matches!(inner, InnerState::Choice(_, Some(_)));
-        if key == KeyCode::Esc && !in_other_mode {
+        if key.code == KeyCode::Esc && !in_other_mode {
             return AskUserAction::Cancel;
         }
 
         match inner {
-            InnerState::Text(state) => handle_text_key(state, key),
+            // Deleguj cały KeyEvent do multiline handler (obsługuje Shift+Enter)
+            InnerState::Text(state) => handle_multiline_text_key(state, key),
+            // Pozostałe typy obsługują tylko KeyCode (nie potrzebują modyfikatorów)
             InnerState::Choice(state, other_input) => {
-                handle_choice_key(state, other_input, &self.question.options, key)
+                handle_choice_key(state, other_input, &self.question.options, key.code)
             }
-            InnerState::Multi(state) => handle_multi_key(state, key),
-            InnerState::Confirm(state) => handle_confirm_key(state, key),
+            InnerState::Multi(state) => handle_multi_key(state, key.code),
+            InnerState::Confirm(state) => handle_confirm_key(state, key.code),
         }
     }
 
@@ -292,37 +312,16 @@ impl AskUserWidget {
 
 // ── Key handlers per question type ─────────────────────────────────
 
-fn handle_text_key(state: &mut TextInputState, key: KeyCode) -> AskUserAction {
-    match key {
-        KeyCode::Enter => {
-            let value = state.value().to_string();
-            AskUserAction::Submit(value)
-        }
-        KeyCode::Backspace => {
-            state.delete_char();
-            AskUserAction::Continue
-        }
-        KeyCode::Left => {
-            state.move_cursor_left();
-            AskUserAction::Continue
-        }
-        KeyCode::Right => {
-            state.move_cursor_right();
-            AskUserAction::Continue
-        }
-        KeyCode::Home => {
-            state.move_cursor_home();
-            AskUserAction::Continue
-        }
-        KeyCode::End => {
-            state.move_cursor_end();
-            AskUserAction::Continue
-        }
-        KeyCode::Char(c) => {
-            state.insert_char(c);
-            AskUserAction::Continue
-        }
-        _ => AskUserAction::Continue,
+/// Obsługuje key event dla multiline text input.
+///
+/// Deleguje do `MultilineTextInputState::handle_key_event`:
+/// - Shift+Enter → wstawia newline (nie submituje)
+/// - Enter → submituje (zwraca zawartość bufora)
+/// - Pozostałe → edycja / nawigacja
+fn handle_multiline_text_key(state: &mut MultilineTextInputState, key: KeyEvent) -> AskUserAction {
+    match state.handle_key_event(key) {
+        Some(value) => AskUserAction::Submit(value),
+        None => AskUserAction::Continue,
     }
 }
 
@@ -452,9 +451,16 @@ impl Widget for AskUserWidget {
         let can_scroll_down = scroll_offset + area.height < full_height;
         let title = build_title(is_active, can_scroll_up, can_scroll_down);
 
+        // Destrukturyzacja — potrzebujemy `mut state` dla MultilineTextInputWidget (StatefulWidget)
+        let AskUserWidget {
+            question,
+            mut state,
+            ..
+        } = self;
+
         if full_height <= area.height {
             // Treść mieści się — renderuj bezpośrednio (bez virtual buffera)
-            render_widget_inner(&self.question, &self.state, &title, area, buf);
+            render_widget_inner(&question, &mut state, &title, area, buf);
             return;
         }
 
@@ -467,8 +473,8 @@ impl Widget for AskUserWidget {
         };
         let mut virt_buf = Buffer::empty(virt_rect);
         render_widget_inner(
-            &self.question,
-            &self.state,
+            &question,
+            &mut state,
             &title,
             virt_rect,
             &mut virt_buf,
@@ -521,9 +527,11 @@ fn build_title(is_active: bool, can_up: bool, can_down: bool) -> String {
 /// Renderuje widget (Block + treść) do podanego buffera.
 ///
 /// Wywoływany zarówno przy renderowaniu bezpośrednim jak i przez virtual buffer.
+/// Przyjmuje `state: &mut AskUserState` — konieczne dla `MultilineTextInputWidget`
+/// (StatefulWidget), który aktualizuje wrap_width i viewport_height przy renderowaniu.
 fn render_widget_inner(
     question: &AskUserQuestion,
-    state: &AskUserState,
+    state: &mut AskUserState,
     title: &str,
     area: Rect,
     buf: &mut Buffer,
@@ -565,7 +573,7 @@ fn render_widget_inner(
 }
 
 /// Renderuje aktywny stan z odpowiednim sub-widgetem
-fn render_active(inner: &InnerState, question: &AskUserQuestion, area: Rect, buf: &mut Buffer) {
+fn render_active(inner: &mut InnerState, question: &AskUserQuestion, area: Rect, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -609,9 +617,13 @@ fn render_active(inner: &InnerState, question: &AskUserQuestion, area: Rect, buf
     }
 }
 
-/// Renderuje text input: prompt "> " + buffer z kursorem + hint line
+/// Renderuje multiline text input: `> ` + content z kursorem + hint line.
+///
+/// Używa `MultilineTextInput` (Widget z prefiksem `> `) do renderowania pola tekstowego.
+/// Przyjmuje `&mut state` — architekturonicznie poprawne, umożliwia przyszłą optymalizację.
+/// Hint line informuje o Shift+Enter (newline) i Enter (submit).
 fn render_text_active(
-    state: &TextInputState,
+    state: &mut MultilineTextInputState,
     question: &AskUserQuestion,
     area: Rect,
     buf: &mut Buffer,
@@ -620,38 +632,35 @@ fn render_text_active(
         return;
     }
 
-    if state.buffer.is_empty() {
-        // Specjalny przypadek: pusty buffer z placeholder
-        let mut spans = Vec::new();
-        spans.push(Span::styled("> ", DEFAULT_THEME.header_style()));
-        spans.push(Span::styled("█", DEFAULT_THEME.primary_style()));
-        if let Some(ref placeholder) = question.placeholder {
-            let rest: String = placeholder.chars().skip(1).collect();
-            if !rest.is_empty() {
-                spans.push(Span::styled(
-                    rest,
-                    DEFAULT_THEME.muted_style().add_modifier(Modifier::ITALIC),
-                ));
-            }
-        }
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
-    } else {
-        // Deleguj renderowanie wiersza do wspólnej funkcji
-        render_text_input_line(state, area, buf);
-    }
+    // Input zajmuje wszystkie wiersze oprócz ostatniego (hint line)
+    let input_height = area.height.saturating_sub(1).max(1);
+    let input_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: input_height,
+    };
 
-    // Hint line
+    // Buduj widget z opcjonalnym placeholderem z pytania
+    // MultilineTextInput renderuje z prefiksem "> " (2 kolumny) na pierwszej linii
+    let mut input_widget = MultilineTextInput::new(state.clone());
+    if let Some(ref placeholder) = question.placeholder {
+        input_widget = input_widget.with_placeholder(placeholder.clone());
+    }
+    input_widget.render(input_area, buf);
+
+    // Hint line poniżej pola input
     if area.height > 1 {
         let hint = Line::from(Span::styled(
-            "Enter: submit │ Esc: cancel",
+            "Enter: submit │ Shift+Enter: newline │ Esc: cancel",
             DEFAULT_THEME.muted_style(),
         ));
-        buf.set_line(area.x, area.y + 1, &hint, area.width);
+        buf.set_line(area.x, area.y + input_height, &hint, area.width);
     }
 }
 
 /// Renderuje sam wiersz text input (kursor + buffer) bez hint line.
-/// Współdzielony między render_text_active i render_choice_active (tryb "Other").
+/// Używany przez render_choice_active (tryb "Other") dla single-line input.
 fn render_text_input_line(state: &TextInputState, area: Rect, buf: &mut Buffer) {
     if area.height == 0 {
         return;
@@ -933,10 +942,32 @@ fn count_rendered_lines_for_width(question_text: &str, width: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
+
     use super::*;
     use crate::test_helpers::{render_widget_to_buffer, snap};
 
     // ── Test helpers ──────────────────────────────────────────────
+
+    /// Tworzy KeyEvent z KeyCode bez modyfikatorów (helper dla testów).
+    fn k(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    /// Tworzy KeyEvent z KeyCode i modyfikatorem SHIFT.
+    fn k_shift(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
 
     fn text_question() -> AskUserQuestion {
         AskUserQuestion {
@@ -1158,17 +1189,64 @@ mod tests {
     #[test]
     fn test_handle_key_esc_cancels() {
         let mut widget = AskUserWidget::new(text_question());
-        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Cancel);
+        assert_eq!(widget.handle_key(k(KeyCode::Esc)), AskUserAction::Cancel);
+    }
+
+    #[test]
+    fn test_handle_key_shift_enter_inserts_newline() {
+        let mut widget = AskUserWidget::new(text_question());
+        // Wpisz "line1", Shift+Enter, "line2", Enter → submit "line1\nline2"
+        for ch in "line1".chars() {
+            widget.handle_key(k(KeyCode::Char(ch)));
+        }
+        // Shift+Enter → newline (nie submit)
+        assert_eq!(
+            widget.handle_key(k_shift(KeyCode::Enter)),
+            AskUserAction::Continue
+        );
+        for ch in "line2".chars() {
+            widget.handle_key(k(KeyCode::Char(ch)));
+        }
+        assert_eq!(
+            widget.handle_key(k(KeyCode::Enter)),
+            AskUserAction::Submit("line1\nline2".into())
+        );
+    }
+
+    #[test]
+    fn test_handle_key_enter_submits_not_newline() {
+        let mut widget = AskUserWidget::new(text_question());
+        // Enter bez Shift → submit (nie wstawia newline)
+        widget.handle_key(k(KeyCode::Char('A')));
+        assert_eq!(
+            widget.handle_key(k(KeyCode::Enter)),
+            AskUserAction::Submit("A".into())
+        );
+    }
+
+    #[test]
+    fn test_handle_key_text_multiline_height_grows() {
+        let mut widget = AskUserWidget::new(text_question());
+        let h1 = widget.height_for_width(50);
+
+        // Wpisz tekst + Shift+Enter → wysokość powinna wzrosnąć
+        for ch in "line1".chars() {
+            widget.handle_key(k(KeyCode::Char(ch)));
+        }
+        widget.handle_key(k_shift(KeyCode::Enter));
+
+        let h2 = widget.height_for_width(50);
+        assert!(h2 > h1, "Wysokość powinna wzrosnąć po dodaniu nowej linii");
     }
 
     #[test]
     fn test_handle_key_text_enter_submits() {
         let mut widget = AskUserWidget::new(text_question());
-        widget.handle_key(KeyCode::Char('A'));
-        widget.handle_key(KeyCode::Char('l'));
-        widget.handle_key(KeyCode::Char('i'));
+        widget.handle_key(k(KeyCode::Char('A')));
+        widget.handle_key(k(KeyCode::Char('l')));
+        widget.handle_key(k(KeyCode::Char('i')));
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("Ali".into())
         );
     }
@@ -1177,7 +1255,7 @@ mod tests {
     fn test_handle_key_text_empty_submit() {
         let mut widget = AskUserWidget::new(text_question());
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("".into())
         );
     }
@@ -1185,11 +1263,11 @@ mod tests {
     #[test]
     fn test_handle_key_text_backspace() {
         let mut widget = AskUserWidget::new(text_question());
-        widget.handle_key(KeyCode::Char('A'));
-        widget.handle_key(KeyCode::Char('B'));
-        widget.handle_key(KeyCode::Backspace);
+        widget.handle_key(k(KeyCode::Char('A')));
+        widget.handle_key(k(KeyCode::Char('B')));
+        widget.handle_key(k(KeyCode::Backspace));
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("A".into())
         );
     }
@@ -1197,14 +1275,14 @@ mod tests {
     #[test]
     fn test_handle_key_text_cursor_movement() {
         let mut widget = AskUserWidget::new(text_question());
-        widget.handle_key(KeyCode::Char('A'));
-        widget.handle_key(KeyCode::Char('B'));
-        widget.handle_key(KeyCode::Char('C'));
+        widget.handle_key(k(KeyCode::Char('A')));
+        widget.handle_key(k(KeyCode::Char('B')));
+        widget.handle_key(k(KeyCode::Char('C')));
         // Kursor na Home → 0, wstaw D na początku
-        widget.handle_key(KeyCode::Home);
-        widget.handle_key(KeyCode::Char('D'));
+        widget.handle_key(k(KeyCode::Home));
+        widget.handle_key(k(KeyCode::Char('D')));
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("DABC".into())
         );
     }
@@ -1212,9 +1290,9 @@ mod tests {
     #[test]
     fn test_handle_key_choice_navigate_and_submit() {
         let mut widget = AskUserWidget::new(choice_question());
-        assert_eq!(widget.handle_key(KeyCode::Down), AskUserAction::Continue);
+        assert_eq!(widget.handle_key(k(KeyCode::Down)), AskUserAction::Continue);
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("Session".into())
         );
     }
@@ -1223,7 +1301,7 @@ mod tests {
     fn test_handle_key_choice_submit_first() {
         let mut widget = AskUserWidget::new(choice_question());
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("JWT".into())
         );
     }
@@ -1232,7 +1310,7 @@ mod tests {
     fn test_handle_key_choice_wrap_up() {
         let mut widget = AskUserWidget::new(choice_question()); // JWT(0), Session(1), Other(2)
         // Na JWT (0), Up → wrap do "Other" (indeks 2 = options.len())
-        widget.handle_key(KeyCode::Up);
+        widget.handle_key(k(KeyCode::Up));
         if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
             assert_eq!(state.selected, 2); // "Other" jest na indeksie 2
         } else {
@@ -1247,8 +1325,8 @@ mod tests {
         // "Other" jest za ostatnią opcją (indeks N)
         let mut widget = AskUserWidget::new(choice_question()); // 2 opcje: JWT, Session
         // Down 2x → "Other" (indeks 2)
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Down);
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Down));
         // Stan choice.selected == 2 (options.len())
         if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
             assert_eq!(state.selected, 2);
@@ -1261,10 +1339,13 @@ mod tests {
     fn test_handle_key_choice_enter_on_other_activates_text_input() {
         let mut widget = AskUserWidget::new(choice_question());
         // Down 2x → "Other"
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Down);
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Down));
         // Enter → aktywuje text input
-        assert_eq!(widget.handle_key(KeyCode::Enter), AskUserAction::Continue);
+        assert_eq!(
+            widget.handle_key(k(KeyCode::Enter)),
+            AskUserAction::Continue
+        );
         // Sprawdź że other_input jest Some
         if let AskUserState::Active(InnerState::Choice(_, other_input)) = &widget.state {
             assert!(other_input.is_some());
@@ -1277,16 +1358,16 @@ mod tests {
     fn test_handle_key_choice_other_text_input_submit() {
         let mut widget = AskUserWidget::new(choice_question());
         // Down 2x → "Other", Enter → aktywuje text input
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Enter);
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Enter));
         // Wpisz "custom answer"
         for ch in "custom".chars() {
-            widget.handle_key(KeyCode::Char(ch));
+            widget.handle_key(k(KeyCode::Char(ch)));
         }
         // Enter → Submit z wpisanym tekstem
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("custom".into())
         );
     }
@@ -1295,11 +1376,11 @@ mod tests {
     fn test_handle_key_choice_other_esc_returns_to_list() {
         let mut widget = AskUserWidget::new(choice_question());
         // Przejdź do "Other" i aktywuj text input
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Enter);
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Enter));
         // Esc → powrót do listy (nie Cancel!)
-        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Continue);
+        assert_eq!(widget.handle_key(k(KeyCode::Esc)), AskUserAction::Continue);
         // other_input powinno być None
         if let AskUserState::Active(InnerState::Choice(_, other_input)) = &widget.state {
             assert!(other_input.is_none());
@@ -1315,9 +1396,9 @@ mod tests {
         let mut widget = AskUserWidget::new(choice_question());
         let base_height = widget.height_for_width(50);
         // Down 2x → "Other", Enter
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Enter);
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Enter));
         // height powinno wzrosnąć o 2 (text input + hint)
         assert_eq!(widget.height_for_width(50), base_height + 2);
     }
@@ -1326,7 +1407,7 @@ mod tests {
     fn test_handle_key_choice_wrap_includes_other() {
         let mut widget = AskUserWidget::new(choice_question()); // JWT, Session + Other
         // Up z indeksu 0 → wrap do "Other" (indeks 2)
-        widget.handle_key(KeyCode::Up);
+        widget.handle_key(k(KeyCode::Up));
         if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
             assert_eq!(state.selected, 2); // "Other" jako ostatni
         } else {
@@ -1337,17 +1418,17 @@ mod tests {
     #[test]
     fn test_handle_key_choice_other_text_backspace_and_submit() {
         let mut widget = AskUserWidget::new(choice_question());
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Enter);
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Enter));
         // Wpisz "abc", usuń 'c', dodaj 'd'
-        widget.handle_key(KeyCode::Char('a'));
-        widget.handle_key(KeyCode::Char('b'));
-        widget.handle_key(KeyCode::Char('c'));
-        widget.handle_key(KeyCode::Backspace);
-        widget.handle_key(KeyCode::Char('d'));
+        widget.handle_key(k(KeyCode::Char('a')));
+        widget.handle_key(k(KeyCode::Char('b')));
+        widget.handle_key(k(KeyCode::Char('c')));
+        widget.handle_key(k(KeyCode::Backspace));
+        widget.handle_key(k(KeyCode::Char('d')));
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("abd".into())
         );
     }
@@ -1355,12 +1436,12 @@ mod tests {
     #[test]
     fn test_handle_key_choice_other_empty_submit() {
         let mut widget = AskUserWidget::new(choice_question());
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Enter);
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Enter));
         // Submit bez wpisywania czegokolwiek → pusty string
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("".into())
         );
     }
@@ -1371,15 +1452,15 @@ mod tests {
         let mut widget = AskUserWidget::new(choice_question());
         // JWT (domyślne, indeks 0) → Enter
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("JWT".into())
         );
 
         let mut widget2 = AskUserWidget::new(choice_question());
         // Down → Session → Enter
-        widget2.handle_key(KeyCode::Down);
+        widget2.handle_key(k(KeyCode::Down));
         assert_eq!(
-            widget2.handle_key(KeyCode::Enter),
+            widget2.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("Session".into())
         );
     }
@@ -1388,17 +1469,17 @@ mod tests {
     fn test_handle_key_choice_main_esc_still_cancels() {
         // Esc w trybie normalnym (nie text input) nadal cancels
         let mut widget = AskUserWidget::new(choice_question());
-        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Cancel);
+        assert_eq!(widget.handle_key(k(KeyCode::Esc)), AskUserAction::Cancel);
     }
 
     #[test]
     fn test_handle_key_multi_toggle_and_submit() {
         let mut widget = AskUserWidget::new(multi_question());
-        widget.handle_key(KeyCode::Char(' '));
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Char(' '));
+        widget.handle_key(k(KeyCode::Char(' ')));
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Char(' ')));
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("Auth, API".into())
         );
     }
@@ -1407,7 +1488,7 @@ mod tests {
     fn test_handle_key_multi_empty_submit() {
         let mut widget = AskUserWidget::new(multi_question());
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("".into())
         );
     }
@@ -1416,7 +1497,7 @@ mod tests {
     fn test_handle_key_confirm_yes() {
         let mut widget = AskUserWidget::new(confirm_question());
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("yes".into())
         );
     }
@@ -1424,9 +1505,9 @@ mod tests {
     #[test]
     fn test_handle_key_confirm_no() {
         let mut widget = AskUserWidget::new(confirm_question());
-        widget.handle_key(KeyCode::Char('n'));
+        widget.handle_key(k(KeyCode::Char('n')));
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("no".into())
         );
     }
@@ -1434,9 +1515,9 @@ mod tests {
     #[test]
     fn test_handle_key_confirm_toggle() {
         let mut widget = AskUserWidget::new(confirm_question());
-        widget.handle_key(KeyCode::Tab);
+        widget.handle_key(k(KeyCode::Tab));
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("no".into())
         );
     }
@@ -1445,10 +1526,10 @@ mod tests {
     fn test_handle_key_confirm_y_shortcut() {
         let mut widget = AskUserWidget::new(confirm_question());
         // Start na yes, przejdź na no, potem y
-        widget.handle_key(KeyCode::Char('n'));
-        widget.handle_key(KeyCode::Char('y'));
+        widget.handle_key(k(KeyCode::Char('n')));
+        widget.handle_key(k(KeyCode::Char('y')));
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("yes".into())
         );
     }
@@ -1456,8 +1537,11 @@ mod tests {
     #[test]
     fn test_handle_key_on_answered_is_noop() {
         let mut widget = AskUserWidget::answered(text_question(), "Alice".into());
-        assert_eq!(widget.handle_key(KeyCode::Enter), AskUserAction::Continue);
-        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Continue);
+        assert_eq!(
+            widget.handle_key(k(KeyCode::Enter)),
+            AskUserAction::Continue
+        );
+        assert_eq!(widget.handle_key(k(KeyCode::Esc)), AskUserAction::Continue);
     }
 
     // ── set_answered Tests ──────────────────────────────────────
@@ -1562,28 +1646,28 @@ mod tests {
 
         // Symuluj wpisywanie "Alice"
         assert_eq!(
-            widget.handle_key(KeyCode::Char('A')),
+            widget.handle_key(k(KeyCode::Char('A'))),
             AskUserAction::Continue
         );
         assert_eq!(
-            widget.handle_key(KeyCode::Char('l')),
+            widget.handle_key(k(KeyCode::Char('l'))),
             AskUserAction::Continue
         );
         assert_eq!(
-            widget.handle_key(KeyCode::Char('i')),
+            widget.handle_key(k(KeyCode::Char('i'))),
             AskUserAction::Continue
         );
         assert_eq!(
-            widget.handle_key(KeyCode::Char('c')),
+            widget.handle_key(k(KeyCode::Char('c'))),
             AskUserAction::Continue
         );
         assert_eq!(
-            widget.handle_key(KeyCode::Char('e')),
+            widget.handle_key(k(KeyCode::Char('e'))),
             AskUserAction::Continue
         );
 
         // Submit
-        let result = widget.handle_key(KeyCode::Enter);
+        let result = widget.handle_key(k(KeyCode::Enter));
         assert_eq!(result, AskUserAction::Submit("Alice".into()));
 
         // Snapshot po submicie (widget nadal Active do momentu set_answered)
@@ -1597,22 +1681,22 @@ mod tests {
         let mut widget = AskUserWidget::new(text_question());
 
         // Wpisz "Alicee" (błąd)
-        widget.handle_key(KeyCode::Char('A'));
-        widget.handle_key(KeyCode::Char('l'));
-        widget.handle_key(KeyCode::Char('i'));
-        widget.handle_key(KeyCode::Char('c'));
-        widget.handle_key(KeyCode::Char('e'));
-        widget.handle_key(KeyCode::Char('e'));
+        widget.handle_key(k(KeyCode::Char('A')));
+        widget.handle_key(k(KeyCode::Char('l')));
+        widget.handle_key(k(KeyCode::Char('i')));
+        widget.handle_key(k(KeyCode::Char('c')));
+        widget.handle_key(k(KeyCode::Char('e')));
+        widget.handle_key(k(KeyCode::Char('e')));
 
         // Cofnij jedno "e"
         assert_eq!(
-            widget.handle_key(KeyCode::Backspace),
+            widget.handle_key(k(KeyCode::Backspace)),
             AskUserAction::Continue
         );
 
         // Submit
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("Alice".into())
         );
     }
@@ -1622,21 +1706,21 @@ mod tests {
         let mut widget = AskUserWidget::new(text_question());
 
         // Wpisz "AC"
-        widget.handle_key(KeyCode::Char('A'));
-        widget.handle_key(KeyCode::Char('C'));
+        widget.handle_key(k(KeyCode::Char('A')));
+        widget.handle_key(k(KeyCode::Char('C')));
 
         // Home → kursor na początek
-        widget.handle_key(KeyCode::Home);
+        widget.handle_key(k(KeyCode::Home));
 
         // Right → kursor na pozycję 1
-        widget.handle_key(KeyCode::Right);
+        widget.handle_key(k(KeyCode::Right));
 
         // Wstaw 'B' między A i C
-        widget.handle_key(KeyCode::Char('B'));
+        widget.handle_key(k(KeyCode::Char('B')));
 
         // Submit → "ABC"
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("ABC".into())
         );
     }
@@ -1645,13 +1729,13 @@ mod tests {
     fn test_integration_text_input_cancel() {
         let mut widget = AskUserWidget::new(text_question());
 
-        widget.handle_key(KeyCode::Char('T'));
-        widget.handle_key(KeyCode::Char('e'));
-        widget.handle_key(KeyCode::Char('s'));
-        widget.handle_key(KeyCode::Char('t'));
+        widget.handle_key(k(KeyCode::Char('T')));
+        widget.handle_key(k(KeyCode::Char('e')));
+        widget.handle_key(k(KeyCode::Char('s')));
+        widget.handle_key(k(KeyCode::Char('t')));
 
         // Esc → anuluj
-        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Cancel);
+        assert_eq!(widget.handle_key(k(KeyCode::Esc)), AskUserAction::Cancel);
     }
 
     #[test]
@@ -1660,7 +1744,7 @@ mod tests {
 
         // Start na JWT (default, index 0)
         // Down → Session (index 1)
-        assert_eq!(widget.handle_key(KeyCode::Down), AskUserAction::Continue);
+        assert_eq!(widget.handle_key(k(KeyCode::Down)), AskUserAction::Continue);
 
         // Snapshot z zaznaczonym Session
         let h = widget.height_for_width(50);
@@ -1669,7 +1753,7 @@ mod tests {
 
         // Submit Session
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("Session".into())
         );
     }
@@ -1680,9 +1764,12 @@ mod tests {
 
         // Start na JWT (0)
         // Up → wrap do "Other" (indeks 2 = last slot)
-        widget.handle_key(KeyCode::Up);
+        widget.handle_key(k(KeyCode::Up));
         // Enter na "Other" → aktywuje text input
-        assert_eq!(widget.handle_key(KeyCode::Enter), AskUserAction::Continue);
+        assert_eq!(
+            widget.handle_key(k(KeyCode::Enter)),
+            AskUserAction::Continue
+        );
         if let AskUserState::Active(InnerState::Choice(_, other_input)) = &widget.state {
             assert!(other_input.is_some()); // "Other" text mode aktywny
         } else {
@@ -1694,10 +1781,10 @@ mod tests {
     fn test_integration_choice_cancel() {
         let mut widget = AskUserWidget::new(choice_question());
 
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Down);
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Down));
 
-        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Cancel);
+        assert_eq!(widget.handle_key(k(KeyCode::Esc)), AskUserAction::Cancel);
     }
 
     #[test]
@@ -1706,24 +1793,24 @@ mod tests {
 
         // Zaznacz Auth (index 0)
         assert_eq!(
-            widget.handle_key(KeyCode::Char(' ')),
+            widget.handle_key(k(KeyCode::Char(' '))),
             AskUserAction::Continue
         );
 
         // Down → API (index 1)
-        assert_eq!(widget.handle_key(KeyCode::Down), AskUserAction::Continue);
+        assert_eq!(widget.handle_key(k(KeyCode::Down)), AskUserAction::Continue);
 
         // Zaznacz API
         assert_eq!(
-            widget.handle_key(KeyCode::Char(' ')),
+            widget.handle_key(k(KeyCode::Char(' '))),
             AskUserAction::Continue
         );
 
         // Down → Logging (index 2)
-        widget.handle_key(KeyCode::Down);
+        widget.handle_key(k(KeyCode::Down));
 
         // Zaznacz Logging
-        widget.handle_key(KeyCode::Char(' '));
+        widget.handle_key(k(KeyCode::Char(' ')));
 
         // Snapshot z zaznaczonymi Auth, API, Logging (kursor na Logging)
         let h = widget.height_for_width(50);
@@ -1731,7 +1818,7 @@ mod tests {
         insta::assert_snapshot!(snap(&buffer));
 
         // Submit
-        let result = widget.handle_key(KeyCode::Enter);
+        let result = widget.handle_key(k(KeyCode::Enter));
         assert_eq!(result, AskUserAction::Submit("Auth, API, Logging".into()));
     }
 
@@ -1740,23 +1827,23 @@ mod tests {
         let mut widget = AskUserWidget::new(multi_question());
 
         // Zaznacz Auth
-        widget.handle_key(KeyCode::Char(' '));
+        widget.handle_key(k(KeyCode::Char(' ')));
 
         // Down → API
-        widget.handle_key(KeyCode::Down);
+        widget.handle_key(k(KeyCode::Down));
 
         // Zaznacz API
-        widget.handle_key(KeyCode::Char(' '));
+        widget.handle_key(k(KeyCode::Char(' ')));
 
         // Up → Auth
-        widget.handle_key(KeyCode::Up);
+        widget.handle_key(k(KeyCode::Up));
 
         // Odznacz Auth (drugi Space na tym samym indeksie)
-        widget.handle_key(KeyCode::Char(' '));
+        widget.handle_key(k(KeyCode::Char(' ')));
 
         // Submit → tylko "API"
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("API".into())
         );
     }
@@ -1767,7 +1854,7 @@ mod tests {
 
         // Submit bez zaznaczania czegokolwiek
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("".into())
         );
     }
@@ -1776,11 +1863,11 @@ mod tests {
     fn test_integration_multi_cancel() {
         let mut widget = AskUserWidget::new(multi_question());
 
-        widget.handle_key(KeyCode::Char(' '));
-        widget.handle_key(KeyCode::Down);
-        widget.handle_key(KeyCode::Char(' '));
+        widget.handle_key(k(KeyCode::Char(' ')));
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Char(' ')));
 
-        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Cancel);
+        assert_eq!(widget.handle_key(k(KeyCode::Esc)), AskUserAction::Cancel);
     }
 
     #[test]
@@ -1789,7 +1876,7 @@ mod tests {
 
         // Start na Yes (default)
         // Tab → toggle do No
-        assert_eq!(widget.handle_key(KeyCode::Tab), AskUserAction::Continue);
+        assert_eq!(widget.handle_key(k(KeyCode::Tab)), AskUserAction::Continue);
 
         // Snapshot z zaznaczonym No
         let h = widget.height_for_width(50);
@@ -1798,7 +1885,7 @@ mod tests {
 
         // Submit No
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("no".into())
         );
     }
@@ -1809,10 +1896,10 @@ mod tests {
 
         // Start na Yes
         // Naciśnij 'n' → przejdź na No
-        widget.handle_key(KeyCode::Char('n'));
+        widget.handle_key(k(KeyCode::Char('n')));
 
         assert_eq!(
-            widget.handle_key(KeyCode::Enter),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("no".into())
         );
 
@@ -1820,10 +1907,10 @@ mod tests {
         let mut widget2 = AskUserWidget::new(confirm_question());
 
         // Naciśnij 'y' (lub 'Y')
-        widget2.handle_key(KeyCode::Char('Y'));
+        widget2.handle_key(k(KeyCode::Char('Y')));
 
         assert_eq!(
-            widget2.handle_key(KeyCode::Enter),
+            widget2.handle_key(k(KeyCode::Enter)),
             AskUserAction::Submit("yes".into())
         );
     }
@@ -1832,9 +1919,9 @@ mod tests {
     fn test_integration_confirm_cancel() {
         let mut widget = AskUserWidget::new(confirm_question());
 
-        widget.handle_key(KeyCode::Tab);
+        widget.handle_key(k(KeyCode::Tab));
 
-        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Cancel);
+        assert_eq!(widget.handle_key(k(KeyCode::Esc)), AskUserAction::Cancel);
     }
 
     #[test]
@@ -1842,12 +1929,15 @@ mod tests {
         let mut widget = AskUserWidget::answered(text_question(), "Bob".into());
 
         // W stanie Answered wszystkie klawisze są ignorowane
-        assert_eq!(widget.handle_key(KeyCode::Enter), AskUserAction::Continue);
         assert_eq!(
-            widget.handle_key(KeyCode::Char('x')),
+            widget.handle_key(k(KeyCode::Enter)),
             AskUserAction::Continue
         );
-        assert_eq!(widget.handle_key(KeyCode::Esc), AskUserAction::Continue);
+        assert_eq!(
+            widget.handle_key(k(KeyCode::Char('x'))),
+            AskUserAction::Continue
+        );
+        assert_eq!(widget.handle_key(k(KeyCode::Esc)), AskUserAction::Continue);
 
         // Snapshot stanu Answered
         let h = widget.height_for_width(50);
@@ -1863,13 +1953,13 @@ mod tests {
         assert!(widget.is_active());
 
         // Wpisz odpowiedź
-        widget.handle_key(KeyCode::Char('T'));
-        widget.handle_key(KeyCode::Char('e'));
-        widget.handle_key(KeyCode::Char('s'));
-        widget.handle_key(KeyCode::Char('t'));
+        widget.handle_key(k(KeyCode::Char('T')));
+        widget.handle_key(k(KeyCode::Char('e')));
+        widget.handle_key(k(KeyCode::Char('s')));
+        widget.handle_key(k(KeyCode::Char('t')));
 
         // Submit → dostajemy Answer
-        let result = widget.handle_key(KeyCode::Enter);
+        let result = widget.handle_key(k(KeyCode::Enter));
         assert_eq!(result, AskUserAction::Submit("Test".into()));
 
         // Aplikacja wywołuje set_answered() po otrzymaniu Submit

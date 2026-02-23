@@ -60,7 +60,8 @@ mod integration_tests {
         fn handle_event(&mut self, event: AppEvent) -> EventResult {
             match event {
                 AppEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                    match self.widget.handle_key(key.code) {
+                    // Przekazujemy cały KeyEvent (z modyfikatorami) — obsługa Shift+Enter
+                    match self.widget.handle_key(key) {
                         AskUserAction::Continue => EventResult::Consumed,
                         AskUserAction::Submit(answer) => {
                             self.result = Some(SubmitResult::Submitted(answer));
