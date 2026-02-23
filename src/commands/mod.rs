@@ -1,3 +1,4 @@
+pub mod config;
 pub mod mcp;
 pub mod run;
 pub mod standalone_text_input;

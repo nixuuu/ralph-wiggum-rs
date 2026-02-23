@@ -24,6 +24,7 @@ impl Cli {
         match &self.command {
             Some(Commands::Run(args)) => args.debug,
             Some(Commands::Task { debug, .. }) => *debug,
+            Some(Commands::Config { .. }) => false,
             Some(Commands::Update) => false,
             None => self.run_args.debug,
         }
@@ -47,6 +48,24 @@ pub enum Commands {
         #[command(subcommand)]
         command: TaskCommands,
     },
+
+    /// Configuration management commands
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommands {
+    /// Show merged configuration in TOML format
+    Show,
+
+    /// Show configuration file paths
+    Path,
+
+    /// Initialize global configuration with defaults
+    Init,
 }
 
 #[cfg(test)]
@@ -145,5 +164,38 @@ mod tests {
         let cli = Cli::parse_from(["ralph-wiggum", "--debug", "--prompt", "test"]);
         assert!(cli.debug());
         assert_eq!(cli.run_args.prompt, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_subcommand_config_show() {
+        let cli = Cli::parse_from(["ralph-wiggum", "config", "show"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Config {
+                command: ConfigCommands::Show
+            })
+        ));
+    }
+
+    #[test]
+    fn test_subcommand_config_path() {
+        let cli = Cli::parse_from(["ralph-wiggum", "config", "path"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Config {
+                command: ConfigCommands::Path
+            })
+        ));
+    }
+
+    #[test]
+    fn test_subcommand_config_init() {
+        let cli = Cli::parse_from(["ralph-wiggum", "config", "init"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Config {
+                command: ConfigCommands::Init
+            })
+        ));
     }
 }

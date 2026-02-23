@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::shared::error::{RalphError, Result};
@@ -82,11 +82,12 @@ fn merge_toml(base: &mut toml::Value, override_val: toml::Value) {
     }
 }
 
+
 /// A setup command to run after creating a worktree.
 ///
 /// Can be a simple string or an object with `run` and optional `name`.
 /// Supports template variables: `{ROOT_DIR}`, `{WORKTREE_DIR}`, `{TASK_ID}`, `{WORKER_ID}`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SetupCommand {
     Simple(String),
@@ -117,7 +118,7 @@ impl SetupCommand {
 /// A verification command to run during worker's verify phase.
 ///
 /// Can be a simple string or an object with `command` and optional `name`/`description`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum VerifyCommand {
     Simple(String),
@@ -166,7 +167,7 @@ impl VerifyCommand {
 }
 
 /// Configuration loaded from .ralph.toml file
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct FileConfig {
     /// Lista plików konfiguracyjnych do zainkludowania.
     /// Ścieżki relatywne są rozwiązywane względem katalogu zawierającego config.toml.
@@ -188,7 +189,7 @@ pub struct FileConfig {
 }
 
 /// UI configuration
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct UiConfig {
     /// Use Nerd Font icons (default: true). Set to false for ASCII fallback.
     #[serde(default = "default_true")]
@@ -212,7 +213,7 @@ impl UiConfig {
 
 /// TUI configuration for terminal user interface.
 /// Fields will be consumed by TUI rendering modules in future tasks.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[allow(dead_code)]
 pub struct TuiConfig {
     /// Output buffer size in characters (default: 5000)
@@ -277,7 +278,7 @@ fn default_theme() -> String {
 }
 
 /// Prompt configuration with optional prefix and suffix
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct PromptConfig {
     /// Text to prepend before user's prompt
     #[serde(default)]
@@ -304,7 +305,7 @@ impl PromptConfig {
 }
 
 /// Logging configuration for diagnostic logs
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LoggingConfig {
     /// Directory for diagnostic logs (default: .ralph/logs)
     #[serde(default = "default_log_dir")]
@@ -334,7 +335,7 @@ impl LoggingConfig {
 }
 
 /// Task management configuration
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct TaskConfig {
     #[serde(default = "default_progress_file")]
     pub progress_file: PathBuf,
@@ -378,7 +379,7 @@ impl TaskConfig {
 /// verification and setup commands.
 ///
 /// Used in orchestration to run targeted checks only when specific paths change.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VerifyProfile {
     /// Unique profile name
     pub name: String,
@@ -402,7 +403,7 @@ pub struct VerifyProfile {
 }
 
 /// Configuration for task orchestration (`[task.orchestrate]` in .ralph.toml)
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OrchestrateConfig {
     /// Number of parallel workers (default: 2)
     #[serde(default = "default_workers")]
@@ -2937,6 +2938,7 @@ includes = ["keybindings.toml", "notifications.toml"]
             vec!["keybindings.toml", "notifications.toml"]
         );
     }
+
 
     #[test]
     fn test_merge_empty_vec_overlay_keeps_base() {

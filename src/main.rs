@@ -20,9 +20,12 @@ async fn main() {
     let cli = Cli::parse();
 
     // Load cascading configuration: defaults → global → local .ralph.toml
+    let local_config_path = match std::env::current_dir() {
+        Ok(cwd) => cwd.join(".ralph.toml"),
+        Err(_) => std::path::PathBuf::from(".ralph.toml"), // Fallback if cwd fails
+    };
     let file_config =
-        shared::file_config::load_merged_config(&std::path::PathBuf::from(".ralph.toml"))
-            .unwrap_or_default();
+        shared::file_config::load_merged_config(&local_config_path).unwrap_or_default();
 
     // Initialize diagnostics logger with config
     let debug = cli.debug();
@@ -47,6 +50,7 @@ async fn main() {
         Some(Commands::Task { command, .. }) => {
             commands::task::execute(command, &file_config).await
         }
+        Some(Commands::Config { command }) => commands::config::execute(command),
         None => {
             shared::banner::print_banner();
             commands::run::execute(cli.run_args).await

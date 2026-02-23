@@ -42,7 +42,6 @@ pub fn resolve_global_config_path() -> PathBuf {
 /// Tworzy katalog konfiguracji globalnej jeśli nie istnieje.
 ///
 /// Idempotentna — nie zwraca błędu jeśli katalog już istnieje.
-#[allow(dead_code)]
 pub fn ensure_global_config_dir() -> Result<PathBuf> {
     let dir = resolve_global_config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| {
