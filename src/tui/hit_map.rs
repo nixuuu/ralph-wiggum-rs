@@ -131,6 +131,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_empty_hit_map_returns_none() {
+        // Pusta mapa hitów nie powinna zwracać żadnego hitu
+        let hit_map = HitMap::new();
+        assert!(hit_map.is_empty());
+        assert_eq!(hit_map.hit_test(0, 0), None);
+        assert_eq!(hit_map.hit_test(100, 100), None);
+    }
+
+    #[test]
     fn test_hit_region_contains() {
         let rect = Rect {
             x: 10,
@@ -242,6 +251,61 @@ mod tests {
         let _ac = HitId::AskUserConfirm(true);
         let _t = HitId::TextInput;
         let _sb = HitId::StatusBar;
+    }
+
+    #[test]
+    fn test_hit_map_partial_overlap() {
+        // Częściowe nakładanie się regionów — weryfikacja z-order w różnych punktach
+        let mut hit_map = HitMap::new();
+
+        // rect1: (0,0) → (19,19)
+        let rect1 = Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 20,
+        };
+        // rect2: (10,10) → (29,29) — częściowo nakłada się z rect1
+        let rect2 = Rect {
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 20,
+        };
+
+        hit_map.register(rect1, HitId::OutputView);
+        hit_map.register(rect2, HitId::Sidebar);
+
+        // Tylko rect1 — OutputView
+        assert_eq!(hit_map.hit_test(5, 5), Some(HitId::OutputView));
+        // Overlap — Sidebar (ostatnio zarejestrowany)
+        assert_eq!(hit_map.hit_test(15, 15), Some(HitId::Sidebar));
+        // Tylko rect2 — Sidebar
+        assert_eq!(hit_map.hit_test(25, 25), Some(HitId::Sidebar));
+        // Poza obu regionów
+        assert_eq!(hit_map.hit_test(35, 35), None);
+    }
+
+    #[test]
+    fn test_hit_map_large_u16_coordinates() {
+        // Upewnij się że HitMap poprawnie obsługuje duże wartości u16 (bez overflow)
+        let mut hit_map = HitMap::new();
+
+        // rect bliski granicy u16: x=65530, width=5 → zakres [65530, 65534]
+        let rect = Rect {
+            x: 65530,
+            y: 100,
+            width: 5,
+            height: 5,
+        };
+        hit_map.register(rect, HitId::StatusBar);
+
+        // Punkt na prawej granicy prostokąta — powinien trafić
+        assert_eq!(hit_map.hit_test(65534, 104), Some(HitId::StatusBar));
+        // Punkt wewnątrz
+        assert_eq!(hit_map.hit_test(65532, 102), Some(HitId::StatusBar));
+        // Punkt tuż przed lewą granicą — nie trafia
+        assert_eq!(hit_map.hit_test(65529, 102), None);
     }
 
     #[test]
