@@ -338,20 +338,12 @@ impl AskUserWidget {
                 area,
                 self.scroll_offset,
             ),
-            InnerState::Confirm(state) => handle_confirm_mouse(
-                state,
-                &self.question,
-                mouse,
-                area,
-                self.scroll_offset,
-            ),
-            InnerState::Multi(state) => handle_multi_mouse(
-                state,
-                &self.question,
-                mouse,
-                area,
-                self.scroll_offset,
-            ),
+            InnerState::Confirm(state) => {
+                handle_confirm_mouse(state, &self.question, mouse, area, self.scroll_offset)
+            }
+            InnerState::Multi(state) => {
+                handle_multi_mouse(state, &self.question, mouse, area, self.scroll_offset)
+            }
             _ => AskUserAction::Continue,
         }
     }
@@ -631,8 +623,7 @@ fn handle_multi_mouse(
     let inner_y = area.y.saturating_add(2);
     let inner_width = area.width.saturating_sub(4).max(1) as usize;
 
-    let q_height =
-        count_rendered_lines_for_width(question.question.trim_end(), inner_width);
+    let q_height = count_rendered_lines_for_width(question.question.trim_end(), inner_width);
 
     // Pozycja opcji z uwzględnieniem scroll_offset
     let options_start_y = inner_y

@@ -7,7 +7,10 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -26,6 +29,18 @@ pub fn make_key(code: KeyCode) -> KeyEvent {
         modifiers: KeyModifiers::NONE,
         kind: KeyEventKind::Press,
         state: KeyEventState::NONE,
+    }
+}
+
+/// Tworzy MouseEvent reprezentujący lewy klik myszy na podanej pozycji.
+///
+/// Wspólny helper dla testów myszy — unika duplikacji w każdym pliku testowym.
+pub fn make_left_click(col: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row,
+        modifiers: KeyModifiers::NONE,
     }
 }
 
@@ -140,6 +155,22 @@ impl<S: AppState> TestApp<S> {
         for key in keys {
             self.inject_key(key);
         }
+    }
+
+    /// Wstrzyknij zdarzenie myszy do event queue.
+    ///
+    /// Event zostanie przetworzony podczas następnego wywołania `step()`.
+    /// Używaj razem z `make_left_click()` do symulowania kliknięć.
+    ///
+    /// # Przykład
+    /// ```ignore
+    /// app.inject_mouse(make_left_click(5, 3));
+    /// app.step();
+    /// ```
+    pub fn inject_mouse(&mut self, mouse: MouseEvent) {
+        self.event_tx
+            .send(AppEvent::Mouse(mouse))
+            .expect("Failed to inject mouse event");
     }
 
     /// Wstrzyknij event Tick do event queue.
