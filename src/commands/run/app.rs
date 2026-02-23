@@ -97,6 +97,10 @@ pub struct RunApp {
     current_breakpoint: Breakpoint,
     /// Liczba linii przewijana przy zdarzeniu scroll myszy (z TuiConfig)
     pub scroll_step: usize,
+    /// Cache'owany rect sidebara — aktualizowany w każdym draw() (do hit-testingu).
+    pub(crate) sidebar_rect: Option<Rect>,
+    /// Cache'owany rect panelu output — aktualizowany w każdym draw() (do hit-testingu).
+    pub(crate) output_rect: Option<Rect>,
 }
 
 impl RunApp {
@@ -152,6 +156,8 @@ impl RunApp {
             last_tasks_check: Instant::now(),
             current_breakpoint: Breakpoint::Large, // domyślnie Large
             scroll_step: 3,
+            sidebar_rect: None,
+            output_rect: None,
         }
     }
 
@@ -442,6 +448,9 @@ impl AppState for RunApp {
                 let sidebar_widget = TaskSidebar::new(&mut self.sidebar, sidebar_focused);
                 sidebar_widget.render(sidebar_rect, frame.buffer_mut());
 
+                // Cache sidebar rect do hit-testingu
+                self.sidebar_rect = Some(sidebar_rect);
+
                 // Output wypełnia resztę
                 let output_x = sidebar_area.x + actual_width;
                 let output_width =
@@ -453,6 +462,7 @@ impl AppState for RunApp {
                     height: layout.content.height,
                 };
                 self.last_output_area = output_area;
+                self.output_rect = Some(output_area);
                 let output_view = OutputView::new(&self.ring_buffer);
                 // Rezerwujemy 1 kolumnę po prawej dla scrollbara
                 let output_content_area = Rect {
@@ -472,6 +482,8 @@ impl AppState for RunApp {
                     ..layout.content
                 };
                 self.last_output_area = full_content;
+                self.sidebar_rect = None;
+                self.output_rect = Some(full_content);
                 let output_view = OutputView::new(&self.ring_buffer);
                 // Rezerwujemy 1 kolumnę po prawej dla scrollbara
                 let output_content_area = Rect {
@@ -487,6 +499,8 @@ impl AppState for RunApp {
         } else {
             // Small breakpoint — output na pełną szerokość, sidebar jako overlay
             self.last_output_area = layout.content;
+            self.sidebar_rect = None;
+            self.output_rect = Some(layout.content);
             let output_view = OutputView::new(&self.ring_buffer);
             // Rezerwujemy 1 kolumnę po prawej dla scrollbara
             let output_content_area = Rect {
@@ -657,6 +671,8 @@ mod tests {
         assert!(app.output_view_state.auto_follow);
         assert!(!app.shutdown.load(Ordering::SeqCst));
         assert_eq!(app.last_output_area, Rect::default());
+        assert!(app.sidebar_rect.is_none());
+        assert!(app.output_rect.is_none());
         assert_eq!(app.phase, RunPhase::Running);
         assert_eq!(app.splash_start_time, None);
     }
@@ -1344,6 +1360,87 @@ tasks:
         // Po draw(), last_output_area powinien mieć niezerowe wymiary
         assert!(app.last_output_area.width > 0);
         assert!(app.last_output_area.height > 0);
+    }
+
+    #[test]
+    fn draw_caches_output_rect() {
+        let mut app = default_run_app();
+        assert!(app.output_rect.is_none());
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                app.draw(frame, area);
+            })
+            .expect("draw should not panic");
+
+        // Po draw(), output_rect powinien być ustawiony z niezerowymi wymiarami
+        let output_rect = app
+            .output_rect
+            .expect("output_rect should be Some after draw");
+        assert!(output_rect.width > 0);
+        assert!(output_rect.height > 0);
+    }
+
+    #[test]
+    fn draw_caches_sidebar_rect_when_sidebar_visible() {
+        let mut app = default_run_app();
+        // Sidebar domyślnie widoczny
+        assert!(app.sidebar.visible);
+        assert!(app.sidebar_rect.is_none());
+
+        // Large breakpoint (120+ kolumn) — sidebar powinien być widoczny
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                app.draw(frame, area);
+            })
+            .expect("draw should not panic");
+
+        // Po draw() z widocznym sidebarem sidebar_rect powinien być Some
+        assert!(app.sidebar_rect.is_some());
+    }
+
+    #[test]
+    fn draw_sidebar_rect_none_when_sidebar_hidden() {
+        let mut app = default_run_app();
+        app.sidebar.visible = false;
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                app.draw(frame, area);
+            })
+            .expect("draw should not panic");
+
+        // Sidebar ukryty — sidebar_rect powinien być None
+        assert!(app.sidebar_rect.is_none());
+        // Ale output_rect powinien być ustawiony
+        assert!(app.output_rect.is_some());
+    }
+
+    #[test]
+    fn draw_sidebar_rect_none_on_small_breakpoint() {
+        let mut app = default_run_app();
+
+        // Small breakpoint (poniżej 80 kolumn) — sidebar jako overlay, sidebar_rect = None
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                app.draw(frame, area);
+            })
+            .expect("draw should not panic");
+
+        assert!(app.sidebar_rect.is_none());
+        assert!(app.output_rect.is_some());
     }
 
     #[test]
