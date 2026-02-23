@@ -6,6 +6,7 @@ mod app_keys;
 mod app_render;
 mod assignment;
 mod cleanup;
+pub mod command_registry;
 pub mod completion_summary;
 mod config;
 pub mod dry_run;

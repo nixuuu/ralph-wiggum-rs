@@ -26,7 +26,9 @@ use crate::shared::tasks::TasksFile;
 use crate::tui::app::AppState;
 use crate::tui::events::{AppEvent, EventResult};
 use crate::tui::ring_buffer::OutputRingBuffer;
-use crate::tui::widgets::{TaskSidebar, TaskSidebarState, TextInputOverlay};
+use crate::tui::widgets::{
+    CommandPaletteState, CommandPaletteWidget, TaskSidebar, TaskSidebarState, TextInputOverlay,
+};
 
 // ── WorkerPanel ──────────────────────────────────────────────────────
 
@@ -136,6 +138,10 @@ pub struct OrchestrateApp {
 
     // ── Log lines ──
     log_lines: VecDeque<Line<'static>>,
+
+    // ── Command palette ──
+    /// Stan command palette. `Some` gdy palette jest otwarta (Ctrl+P).
+    pub(crate) command_palette: Option<CommandPaletteState>,
 }
 
 #[allow(dead_code)] // Public API — zostanie podłączony w task 6.9
@@ -169,6 +175,7 @@ impl OrchestrateApp {
             show_idle: false,
             pending_user_messages: VecDeque::new(),
             log_lines: VecDeque::with_capacity(50),
+            command_palette: None,
         }
     }
 
@@ -304,6 +311,30 @@ impl OrchestrateApp {
     /// Read-only access to focused worker.
     pub fn focused_worker(&self) -> Option<u32> {
         self.focused_worker
+    }
+
+    /// Read-only access to tasks_file (used by command registry).
+    pub fn tasks_file(&self) -> Option<&TasksFile> {
+        self.tasks_file.as_ref()
+    }
+
+    /// Otwórz command palette z dynamicznie zbudowanymi elementami.
+    ///
+    /// Jeśli palette jest już otwarta — odświeża jej listę elementów.
+    pub fn open_command_palette(&mut self) {
+        use crate::commands::task::orchestrate::command_registry::build_orchestrate_items;
+        let items = build_orchestrate_items(self);
+        self.command_palette = Some(CommandPaletteState::new(items));
+    }
+
+    /// Zamknij command palette.
+    pub fn close_command_palette(&mut self) {
+        self.command_palette = None;
+    }
+
+    /// Czy command palette jest aktualnie otwarta.
+    pub fn is_palette_open(&self) -> bool {
+        self.command_palette.is_some()
     }
 
     /// Set focus to a specific worker.
@@ -540,8 +571,13 @@ impl AppState for OrchestrateApp {
         );
         frame.render_widget(status_bar, vertical[1]);
 
-        // Render text input overlay on top (if active) — highest z-order
+        // Render text input overlay on top (if active)
         render_overlay(frame, area, &self.shared_overlay);
+
+        // Render command palette on very top — najwyższy z-order
+        if let Some(ref mut palette) = self.command_palette {
+            frame.render_stateful_widget(CommandPaletteWidget, area, palette);
+        }
     }
 
     fn handle_event(&mut self, event: AppEvent) -> EventResult {

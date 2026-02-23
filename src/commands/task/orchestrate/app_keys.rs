@@ -6,8 +6,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::commands::task::orchestrate::app::{OrchestrateApp, QuitState, RestartState};
+use crate::commands::task::orchestrate::command_registry::{
+    OrchestrateAction, execute_palette_action,
+};
 use crate::tui::events::EventResult;
-use crate::tui::widgets::InputAction;
+use crate::tui::widgets::{InputAction, PaletteAction};
 
 impl OrchestrateApp {
     /// Top-level key event handler (migrated from dashboard_input.rs).
@@ -15,13 +18,30 @@ impl OrchestrateApp {
     /// Note: Ctrl+C is intercepted by `App::run` before reaching this handler,
     /// producing `EventResult::Shutdown` directly. This method only handles
     /// application-level keys (quit flow, navigation, restart, overlay).
+    ///
+    /// Priorytet routingu:
+    /// 1. Command palette (gdy otwarta) — pochłania wszystkie klawisze
+    /// 2. Text input overlay (gdy aktywny) — pochłania wszystkie klawisze
+    /// 3. Sidebar (gdy focused) — routing do sidebar
+    /// 4. Globalne klawisze aplikacji
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> EventResult {
-        // If overlay is active, route ALL keys to overlay handler
+        // Priorytet 1: Command palette pochłania wszystkie klawisze gdy jest otwarta
+        if self.is_palette_open() {
+            return self.handle_palette_key(key);
+        }
+
+        // Priorytet 2: Text input overlay pochłania wszystkie klawisze gdy jest aktywny
         if self.is_overlay_active() {
             return self.handle_overlay_key(key);
         }
 
-        // If sidebar is focused, route navigation keys to sidebar
+        // Priorytet 3: Ctrl+P — otwórz command palette (przed sidebar i innymi skrótami)
+        if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.open_command_palette();
+            return EventResult::Consumed;
+        }
+
+        // Priorytet 4: Sidebar (gdy focused)
         if self.sidebar_focused && self.sidebar_state.visible {
             return self.handle_sidebar_key(key);
         }
@@ -87,6 +107,39 @@ impl OrchestrateApp {
             EventResult::Quit
         } else {
             EventResult::Consumed
+        }
+    }
+
+    /// Obsługa klawiszy gdy command palette jest otwarta.
+    ///
+    /// Deleguje do `CommandPaletteState::handle_key()`, a następnie:
+    /// - `PaletteAction::Select(id)` → parsuje ID → wykonuje `OrchestrateAction`
+    /// - `PaletteAction::Close` → zamyka paletę
+    /// - `PaletteAction::Continue` → pochłonięto, bez efektów zewnętrznych
+    fn handle_palette_key(&mut self, key: KeyEvent) -> EventResult {
+        // Pobierz aktualne elementy by umożliwić mutable borrow na state
+        let palette_action = {
+            let Some(ref mut palette) = self.command_palette else {
+                return EventResult::Consumed;
+            };
+            palette.handle_key(key.code)
+        };
+
+        match palette_action {
+            PaletteAction::Select(id) => {
+                // Zamknij paletę przed wykonaniem akcji (akcja może modyfikować stan)
+                self.close_command_palette();
+
+                if let Some(action) = OrchestrateAction::from_palette_id(&id) {
+                    execute_palette_action(action, self);
+                }
+                EventResult::Consumed
+            }
+            PaletteAction::Close => {
+                self.close_command_palette();
+                EventResult::Consumed
+            }
+            PaletteAction::Continue => EventResult::Consumed,
         }
     }
 
@@ -1037,6 +1090,34 @@ mod tests {
         app.handle_key(key_n);
 
         assert_eq!(app.restart_state, RestartState::None);
+    }
+
+    // ── Command palette tests ───────────────────────────────────────
+
+    #[test]
+    fn ctrl_p_opens_command_palette() {
+        let mut app = make_app(2);
+        assert!(!app.is_palette_open());
+
+        let ctrl_p = make_key(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        let result = app.handle_key(ctrl_p);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert!(app.is_palette_open());
+    }
+
+    #[test]
+    fn palette_open_absorbs_all_keys() {
+        let mut app = make_app(1);
+        app.open_command_palette();
+        assert!(app.is_palette_open());
+
+        // 'q' nie powinno triggerować quit gdy palette jest otwarta
+        let key_q = make_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        let result = app.handle_key(key_q);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.quit_state, QuitState::Normal);
     }
 
     // ── Sidebar toggle tests ────────────────────────────────────────
