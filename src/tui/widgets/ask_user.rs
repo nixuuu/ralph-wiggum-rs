@@ -12,7 +12,7 @@
 // Konwersja z MCP Question → AskUserQuestion odbywa się w warstwie integracyjnej.
 
 use ansi_to_tui::IntoText;
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -305,57 +305,41 @@ impl AskUserWidget {
         }
     }
 
-    /// Obsługuje kliknięcie myszą.
+    /// Obsługuje zdarzenie myszy (lewy klik) w stanie Active.
     ///
-    /// Deleguje do powidgetu dla Confirm (klik na [Yes]/[No]).
-    /// Inne typy pytań nie obsługują kliknięć (ignorują).
+    /// Tylko lewy click (`MouseEventKind::Down(MouseButton::Left)`) jest obsługiwany.
+    /// `area` — obszar terminala, w którym widget jest renderowany (potrzebny do hit-testu).
     ///
-    /// `area` — obszar, w którym widget jest renderowany (pełny rect z ramką).
-    ///
-    /// Returns `AskUserAction`:
-    /// - `Submit(answer)` — klik na przycisk Yes/No
-    /// - `Continue` — klik poza przyciskami lub nie-Confirm type
+    /// Zwraca `AskUserAction`:
+    /// - `Submit(label)` — klik na opcję choice (select/confirm) lub Yes/No w confirm
+    /// - `Continue` — klik zaznaczył nową opcję lub klik poza opcjami → brak wyniku
     pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> AskUserAction {
-        let AskUserState::Active(InnerState::Confirm(ref mut state)) = self.state else {
-            return AskUserAction::Continue;
-        };
-
-        // Odtwarzamy layout z render_widget_inner dla stanu Active:
-        // - Borders::TOP: 1 wiersz border na górze
-        // - Padding::new(left=2, right=2, top=1, bottom=1)
-        // inner_y = area.y + border_top(1) + padding_top(1) = area.y + 2
-        // inner_x = area.x + padding_left(2) = area.x + 2
-        // inner_width = area.width - padding_left(2) - padding_right(2)
-        let inner_x = area.x.saturating_add(2);
-        let inner_y = area.y.saturating_add(2);
-        let inner_width = area.width.saturating_sub(4).max(1) as usize;
-
-        // Wysokość pytania — liczba wierszy po markdown renderingu
-        let q_height =
-            count_rendered_lines_for_width(self.question.question.trim_end(), inner_width);
-
-        // Area przycisków = pierwszy wiersz content area (bezpośrednio po pytaniu).
-        // Uwzględniamy scroll_offset: przy scrollowaniu w dół treść przesuwa się ku górze,
-        // więc efektywna pozycja przycisków na ekranie = inner_y + q_height - scroll_offset.
-        let button_y = inner_y
-            .saturating_add(q_height)
-            .saturating_sub(self.scroll_offset);
-
-        // Jeśli przyciski zostały wyprzesunięte poza widoczny obszar — ignoruj klik
-        let widget_bottom = area.y.saturating_add(area.height);
-        if button_y < inner_y || button_y >= widget_bottom {
+        // Obsługujemy tylko lewy click
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return AskUserAction::Continue;
         }
 
-        let button_area = Rect {
-            x: inner_x,
-            y: button_y,
-            width: inner_width as u16,
-            height: 1,
+        let inner = match &mut self.state {
+            AskUserState::Active(inner) => inner,
+            AskUserState::Answered(_) => return AskUserAction::Continue,
         };
 
-        match state.handle_mouse(mouse, button_area) {
-            Some(InputAction::Send(answer)) => AskUserAction::Submit(answer),
+        match inner {
+            InnerState::Choice(state, other_input) => handle_choice_mouse(
+                state,
+                other_input,
+                &self.question,
+                mouse,
+                area,
+                self.scroll_offset,
+            ),
+            InnerState::Confirm(state) => handle_confirm_mouse(
+                state,
+                &self.question,
+                mouse,
+                area,
+                self.scroll_offset,
+            ),
             _ => AskUserAction::Continue,
         }
     }
@@ -467,6 +451,133 @@ fn handle_multi_key(state: &mut MultiSelectState, key: KeyCode) -> AskUserAction
             let selected = state.get_selected_labels();
             AskUserAction::Submit(selected)
         }
+        _ => AskUserAction::Continue,
+    }
+}
+
+/// Obsługuje klik myszy na widgecie choice.
+///
+/// Geometria renderowania (Border::TOP + Padding::new(2,2,1,1)):
+/// - wiersz 0 = border_top
+/// - wiersz 1 = padding_top
+/// - wiersze 2..2+q_height = pytanie
+/// - wiersze 2+q_height.. = opcje (0-based: idx → wiersz 2+q_height+idx)
+///
+/// Przy scrollowaniu (`scroll_offset > 0`) przeliczamy na wirtualny bufor:
+/// `virt_row = screen_row - area.y + scroll_offset`
+/// a następnie: `option_idx = virt_row - 2 - q_height`
+fn handle_choice_mouse(
+    state: &mut ChoiceState,
+    other_input: &mut Option<TextInputState>,
+    question: &AskUserQuestion,
+    mouse: MouseEvent,
+    area: Rect,
+    scroll_offset: u16,
+) -> AskUserAction {
+    // Gdy w trybie "Other" text input → ignoruj klik
+    if other_input.is_some() {
+        return AskUserAction::Continue;
+    }
+
+    let col = mouse.column;
+    let row = mouse.row;
+
+    // Sprawdź granice x: inner_x = area.x + 2 (padding_left), right = area.x + width - 2
+    let inner_x_start = area.x + 2;
+    let inner_x_end = area.x + area.width.saturating_sub(2);
+    if col < inner_x_start || col >= inner_x_end {
+        return AskUserAction::Continue;
+    }
+
+    // Oblicz q_height (liczba linii pytania w wirtualnym buforze)
+    let inner_width = area.width.saturating_sub(4).max(1) as usize;
+    let q_height = count_rendered_lines_for_width(question.question.trim_end(), inner_width);
+
+    // Przelicz pozycję ekranu na wiersz w wirtualnym buforze:
+    // screen_row = area.y + virt_row - scroll_offset
+    // => virt_row = row - area.y + scroll_offset
+    let row_i = row as i32;
+    let area_y_i = area.y as i32;
+    let scroll_i = scroll_offset as i32;
+    let virt_row = row_i - area_y_i + scroll_i;
+
+    // Opcja idx jest na wirtualnym wierszu: 2 (border+padding) + q_height + idx
+    let content_start = 2i32 + q_height as i32;
+    let option_offset = virt_row - content_start;
+    if option_offset < 0 {
+        return AskUserAction::Continue;
+    }
+
+    let option_idx = option_offset as usize;
+    let options = &question.options;
+    // Łączna liczba slotów: normalne opcje + "Other"
+    let total_slots = options.len() + 1;
+    if option_idx >= total_slots {
+        return AskUserAction::Continue;
+    }
+
+    if option_idx == options.len() {
+        // Klik na slot "Other"
+        if state.selected == options.len() {
+            // Już zaznaczone → aktywuj text input (jak Enter na "Other")
+            *other_input = Some(TextInputState::new(None));
+        } else {
+            // Zaznacz "Other"
+            state.selected = options.len();
+        }
+        AskUserAction::Continue
+    } else {
+        // Klik na normalną opcję — deleguj do ChoiceState::handle_click
+        use crate::tui::widgets::ask_user_choice::ChoiceEvent;
+        match state.handle_click(option_idx, options) {
+            ChoiceEvent::Submit(label) => AskUserAction::Submit(label),
+            ChoiceEvent::None => AskUserAction::Continue,
+        }
+    }
+}
+
+/// Obsługuje klik myszy na widgecie confirm.
+///
+/// Geometria renderowania (Border::TOP + Padding::new(2,2,1,1)):
+/// - inner_y = area.y + border_top(1) + padding_top(1) = area.y + 2
+/// - inner_x = area.x + padding_left(2) = area.x + 2
+/// - inner_width = area.width - padding_left(2) - padding_right(2)
+///
+/// Przyciski [Yes]/[No] są na wierszu bezpośrednio po pytaniu.
+fn handle_confirm_mouse(
+    state: &mut ConfirmState,
+    question: &AskUserQuestion,
+    mouse: MouseEvent,
+    area: Rect,
+    scroll_offset: u16,
+) -> AskUserAction {
+    let inner_x = area.x.saturating_add(2);
+    let inner_y = area.y.saturating_add(2);
+    let inner_width = area.width.saturating_sub(4).max(1) as usize;
+
+    let q_height =
+        count_rendered_lines_for_width(question.question.trim_end(), inner_width);
+
+    // Pozycja przycisków z uwzględnieniem scroll_offset
+    let button_y = inner_y
+        .saturating_add(q_height)
+        .saturating_sub(scroll_offset);
+
+    // Jeśli przyciski poza widocznym obszarem — ignoruj
+    let widget_bottom = area.y.saturating_add(area.height);
+    if button_y < inner_y || button_y >= widget_bottom {
+        return AskUserAction::Continue;
+    }
+
+    let button_area = Rect {
+        x: inner_x,
+        y: button_y,
+        width: inner_width as u16,
+        height: 1,
+    };
+
+    match state.handle_mouse(mouse, button_area) {
+        Some(InputAction::Send(answer)) => AskUserAction::Submit(answer),
         _ => AskUserAction::Continue,
     }
 }
@@ -1520,6 +1631,210 @@ mod tests {
         // Esc w trybie normalnym (nie text input) nadal cancels
         let mut widget = AskUserWidget::new(choice_question());
         assert_eq!(widget.handle_key(k(KeyCode::Esc)), AskUserAction::Cancel);
+    }
+
+    // ── Handle Mouse Tests ────────────────────────────────────────
+
+    /// Helper: tworzy lewy klik myszy na (col, row).
+    fn left_click(col: u16, row: u16) -> MouseEvent {
+        use crossterm::event::KeyModifiers;
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Helper: tworzy klik innego przycisku (nie Left).
+    fn right_click(col: u16, row: u16) -> MouseEvent {
+        use crossterm::event::KeyModifiers;
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Widget choice_question ma: pytanie "Choose auth" (1 linia) + JWT + Session + Other
+    /// Geometria renderowania przy area = (x=0, y=0, w=50, h=7):
+    ///   - wiersz 0: border_top
+    ///   - wiersz 1: padding_top
+    ///   - wiersz 2: pytanie "Choose auth" (q_height=1)
+    ///   - wiersz 3: JWT (idx=0)
+    ///   - wiersz 4: Session (idx=1)
+    ///   - wiersz 5: Other (idx=2)
+    fn choice_area() -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 7,
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_click_unselected_option_selects_it() {
+        let mut widget = AskUserWidget::new(choice_question()); // JWT domyślnie (idx=0)
+        let area = choice_area();
+
+        // Klik na Session (wiersz 4 = 2+q_height+idx=1 = 2+1+1 = 4)
+        let result = widget.handle_mouse(left_click(5, 4), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        // Sprawdź że Session jest teraz zaznaczone
+        if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
+            assert_eq!(state.selected, 1); // Session = idx 1
+        } else {
+            panic!("Expected Active Choice state");
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_click_selected_option_submits() {
+        let mut widget = AskUserWidget::new(choice_question()); // JWT domyślnie (idx=0)
+        let area = choice_area();
+
+        // Klik na JWT (wiersz 3 = 2+q_height+idx=0 = 2+1+0 = 3) — już zaznaczona
+        let result = widget.handle_mouse(left_click(5, 3), area);
+        assert_eq!(result, AskUserAction::Submit("JWT".into()));
+    }
+
+    #[test]
+    fn test_handle_mouse_click_outside_options_ignored() {
+        let mut widget = AskUserWidget::new(choice_question()); // JWT (idx=0)
+        let area = choice_area();
+
+        // Klik poza opcjami — wiersz 0 (border) → ignoruj
+        let result = widget.handle_mouse(left_click(5, 0), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        // Stan nie zmieniony
+        if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
+            assert_eq!(state.selected, 0);
+        } else {
+            panic!("Expected Active Choice state");
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_click_outside_x_bounds_ignored() {
+        let mut widget = AskUserWidget::new(choice_question()); // JWT (idx=0)
+        let area = choice_area();
+
+        // Klik poza lewą granicą x (col=0 < area.x+2=2)
+        let result = widget.handle_mouse(left_click(0, 3), area);
+        assert_eq!(result, AskUserAction::Continue);
+        if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
+            assert_eq!(state.selected, 0); // bez zmian
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_right_click_ignored() {
+        let mut widget = AskUserWidget::new(choice_question()); // JWT (idx=0)
+        let area = choice_area();
+
+        // Prawy klik — nie powinien nic robić
+        let result = widget.handle_mouse(right_click(5, 4), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        if let AskUserState::Active(InnerState::Choice(state, _)) = &widget.state {
+            assert_eq!(state.selected, 0); // bez zmian
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_click_on_other_option_selects_it() {
+        let mut widget = AskUserWidget::new(choice_question()); // JWT (idx=0)
+        let area = choice_area();
+
+        // Klik na "Other" (wiersz 5 = 2+1+2=5)
+        let result = widget.handle_mouse(left_click(5, 5), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        if let AskUserState::Active(InnerState::Choice(state, other_input)) = &widget.state {
+            assert_eq!(state.selected, 2); // "Other" = options.len() = 2
+            assert!(other_input.is_none()); // text mode nie jest jeszcze aktywny
+        } else {
+            panic!("Expected Active Choice state");
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_click_on_selected_other_activates_text_input() {
+        let mut widget = AskUserWidget::new(choice_question());
+        let area = choice_area();
+
+        // Najpierw zaznacz "Other" (klik dwukrotny: 1. zaznacz, 2. aktywuj)
+        widget.handle_mouse(left_click(5, 5), area); // zaznacz "Other"
+
+        // Drugi klik na "Other" → aktywuj text input
+        let result = widget.handle_mouse(left_click(5, 5), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        if let AskUserState::Active(InnerState::Choice(_, other_input)) = &widget.state {
+            assert!(other_input.is_some()); // text mode aktywny
+        } else {
+            panic!("Expected Active Choice state");
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_click_in_other_text_mode_ignored() {
+        let mut widget = AskUserWidget::new(choice_question());
+        let area = choice_area();
+
+        // Aktywuj "Other" text mode przez klawiaturę
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Enter)); // → other_input aktywny
+
+        // Klik na opcję gdy w trybie text input → ignoruj
+        let result = widget.handle_mouse(left_click(5, 3), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        // Upewnij się że other_input nadal aktywny
+        if let AskUserState::Active(InnerState::Choice(_, other_input)) = &widget.state {
+            assert!(other_input.is_some());
+        } else {
+            panic!("Expected Active Choice state");
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_on_answered_widget_ignored() {
+        let mut widget = AskUserWidget::answered(choice_question(), "JWT".into());
+        let area = choice_area();
+
+        let result = widget.handle_mouse(left_click(5, 3), area);
+        assert_eq!(result, AskUserAction::Continue);
+    }
+
+    #[test]
+    fn test_handle_mouse_non_choice_type_ignored() {
+        let mut widget = AskUserWidget::new(text_question());
+        let area = choice_area();
+
+        let result = widget.handle_mouse(left_click(5, 3), area);
+        assert_eq!(result, AskUserAction::Continue);
+    }
+
+    #[test]
+    fn test_handle_mouse_click_then_key_navigate_and_submit() {
+        // Scenariusz: klik zaznacza opcję, potem Enter ją submituje
+        let mut widget = AskUserWidget::new(choice_question()); // JWT (idx=0)
+        let area = choice_area();
+
+        // Klik na Session (wiersz 4)
+        widget.handle_mouse(left_click(5, 4), area);
+
+        // Enter → Submit(Session)
+        assert_eq!(
+            widget.handle_key(k(KeyCode::Enter)),
+            AskUserAction::Submit("Session".into())
+        );
     }
 
     #[test]

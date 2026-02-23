@@ -229,6 +229,36 @@ pub enum ChoiceEvent {
 }
 
 impl ChoiceState {
+    /// Obsługuje klik myszą na opcji o danym indeksie.
+    ///
+    /// Slot "Other" (index == options.len()) jest obsługiwany przez callera — ta metoda
+    /// przyjmuje tylko normalne opcje z zakresu `0..options.len()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `clicked_idx` - Indeks klikniętej opcji (musi być `< options.len()`)
+    /// * `options` - Lista opcji (do walidacji zakresu i pobrania labela)
+    ///
+    /// # Returns
+    ///
+    /// * `ChoiceEvent::Submit(label)` — klik na już zaznaczoną opcję (confirm)
+    /// * `ChoiceEvent::None` — klik na nową opcję (zaznaczono ją), lub indeks out-of-bounds
+    pub fn handle_click(&mut self, clicked_idx: usize, options: &[QuestionOption]) -> ChoiceEvent {
+        if clicked_idx >= options.len() {
+            return ChoiceEvent::None;
+        }
+        if clicked_idx == self.selected {
+            // Klik na już zaznaczoną opcję → confirm (tylko dla normalnych opcji)
+            if let Some(label) = self.get_selected_label(options) {
+                return ChoiceEvent::Submit(label.to_string());
+            }
+        } else {
+            // Klik na inną opcję → zaznacz ją
+            self.selected = clicked_idx;
+        }
+        ChoiceEvent::None
+    }
+
     /// Obsługuje klawisze ↑↓ Enter i zwraca event
     ///
     /// # Arguments
@@ -666,6 +696,88 @@ mod tests {
 
         let snapshot = render_widget(&options, None, 2, 40, 10);
         insta::assert_snapshot!(snapshot);
+    }
+
+    // ── handle_click Tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_handle_click_new_option_selects_it() {
+        let options = vec![
+            QuestionOption {
+                label: "A".into(),
+                description: None,
+            },
+            QuestionOption {
+                label: "B".into(),
+                description: None,
+            },
+            QuestionOption {
+                label: "C".into(),
+                description: None,
+            },
+        ];
+
+        let mut state = ChoiceState::new(); // selected = 0
+        // Klik na opcję 1 (B) — nie jest zaznaczona → zaznacz
+        let event = state.handle_click(1, &options);
+        assert_eq!(event, ChoiceEvent::None);
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn test_handle_click_selected_option_submits() {
+        let options = vec![
+            QuestionOption {
+                label: "Alpha".into(),
+                description: None,
+            },
+            QuestionOption {
+                label: "Beta".into(),
+                description: None,
+            },
+        ];
+
+        let mut state = ChoiceState::with_selected(0); // selected = 0
+        // Klik na opcję 0 (Alpha) — już zaznaczona → Submit
+        let event = state.handle_click(0, &options);
+        assert_eq!(event, ChoiceEvent::Submit("Alpha".to_string()));
+        // selected pozostaje 0
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_handle_click_different_option_does_not_submit() {
+        let options = vec![
+            QuestionOption {
+                label: "X".into(),
+                description: None,
+            },
+            QuestionOption {
+                label: "Y".into(),
+                description: None,
+            },
+        ];
+
+        let mut state = ChoiceState::with_selected(1); // selected = 1
+        // Klik na opcję 0 (X) — inna niż zaznaczona → tylko zaznacz
+        let event = state.handle_click(0, &options);
+        assert_eq!(event, ChoiceEvent::None);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_handle_click_out_of_bounds_index_returns_none() {
+        let options = vec![QuestionOption {
+            label: "Only".into(),
+            description: None,
+        }];
+
+        let mut state = ChoiceState::new();
+        // Indeks 5 jest poza zakresem → wczesny return, selected nie zmieniony
+        let event = state.handle_click(5, &options);
+        assert_eq!(event, ChoiceEvent::None);
+        // selected pozostaje 0 (bez zmian)
+        assert_eq!(state.selected, 0);
     }
 
     // ── Rapid Cycling Tests ────────────────────────────────────────
