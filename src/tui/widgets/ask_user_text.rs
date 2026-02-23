@@ -12,6 +12,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::shared::markdown::render_markdown;
+use crate::tui::formatting::unicode_column_to_char_index;
 use crate::tui::Theme;
 
 /// Stan text input widget
@@ -74,6 +75,44 @@ impl TextInputState {
     /// Przesuwa kursor na koniec
     pub fn move_cursor_end(&mut self) {
         self.cursor_pos = self.buffer.chars().count();
+    }
+
+    /// Ustawia pozycję kursora na podstawie kliknięcia myszą w polu tekstowym.
+    ///
+    /// `col_in_text` — kolumna terminala (0-indexed) względem początku tekstu,
+    ///                 po uwzględnieniu prompt prefix (np. `"> "` = 2 kolumny).
+    /// `available_width` — szerokość widocznego obszaru tekstu (bez prompt prefix).
+    ///
+    /// Uwzględnia scroll offset — gdy tekst jest dłuższy niż `available_width`,
+    /// wyznacza `visible_start` identycznie jak `render_input_line` i mapuje
+    /// kliknięcie na absolutny char index w buforze.
+    pub fn set_cursor_from_click(&mut self, col_in_text: usize, available_width: usize) {
+        let chars: Vec<char> = self.buffer.chars().collect();
+        let char_count = chars.len();
+
+        // Replikuj logikę scroll offset z render_input_line
+        let scroll_width = if self.cursor_pos == char_count {
+            available_width.saturating_sub(1)
+        } else {
+            available_width
+        };
+        let mut visible_start = 0;
+        let mut current_width = 0;
+        if self.cursor_pos > 0 {
+            for i in (0..self.cursor_pos).rev() {
+                let char_width = chars[i].width().unwrap_or(1);
+                if current_width + char_width > scroll_width {
+                    visible_start = i + 1;
+                    break;
+                }
+                current_width += char_width;
+            }
+        }
+
+        // Widoczny substring od visible_start → mapuj kolumnę na char index
+        let visible_text: String = chars[visible_start..].iter().collect();
+        let relative_idx = unicode_column_to_char_index(&visible_text, col_in_text);
+        self.cursor_pos = (visible_start + relative_idx).min(char_count);
     }
 
     /// Czyści buffer
@@ -469,5 +508,53 @@ mod tests {
             state.value().as_bytes(),
             state.buffer.as_bytes()
         ));
+    }
+
+    // ── set_cursor_from_click tests ─────────────────────────────────
+
+    #[test]
+    fn test_set_cursor_from_click_ascii() {
+        let mut state = TextInputState::new(None);
+        "Hello".chars().for_each(|c| state.insert_char(c));
+
+        state.set_cursor_from_click(0, 80);
+        assert_eq!(state.cursor_pos, 0);
+
+        state.set_cursor_from_click(3, 80);
+        assert_eq!(state.cursor_pos, 3);
+
+        state.set_cursor_from_click(5, 80);
+        assert_eq!(state.cursor_pos, 5); // koniec
+    }
+
+    #[test]
+    fn test_set_cursor_from_click_out_of_range() {
+        let mut state = TextInputState::new(None);
+        "Hi".chars().for_each(|c| state.insert_char(c));
+
+        state.set_cursor_from_click(100, 80); // poza zakresem → clamp do len
+        assert_eq!(state.cursor_pos, 2);
+    }
+
+    #[test]
+    fn test_set_cursor_from_click_cjk() {
+        let mut state = TextInputState::new(None);
+        "你好".chars().for_each(|c| state.insert_char(c)); // 2 CJK = 4 kolumny
+
+        state.set_cursor_from_click(0, 80);
+        assert_eq!(state.cursor_pos, 0);
+
+        state.set_cursor_from_click(2, 80); // kolumna 2 → char 1
+        assert_eq!(state.cursor_pos, 1);
+
+        state.set_cursor_from_click(4, 80); // kolumna 4 → koniec (char 2)
+        assert_eq!(state.cursor_pos, 2);
+    }
+
+    #[test]
+    fn test_set_cursor_from_click_empty_buffer() {
+        let mut state = TextInputState::new(None);
+        state.set_cursor_from_click(5, 80); // pusta → cursor_pos = 0
+        assert_eq!(state.cursor_pos, 0);
     }
 }

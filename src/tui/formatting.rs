@@ -6,6 +6,7 @@
 
 use ratatui::text::Span;
 use std::time::Duration;
+use unicode_width::UnicodeWidthChar;
 
 /// Format tokens as an unstyled Span for TUI composition.
 ///
@@ -106,6 +107,48 @@ pub fn format_duration_string(total_secs: u64) -> String {
             format!("~{}h{:02}m", hours, mins)
         }
     }
+}
+
+/// Mapuje kolumnę terminala (wizualną) na indeks znaku (char index) w stringu.
+///
+/// Uwzględnia znaki o szerokości 2 kolumn (CJK, znaki pełnej szerokości),
+/// gdzie jeden char zajmuje dwie kolumny terminala.
+///
+/// Przydatne przy obsłudze kliknięcia myszką w polu tekstowym — terminal
+/// raportuje kolumnę piksela, a my potrzebujemy indeksu znaku w buforze.
+///
+/// # Parametry
+/// - `text` — tekst źródłowy
+/// - `target_col` — kolumna terminala (0-indexed)
+///
+/// # Zwraca
+/// Indeks znaku (char index) odpowiadający kolumnie `target_col`.
+/// Jeśli `target_col` przekracza szerokość tekstu, zwraca `text.chars().count()`.
+///
+/// # Przykłady
+/// ```
+/// use ralph_wiggum::tui::formatting::unicode_column_to_char_index;
+///
+/// // ASCII: każdy znak = 1 kolumna
+/// assert_eq!(unicode_column_to_char_index("Hello", 0), 0);
+/// assert_eq!(unicode_column_to_char_index("Hello", 5), 5);
+///
+/// // CJK: każdy znak = 2 kolumny → kolumna 4 = char index 2
+/// assert_eq!(unicode_column_to_char_index("你好世界", 4), 2);
+///
+/// // Poza zakresem → zwraca chars().count()
+/// assert_eq!(unicode_column_to_char_index("Hi", 100), 2);
+/// ```
+#[must_use]
+pub fn unicode_column_to_char_index(text: &str, target_col: usize) -> usize {
+    let mut col = 0;
+    for (i, ch) in text.chars().enumerate() {
+        if col >= target_col {
+            return i;
+        }
+        col += UnicodeWidthChar::width(ch).unwrap_or(1);
+    }
+    text.chars().count()
 }
 
 #[cfg(test)]
@@ -243,5 +286,63 @@ mod tests {
 
         let span = format_duration_span(Duration::from_secs(9000));
         assert_eq!(span.content, "~2h30m");
+    }
+
+    // ============ unicode_column_to_char_index tests ============
+
+    #[test]
+    fn test_unicode_col_ascii_basic() {
+        // ASCII: każdy znak = 1 kolumna → kolumna == char index
+        assert_eq!(unicode_column_to_char_index("Hello", 0), 0);
+        assert_eq!(unicode_column_to_char_index("Hello", 1), 1);
+        assert_eq!(unicode_column_to_char_index("Hello", 3), 3);
+        assert_eq!(unicode_column_to_char_index("Hello", 5), 5);
+    }
+
+    #[test]
+    fn test_unicode_col_ascii_out_of_range() {
+        // Poza zakresem → zwraca chars().count()
+        assert_eq!(unicode_column_to_char_index("Hi", 100), 2);
+        assert_eq!(unicode_column_to_char_index("", 0), 0);
+        assert_eq!(unicode_column_to_char_index("", 5), 0);
+    }
+
+    #[test]
+    fn test_unicode_col_cjk_double_width() {
+        // CJK: każdy znak zajmuje 2 kolumny terminala
+        // "你好世界" = 4 znaki × 2 kolumny = 8 kolumn
+        assert_eq!(unicode_column_to_char_index("你好世界", 0), 0);
+        assert_eq!(unicode_column_to_char_index("你好世界", 2), 1);
+        assert_eq!(unicode_column_to_char_index("你好世界", 4), 2);
+        assert_eq!(unicode_column_to_char_index("你好世界", 6), 3);
+        // col=8 → poza zakresem → 4
+        assert_eq!(unicode_column_to_char_index("你好世界", 8), 4);
+    }
+
+    #[test]
+    fn test_unicode_col_cjk_mid_char() {
+        // Kolumna w środku CJK znaku (nieparzysta) → zwraca następny char index
+        // "你" ma szerokość 2; col=1 to środek znaku → powinien zwrócić char 1
+        assert_eq!(unicode_column_to_char_index("你好", 1), 1);
+        assert_eq!(unicode_column_to_char_index("你好", 3), 2);
+    }
+
+    #[test]
+    fn test_unicode_col_mixed_ascii_cjk() {
+        // Mieszane: "Hi你" = H(col0), i(col1), 你(col2-3)
+        assert_eq!(unicode_column_to_char_index("Hi你", 0), 0); // H
+        assert_eq!(unicode_column_to_char_index("Hi你", 1), 1); // i
+        assert_eq!(unicode_column_to_char_index("Hi你", 2), 2); // 你 (start)
+        assert_eq!(unicode_column_to_char_index("Hi你", 3), 3); // za 你 (mid → next)
+        assert_eq!(unicode_column_to_char_index("Hi你", 4), 3); // poza zakresem
+    }
+
+    #[test]
+    fn test_unicode_col_emoji() {
+        // Emoji zajmują 2 kolumny terminala
+        // "🔥AB" = 🔥(col0-1), A(col2), B(col3)
+        assert_eq!(unicode_column_to_char_index("🔥AB", 0), 0); // 🔥
+        assert_eq!(unicode_column_to_char_index("🔥AB", 2), 1); // A
+        assert_eq!(unicode_column_to_char_index("🔥AB", 3), 2); // B
     }
 }

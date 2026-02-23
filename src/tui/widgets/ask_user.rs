@@ -486,8 +486,26 @@ fn handle_choice_mouse(
     area: Rect,
     scroll_offset: u16,
 ) -> AskUserAction {
-    // Gdy w trybie "Other" text input → ignoruj klik
-    if other_input.is_some() {
+    // Gdy w trybie "Other" text input — obsłuż klik na polu tekstowym (pozycja kursora)
+    if let Some(text_state) = other_input {
+        let inner_width = area.width.saturating_sub(4).max(1) as usize;
+        let q_height = count_rendered_lines_for_width(question.question.trim_end(), inner_width);
+
+        let virt_row =
+            mouse.row as i32 - area.y as i32 + scroll_offset as i32;
+
+        // Text input jest na wirtualnym wierszu: border+pad(2) + q_height + options.len() + 1
+        let text_input_virt_row = 2i32 + q_height as i32 + question.options.len() as i32 + 1;
+
+        if virt_row == text_input_virt_row {
+            // Klik na wierszu pola tekstowego — ustaw kursor przez unicode_column_to_char_index
+            // Tekst zaczyna się po padding_left(2) + prompt "> "(2) = 4 kolumny od area.x
+            let text_x_start = area.x.saturating_add(4) as usize;
+            let col_in_text = (mouse.column as usize).saturating_sub(text_x_start);
+            let available_width = inner_width.saturating_sub(2); // minus prompt "> "
+            text_state.set_cursor_from_click(col_in_text, available_width);
+        }
+
         return AskUserAction::Continue;
     }
 
@@ -567,8 +585,7 @@ fn handle_confirm_mouse(
     let inner_y = area.y.saturating_add(2);
     let inner_width = area.width.saturating_sub(4).max(1) as usize;
 
-    let q_height =
-        count_rendered_lines_for_width(question.question.trim_end(), inner_width);
+    let q_height = count_rendered_lines_for_width(question.question.trim_end(), inner_width);
 
     // Pozycja przycisków z uwzględnieniem scroll_offset
     let button_y = inner_y
@@ -1858,6 +1875,35 @@ mod tests {
             assert!(other_input.is_some());
         } else {
             panic!("Expected Active Choice state");
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_click_positions_cursor_in_other_text_input() {
+        // Geometria choice_area: Rect { x:0, y:0, w:50, h:7 }
+        // choice_question: "Choose auth" (q_height=1), 2 opcje (JWT, Session)
+        // Text input virtual row = 2 + q_height(1) + options.len()(2) + 1 = 6
+        // Tekst zaczyna się na kolumnie: area.x(0) + padding(2) + prompt(2) = 4
+        let mut widget = AskUserWidget::new(choice_question());
+        let area = choice_area();
+
+        // Aktywuj "Other" text mode i wpisz "Hello"
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Down));
+        widget.handle_key(k(KeyCode::Enter));
+        for c in "Hello".chars() {
+            widget.handle_key(k(KeyCode::Char(c)));
+        }
+        // cursor_pos = 5 (koniec)
+
+        // Klik na kolumnie 4+2=6 (tekst col 2) → kursor na char 2 ('l')
+        let result = widget.handle_mouse(left_click(6, 6), area);
+        assert_eq!(result, AskUserAction::Continue);
+
+        if let AskUserState::Active(InnerState::Choice(_, Some(text_state))) = &widget.state {
+            assert_eq!(text_state.cursor_pos, 2);
+        } else {
+            panic!("Expected Active Choice state with active other_input");
         }
     }
 

@@ -33,6 +33,7 @@ pub use events::{
 #[allow(unused_imports)] // Re-exporty — będą używane przez per-command widoki TUI
 pub use formatting::{
     format_duration_span, format_duration_string, format_tokens_span, format_tokens_string,
+    unicode_column_to_char_index,
 };
 #[allow(unused_imports)] // Re-exporty dla hit map — obsługa myszy
 pub use hit_map::{HitId, HitMap, HitRegion};
