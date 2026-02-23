@@ -83,7 +83,6 @@ fn merge_toml(base: &mut toml::Value, override_val: toml::Value) {
     }
 }
 
-
 /// A setup command to run after creating a worktree.
 ///
 /// Can be a simple string or an object with `run` and optional `name`.
@@ -188,7 +187,7 @@ pub struct FileConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
     /// Konfiguracja skrótów klawiszowych (`[keybindings]` w .ralph.toml)
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     #[allow(dead_code)] // Will be consumed by TUI event handlers
     pub keybindings: KeybindingsConfig,
 }
@@ -678,22 +677,6 @@ impl FileConfig {
     pub fn merge(base: Self, overlay: Self) -> Self {
         Self {
             includes: merge_vec(base.includes, overlay.includes),
-            prompt: PromptConfig::merge(base.prompt, overlay.prompt),
-            ui: UiConfig::merge(base.ui, overlay.ui),
-            tui: TuiConfig::merge(base.tui, overlay.tui),
-            task: TaskConfig::merge(base.task, overlay.task),
-            logging: LoggingConfig::merge(base.logging, overlay.logging),
-        }
-    }
-
-    /// Merge dwóch warstw konfiguracji: overlay nadpisuje base (non-default only).
-    ///
-    /// Semantyka:
-    /// - Scalar fields: overlay zastępuje base jeśli overlay ≠ default
-    /// - Option fields: overlay Some > base Some > None
-    /// - Vec fields: overlay zastępuje base w całości jeśli niepusty
-    pub fn merge(base: Self, overlay: Self) -> Self {
-        Self {
             prompt: PromptConfig::merge(base.prompt, overlay.prompt),
             ui: UiConfig::merge(base.ui, overlay.ui),
             tui: TuiConfig::merge(base.tui, overlay.tui),

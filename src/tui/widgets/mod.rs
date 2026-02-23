@@ -41,7 +41,9 @@ pub use ask_user_text::TextInputState;
 pub use ask_user_text::TextInputWidget;
 pub use header::{Header, HeaderData};
 #[allow(unused_imports)] // TUI component — will be used when multiline input is integrated
-pub use multiline_text_input::MultilineTextInputState;
+pub use multiline_text_input::{
+    MultilineTextInput, MultilineTextInputState, MultilineTextInputWidget,
+};
 pub use splash::SplashScreen;
 pub use status_bar::{ProgressData, StatusBar, StatusBarData};
 #[allow(unused_imports)] // TUI component — will be used when full TUI is integrated
