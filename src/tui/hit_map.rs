@@ -41,9 +41,9 @@ impl HitRegion {
         HitRegion { rect, id }
     }
 
-    /// Sprawdza czy punkt (x, y) znajduje się w tym regionie.
-    pub fn contains(&self, x: u16, y: u16) -> bool {
-        self.rect.contains(Position { x, y })
+    /// Sprawdza czy punkt (col, row) znajduje się w tym regionie.
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        self.rect.contains(Position { x: col, y: row })
     }
 }
 
@@ -56,11 +56,11 @@ impl HitRegion {
 ///
 /// ```ignore
 /// let mut hit_map = HitMap::new();
-/// hit_map.add_region(header_rect, HitId::Sidebar);
-/// hit_map.add_region(output_rect, HitId::OutputView);
+/// hit_map.register(header_rect, HitId::Sidebar);
+/// hit_map.register(output_rect, HitId::OutputView);
 ///
 /// // Kliknięcie na (10, 5)
-/// if let Some(id) = hit_map.hit_at(10, 5) {
+/// if let Some(id) = hit_map.hit_test(10, 5) {
 ///     // obsługa kliknięcia
 /// }
 /// ```
@@ -78,31 +78,35 @@ impl HitMap {
         }
     }
 
-    /// Dodaje nowy region do mapy hitów.
-    pub fn add_region(&mut self, rect: Rect, id: HitId) {
+    /// Czyści mapę hitów (usuwa wszystkie regiony).
+    pub fn clear(&mut self) {
+        self.regions.clear();
+    }
+
+    /// Dodaje nowy region do mapy hitów (z-order: ostatni dodany = górną warstwę).
+    ///
+    /// Region jest identyfikowany przez HitId i zajmuje prostokąt na ekranie.
+    /// Nowo dodane regiony mają wyższy priorytet w hit_test.
+    pub fn register(&mut self, rect: Rect, id: HitId) {
         self.regions.push(HitRegion::new(rect, id));
     }
 
-    /// Zwraca HitId dla punktu (x, y), jeśli punkt jest w którymś z regionów.
+    /// Zwraca HitId dla punktu (col, row), jeśli punkt jest w którymś z regionów.
     ///
     /// Przeszukuje regiony w odwrotnej kolejności (ostatnie dodane pierwszym)
-    /// aby obsługiwać layering (górne regiony mają priorytet).
-    pub fn hit_at(&self, x: u16, y: u16) -> Option<HitId> {
+    /// aby obsługiwać z-order (górne regiony mają priorytet).
+    /// Zwraca None jeśli punkt nie pasuje do żadnego regionu.
+    pub fn hit_test(&self, col: u16, row: u16) -> Option<HitId> {
         self.regions
             .iter()
             .rev()
-            .find(|region| region.contains(x, y))
+            .find(|region| region.contains(col, row))
             .map(|region| region.id)
     }
 
     /// Zwraca referencję do wszystkich regionów w mapie.
     pub fn regions(&self) -> &[HitRegion] {
         &self.regions
-    }
-
-    /// Czyści mapę hitów (usuwa wszystkie regiony).
-    pub fn clear(&mut self) {
-        self.regions.clear();
     }
 
     /// Zwraca liczbę regionów w mapie.
@@ -181,12 +185,12 @@ mod tests {
             height: 10,
         };
 
-        hit_map.add_region(rect1, HitId::OutputView);
-        hit_map.add_region(rect2, HitId::Sidebar);
+        hit_map.register(rect1, HitId::OutputView);
+        hit_map.register(rect2, HitId::Sidebar);
 
-        assert_eq!(hit_map.hit_at(5, 5), Some(HitId::OutputView));
-        assert_eq!(hit_map.hit_at(25, 5), Some(HitId::Sidebar));
-        assert_eq!(hit_map.hit_at(15, 5), None);
+        assert_eq!(hit_map.hit_test(5, 5), Some(HitId::OutputView));
+        assert_eq!(hit_map.hit_test(25, 5), Some(HitId::Sidebar));
+        assert_eq!(hit_map.hit_test(15, 5), None);
     }
 
     #[test]
@@ -201,11 +205,11 @@ mod tests {
             height: 20,
         };
 
-        hit_map.add_region(rect, HitId::OutputView);
-        hit_map.add_region(rect, HitId::Sidebar); // Nakłada się na OutputView
+        hit_map.register(rect, HitId::OutputView);
+        hit_map.register(rect, HitId::Sidebar); // Nakłada się na OutputView
 
-        // Punkt w zakresu obu — zwraca ostatnio dodany (Sidebar)
-        assert_eq!(hit_map.hit_at(10, 10), Some(HitId::Sidebar));
+        // Punkt w zakresu obu — zwraca ostatnio zarejestrowany (Sidebar)
+        assert_eq!(hit_map.hit_test(10, 10), Some(HitId::Sidebar));
     }
 
     #[test]
@@ -217,7 +221,7 @@ mod tests {
             width: 10,
             height: 10,
         };
-        hit_map.add_region(rect, HitId::OutputView);
+        hit_map.register(rect, HitId::OutputView);
 
         assert!(!hit_map.is_empty());
         assert_eq!(hit_map.len(), 1);
@@ -238,5 +242,32 @@ mod tests {
         let _ac = HitId::AskUserConfirm(true);
         let _t = HitId::TextInput;
         let _sb = HitId::StatusBar;
+    }
+
+    #[test]
+    fn test_hit_map_clear_then_reregister() {
+        // Sprawdzenie lifecycle'u mapy: clear() → reregister() → hit_test()
+        let mut hit_map = HitMap::new();
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+
+        // Dodaj region
+        hit_map.register(rect, HitId::Sidebar);
+        assert_eq!(hit_map.len(), 1);
+        assert_eq!(hit_map.hit_test(5, 5), Some(HitId::Sidebar));
+
+        // Wyczyść mapę
+        hit_map.clear();
+        assert!(hit_map.is_empty());
+        assert_eq!(hit_map.hit_test(5, 5), None);
+
+        // Dodaj nowy region
+        hit_map.register(rect, HitId::OutputView);
+        assert_eq!(hit_map.len(), 1);
+        assert_eq!(hit_map.hit_test(5, 5), Some(HitId::OutputView));
     }
 }
