@@ -116,6 +116,45 @@ pub(super) fn compute_grid_rects(area: Rect, worker_count: u32) -> Vec<Rect> {
     result
 }
 
+/// Collect IDs of workers that should be visible in the grid.
+///
+/// Workers are included when active (non-idle), within the idle grace period,
+/// or when `show_idle` is true. IDs are returned in ascending order.
+fn filter_active_workers(
+    worker_count: u32,
+    panels: &HashMap<u32, WorkerPanel>,
+    show_idle: bool,
+) -> Vec<u32> {
+    (1..=worker_count)
+        .filter(|worker_id| {
+            panels
+                .get(worker_id)
+                .map(|p| is_worker_active(p, show_idle))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Compute screen rectangles for active workers, returning (worker_id, Rect) pairs.
+///
+/// Mirrors the layout logic in `render_worker_grid` — returns the mapping used
+/// for mouse hit-testing. Returns an empty Vec when no workers are active.
+/// This function is called in `draw()` to populate `OrchestrateApp::grid_rects`.
+pub(super) fn compute_active_worker_rects(
+    area: Rect,
+    worker_count: u32,
+    panels: &HashMap<u32, WorkerPanel>,
+    show_idle: bool,
+) -> Vec<(u32, Rect)> {
+    let active_workers = filter_active_workers(worker_count, panels, show_idle);
+    let active_count = active_workers.len() as u32;
+    if active_count == 0 {
+        return vec![];
+    }
+    let rects = compute_grid_rects(area, active_count);
+    active_workers.into_iter().zip(rects).collect()
+}
+
 /// Configuration for rendering the worker grid.
 pub(super) struct WorkerGridConfig<'a> {
     pub worker_count: u32,
@@ -141,15 +180,7 @@ pub(super) fn render_worker_grid(frame: &mut Frame, area: Rect, config: &WorkerG
     }
 
     // Filter active workers
-    let active_workers: Vec<u32> = (1..=config.worker_count)
-        .filter(|worker_id| {
-            config
-                .panels
-                .get(worker_id)
-                .map(|p| is_worker_active(p, config.show_idle))
-                .unwrap_or(false)
-        })
-        .collect();
+    let active_workers = filter_active_workers(config.worker_count, config.panels, config.show_idle);
 
     let active_count = active_workers.len() as u32;
     if active_count > 0 {
@@ -486,6 +517,70 @@ mod tests {
         assert_eq!(compute_grid(9, 160), (3, 3));
         assert_eq!(compute_grid(5, 159), (2, 3));
         assert_eq!(compute_grid(9, 159), (2, 5));
+    }
+
+    // ── Active worker rects tests ──
+
+    #[test]
+    fn compute_active_worker_rects_maps_worker_ids() {
+        let panels: HashMap<u32, WorkerPanel> = [
+            make_panel(1, WorkerState::Implementing, Some("1.1"), None, None),
+            make_panel(2, WorkerState::Reviewing, Some("2.1"), None, None),
+        ]
+        .into_iter()
+        .collect();
+
+        let area = Rect::new(0, 0, 120, 24);
+        let rects = compute_active_worker_rects(area, 2, &panels, false);
+
+        assert_eq!(rects.len(), 2);
+        // Worker IDs muszą być obecne
+        let worker_ids: Vec<u32> = rects.iter().map(|(id, _)| *id).collect();
+        assert!(worker_ids.contains(&1));
+        assert!(worker_ids.contains(&2));
+    }
+
+    #[test]
+    fn compute_active_worker_rects_excludes_expired_idle() {
+        let panels: HashMap<u32, WorkerPanel> = [
+            make_panel(1, WorkerState::Implementing, Some("1.1"), None, None),
+            // Worker 2 idle bez grace period (idle_since=None)
+            make_panel(2, WorkerState::Idle, None, None, None),
+        ]
+        .into_iter()
+        .collect();
+
+        let area = Rect::new(0, 0, 120, 24);
+        let rects = compute_active_worker_rects(area, 2, &panels, false);
+
+        // Tylko worker 1 powinien być widoczny
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].0, 1);
+    }
+
+    #[test]
+    fn compute_active_worker_rects_empty_for_zero_workers() {
+        let panels: HashMap<u32, WorkerPanel> = HashMap::new();
+        let area = Rect::new(0, 0, 120, 24);
+        let rects = compute_active_worker_rects(area, 0, &panels, false);
+        assert!(rects.is_empty());
+    }
+
+    #[test]
+    fn compute_active_worker_rects_show_idle_includes_all() {
+        let panels: HashMap<u32, WorkerPanel> = [
+            make_panel(1, WorkerState::Implementing, Some("1.1"), None, None),
+            // Worker 2 idle bez grace period (idle_since=None), ale show_idle=true
+            make_panel(2, WorkerState::Idle, None, None, None),
+        ]
+        .into_iter()
+        .collect();
+
+        let area = Rect::new(0, 0, 120, 24);
+        let rects = compute_active_worker_rects(area, 2, &panels, true);
+
+        // Oba workery powinny być widoczne przy show_idle=true
+        assert_eq!(rects.len(), 2);
     }
 
     // ── Grid rects tests ──

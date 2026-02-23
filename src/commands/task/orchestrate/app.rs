@@ -17,7 +17,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 
 use crate::commands::task::orchestrate::app_render::{
-    WorkerGridConfig, render_global_bar, render_overlay, render_worker_grid,
+    WorkerGridConfig, compute_active_worker_rects, render_global_bar, render_overlay,
+    render_worker_grid,
 };
 use crate::commands::task::orchestrate::scheduler::SchedulerStatus;
 use crate::commands::task::orchestrate::shutdown_types::{OrchestratorStatus, ShutdownState};
@@ -148,6 +149,15 @@ pub struct OrchestrateApp {
     /// Resolver keybindingów — umożliwia konfigurowalny klawisz Ctrl+P.
     /// Domyślnie inicjalizowany z defaults; użyj `with_resolver()` dla custom bindingów.
     pub(crate) resolver: KeybindingResolver,
+
+    // ── Cached hit-test rects (updated each draw()) ──
+    /// Mapowanie worker_id → Rect, aktualizowane w każdym draw().
+    /// Używane do hit-testingu myszki w handle_event().
+    pub(crate) grid_rects: Vec<(u32, Rect)>,
+    /// Rect sidebara (gdy widoczny), aktualizowany w każdym draw().
+    pub(crate) sidebar_rect: Option<Rect>,
+    /// Rect overlaya (gdy aktywny), aktualizowany w każdym draw().
+    pub(crate) overlay_rect: Option<Rect>,
 }
 
 #[allow(dead_code)] // Public API — zostanie podłączony w task 6.9
@@ -183,6 +193,9 @@ impl OrchestrateApp {
             log_lines: VecDeque::with_capacity(50),
             command_palette: None,
             resolver: KeybindingResolver::with_defaults(),
+            grid_rects: Vec::new(),
+            sidebar_rect: None,
+            overlay_rect: None,
         }
     }
 
@@ -542,12 +555,16 @@ impl AppState for OrchestrateApp {
             ])
             .split(content_area);
 
+            // Cache sidebar rect dla hit-testingu
+            self.sidebar_rect = Some(horizontal[0]);
+
             // Render sidebar
             TaskSidebar::new(&mut self.sidebar_state, self.sidebar_focused)
                 .render(horizontal[0], frame.buffer_mut());
 
             horizontal[1]
         } else {
+            self.sidebar_rect = None;
             content_area
         };
 
@@ -566,8 +583,23 @@ impl AppState for OrchestrateApp {
             },
         );
 
+        // Cache worker grid rects dla hit-testingu (puste gdy aktywny preview).
+        // Obliczamy po render_worker_grid, stosując tę samą logikę filtrowania.
+        // Reużywamy bufora (clear + extend) zamiast nowej alokacji w każdym frame.
+        self.grid_rects.clear();
+        if !self.show_task_preview {
+            self.grid_rects.extend(compute_active_worker_rects(
+                grid_area,
+                self.worker_count,
+                &self.panels,
+                self.show_idle,
+            ));
+        }
+
         // Overlay sidebar for narrow terminals (on top of grid)
         if self.sidebar_state.visible && is_small {
+            // W trybie overlay sidebar przykrywa cały content_area
+            self.sidebar_rect = Some(content_area);
             crate::tui::widgets::render_sidebar_overlay(
                 &mut self.sidebar_state,
                 self.sidebar_focused,
@@ -594,6 +626,13 @@ impl AppState for OrchestrateApp {
 
         // Render text input overlay on top (if active)
         render_overlay(frame, area, &self.shared_overlay);
+
+        // Cache overlay rect dla hit-testingu — area całego terminala gdy overlay aktywny
+        self.overlay_rect = self
+            .shared_overlay
+            .lock()
+            .ok()
+            .and_then(|guard| guard.is_some().then_some(area));
 
         // Render command palette on very top — najwyższy z-order
         if let Some(ref mut palette) = self.command_palette {
@@ -880,6 +919,26 @@ mod tests {
         app.reload_requested = true;
         assert!(app.take_reload_requested());
         assert!(!app.reload_requested);
+    }
+
+    // ── Cached hit-test rects tests ────────────────────────────────
+
+    #[test]
+    fn new_defaults_grid_rects_empty() {
+        let app = make_app(3);
+        assert!(app.grid_rects.is_empty());
+    }
+
+    #[test]
+    fn new_defaults_sidebar_rect_none() {
+        let app = make_app(3);
+        assert!(app.sidebar_rect.is_none());
+    }
+
+    #[test]
+    fn new_defaults_overlay_rect_none() {
+        let app = make_app(3);
+        assert!(app.overlay_rect.is_none());
     }
 
     // ── Pending user messages tests ────────────────────────────────
