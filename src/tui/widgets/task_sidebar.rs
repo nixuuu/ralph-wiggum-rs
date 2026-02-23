@@ -20,6 +20,11 @@ const MIN_WIDTH: u16 = 15;
 const MAX_WIDTH: u16 = 60;
 const DEFAULT_WIDTH: u16 = 40;
 
+/// Top padding of the sidebar Block (matches `Padding::new(2, 2, 2, 2)`).
+/// Used by hit-testing code in `app_keys.rs` to calculate which task row
+/// was clicked. Must be kept in sync with the Block padding below.
+pub const SIDEBAR_PADDING_TOP: u16 = 2;
+
 // ── State ──────────────────────────────────────────────────────────
 
 /// Mutable state for the task sidebar.
@@ -128,6 +133,15 @@ impl TaskSidebarState {
         if self.selected_index < max {
             self.selected_index += 1;
         }
+    }
+
+    /// Set selection to a specific absolute index (clamped to valid range).
+    ///
+    /// Used for mouse click hit-testing: caller computes the index from cursor row
+    /// and passes it here to update selection.
+    pub fn select_index(&mut self, index: usize) {
+        let max = self.visible_rows().len().saturating_sub(1);
+        self.selected_index = index.min(max);
     }
 
     /// Toggle expand/collapse for the currently selected node.
@@ -557,6 +571,46 @@ tasks:
         // Collapse it back
         state.toggle_expand();
         assert_eq!(state.visible_rows().len(), 2);
+    }
+
+    #[test]
+    fn test_select_index_clamps_to_max() {
+        let mut state = TaskSidebarState::new();
+        let tf = sample_tasks_file();
+        state.refresh(&tf);
+
+        // 2 visible rows (collapsed): valid indices 0, 1
+        state.select_index(0);
+        assert_eq!(state.selected_index, 0);
+
+        state.select_index(1);
+        assert_eq!(state.selected_index, 1);
+
+        // Out of range → clamped to last
+        state.select_index(99);
+        assert_eq!(state.selected_index, 1);
+    }
+
+    #[test]
+    fn test_select_index_zero_on_empty() {
+        let mut state = TaskSidebarState::new();
+        // No tasks: visible_rows is empty → max = 0.saturating_sub(1) = 0
+        state.select_index(5);
+        assert_eq!(state.selected_index, 0);
+    }
+
+    #[test]
+    fn test_select_index_then_toggle_expand() {
+        let mut state = TaskSidebarState::new();
+        let tf = sample_tasks_file();
+        state.refresh(&tf);
+
+        // 2 visible rows collapsed. Select "Epic Two" (index 1) and expand.
+        state.select_index(1);
+        assert_eq!(state.selected_index, 1);
+        state.toggle_expand();
+        // Now 4 rows: "1", "2", "2.1", "2.2"
+        assert_eq!(state.visible_rows().len(), 4);
     }
 
     #[test]

@@ -50,7 +50,9 @@ pub use status_bar::{ProgressData, StatusBar, StatusBarData};
 pub use task_detail::{TaskDetail, TaskDetailState};
 #[allow(unused_imports)] // TUI component — will be used when full TUI is integrated
 pub use task_preview::render_task_preview;
-pub use task_sidebar::{TaskSidebar, TaskSidebarState, render_sidebar_overlay};
+pub use task_sidebar::{
+    SIDEBAR_PADDING_TOP, TaskSidebar, TaskSidebarState, render_sidebar_overlay,
+};
 pub use task_tree::{FlatRow, TaskTreeWidget, TreeState};
 pub use text_input_overlay::{InputAction, TextInputOverlay};
 

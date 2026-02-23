@@ -361,6 +361,7 @@ impl OrchestrateApp {
     /// Routing:
     /// - `MouseMoved` → hit-test na `grid_rects` → focus na worker panel pod kursorem
     /// - `ScrollUp`/`ScrollDown` → hit-test na grid_rects → scroll panelu pod kursorem
+    /// - `Down(Left)` → hit-test na sidebar → focus + select task + toggle expand/collapse
     /// - Pozostałe zdarzenia → ignorowane
     ///
     /// `MouseDown Left` wykonuje hit-test i ustawia focus jak `MouseMoved`,
@@ -386,8 +387,9 @@ impl OrchestrateApp {
                     EventResult::Ignored
                 }
             }
-            // Left click na worker panel → focus, anuluje quit/restart pending
+            // Left click: worker panel focus lub sidebar select + toggle expand/collapse
             MouseEventKind::Down(MouseButton::Left) => {
+                // Priorytet 1: hit-test na worker grid
                 if let Some(worker_id) = self.hit_test_worker(mouse.column, mouse.row) {
                     // Klik na worker panel — anuluj oczekujące dialogi i ustaw focus.
                     // set_focus() resetuje scroll_offset do 0 (follow tail) przy zmianie focusu.
@@ -396,13 +398,12 @@ impl OrchestrateApp {
                     self.set_focus(Some(worker_id));
                     EventResult::Consumed
                 } else {
-                    EventResult::Ignored
+                    // Priorytet 2: sidebar click (focus + select + toggle)
+                    self.handle_mouse_left_click(mouse.column, mouse.row)
                 }
             }
             MouseEventKind::ScrollUp => self.handle_mouse_scroll(mouse.column, mouse.row, true),
-            MouseEventKind::ScrollDown => {
-                self.handle_mouse_scroll(mouse.column, mouse.row, false)
-            }
+            MouseEventKind::ScrollDown => self.handle_mouse_scroll(mouse.column, mouse.row, false),
             _ => EventResult::Ignored,
         }
     }
@@ -497,6 +498,49 @@ impl OrchestrateApp {
 
         // Kursor poza jakimkolwiek panelem — ignoruj
         EventResult::Ignored
+    }
+
+    /// Obsługa lewego kliknięcia myszy.
+    ///
+    /// Routing:
+    /// - Klik w `sidebar_rect` → focus sidebar + oblicz index tasku z row offset → select + toggle expand
+    /// - Klik poza sidebar → bez zmian focusu sidebar
+    ///
+    /// Guard: gdy overlay lub palette jest aktywna, klik jest ignorowany.
+    fn handle_mouse_left_click(&mut self, col: u16, row: u16) -> EventResult {
+        // Guard: overlay lub palette aktywne — ignoruj klik
+        if self.is_palette_open() || self.is_overlay_active() {
+            return EventResult::Ignored;
+        }
+
+        // Hit-test na sidebar (wymaga sidebar_rect z ostatniego draw())
+        let Some(sidebar_rect) = self.sidebar_rect else {
+            return EventResult::Ignored;
+        };
+
+        let pos = Position::new(col, row);
+        if !sidebar_rect.contains(pos) {
+            // Click poza sidebar — nie zmieniaj sidebar focus
+            return EventResult::Ignored;
+        }
+
+        // Focus sidebar
+        self.sidebar_focused = true;
+
+        // Oblicz task index z row pozycji.
+        // inner_y = sidebar_rect.y + SIDEBAR_PADDING_TOP (z task_sidebar.rs).
+        // Task i jest renderowany w wierszu inner_y + i.
+        use crate::tui::widgets::SIDEBAR_PADDING_TOP;
+        let inner_y = sidebar_rect.y.saturating_add(SIDEBAR_PADDING_TOP);
+
+        if row >= inner_y {
+            let row_within_inner = (row - inner_y) as usize;
+            let task_index = self.sidebar_state.scroll_offset + row_within_inner;
+            self.sidebar_state.select_index(task_index);
+            self.sidebar_state.toggle_expand();
+        }
+
+        EventResult::Consumed
     }
 
     fn handle_input_overlay_key(&mut self) -> EventResult {
@@ -1887,6 +1931,7 @@ mod tests {
     fn mouse_right_click_ignored() {
         let mut app = make_app(1);
         set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+        // sidebar_rect is None by default (not set until first draw())
 
         use crossterm::event::MouseButton;
         let click = make_scroll(MouseEventKind::Down(MouseButton::Right), 10, 5);
@@ -1909,6 +1954,209 @@ mod tests {
         // Overlay aktywny — scroll ignorowany
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(app.panels[&1].scroll_offset, 0);
+    }
+
+    // ── Sidebar click tests ─────────────────────────────────────────
+
+    #[test]
+    fn mouse_click_in_sidebar_focuses_sidebar() {
+        let mut app = make_app(1);
+        // Ustaw sidebar_rect symulując wyrendowany sidebar
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+        app.sidebar_state.visible = true;
+        assert!(!app.sidebar_focused);
+
+        // Klik wewnątrz sidebar
+        let click = make_mouse_click(5, 5);
+        let result = app.handle_mouse(click);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert!(app.sidebar_focused);
+    }
+
+    #[test]
+    fn mouse_click_outside_sidebar_does_not_focus_sidebar() {
+        let mut app = make_app(1);
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+        app.sidebar_state.visible = true;
+        app.sidebar_focused = false;
+
+        // Klik poza sidebar (col=50 > rect.x+rect.width=40)
+        let click = make_mouse_click(50, 5);
+        let result = app.handle_mouse(click);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn mouse_click_when_no_sidebar_rect_returns_ignored() {
+        let mut app = make_app(1);
+        // sidebar_rect is None by default
+        assert!(app.sidebar_rect.is_none());
+
+        let click = make_mouse_click(5, 5);
+        let result = app.handle_mouse(click);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn mouse_click_in_sidebar_content_selects_task_and_toggles_expand() {
+        let mut app = make_app(1);
+        // Załaduj taski z rodzicem i dzieckiem
+        let yaml = r#"
+tasks:
+  - id: "1"
+    name: "Epic"
+    subtasks:
+      - id: "1.1"
+        name: "Sub"
+        status: todo
+"#;
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(yaml).unwrap();
+        app.sidebar_state.refresh(&tf);
+        app.sidebar_state.visible = true;
+
+        // Sidebar rect: y=0, więc inner_y = 0 + 2 = 2
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+
+        // Klik w wierszu 2 (pierwszy wiersz treści, row=2 >= inner_y=2)
+        // row_within_inner = 0, task_index = 0 (scroll_offset=0)
+        let click = make_mouse_click(5, 2);
+        let result = app.handle_mouse(click);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert!(app.sidebar_focused);
+        assert_eq!(app.sidebar_state.selected_index, 0);
+
+        // Po toggle_expand, epic "1" powinien być rozwinięty.
+        // Sprawdzamy pośrednio: select_next powinno przesunąć na index 1 (subtask widoczny).
+        app.sidebar_state.select_next();
+        assert_eq!(app.sidebar_state.selected_index, 1);
+    }
+
+    #[test]
+    fn mouse_click_in_sidebar_header_area_focuses_without_selecting_task() {
+        let mut app = make_app(1);
+        let yaml = r#"
+tasks:
+  - id: "1"
+    name: "Epic"
+    subtasks:
+      - id: "1.1"
+        name: "Sub"
+        status: todo
+"#;
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(yaml).unwrap();
+        app.sidebar_state.refresh(&tf);
+        app.sidebar_state.visible = true;
+        app.sidebar_state.selected_index = 0;
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+
+        // Klik w wierszu 0 (header/tytuł, row=0 < inner_y=2)
+        let click = make_mouse_click(5, 0);
+        let result = app.handle_mouse(click);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert!(app.sidebar_focused);
+        // selected_index bez zmian (nie kliknięto w treść)
+        assert_eq!(app.sidebar_state.selected_index, 0);
+        // Epic nadal zwinięty (toggle nie był wywołany)
+        app.sidebar_state.select_next();
+        assert_eq!(app.sidebar_state.selected_index, 0); // max=0, brak subtasków widocznych
+    }
+
+    #[test]
+    fn mouse_click_in_sidebar_ignored_when_palette_open() {
+        let mut app = make_app(1);
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+        app.sidebar_state.visible = true;
+        app.open_command_palette();
+        assert!(app.is_palette_open());
+
+        let click = make_mouse_click(5, 5);
+        let result = app.handle_mouse(click);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn mouse_click_in_sidebar_ignored_when_overlay_active() {
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+        let mut app = OrchestrateApp::new(1, overlay);
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+        app.sidebar_state.visible = true;
+        assert!(app.is_overlay_active());
+
+        let click = make_mouse_click(5, 5);
+        let result = app.handle_mouse(click);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn mouse_click_on_different_task_row_selects_correct_task() {
+        let mut app = make_app(1);
+        let yaml = r#"
+tasks:
+  - id: "1"
+    name: "First"
+    status: todo
+  - id: "2"
+    name: "Second"
+    status: todo
+  - id: "3"
+    name: "Third"
+    status: todo
+"#;
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(yaml).unwrap();
+        app.sidebar_state.refresh(&tf);
+        app.sidebar_state.visible = true;
+
+        // Sidebar rect zaczyna się od y=0, inner_y = 2
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+
+        // Klik w wierszu 4: row_within_inner = 4 - 2 = 2, task_index = 2 ("Third")
+        let click = make_mouse_click(5, 4);
+        let result = app.handle_mouse(click);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert!(app.sidebar_focused);
+        assert_eq!(app.sidebar_state.selected_index, 2);
+    }
+
+    #[test]
+    fn mouse_click_with_scroll_offset_calculates_correct_index() {
+        let mut app = make_app(1);
+        let yaml = r#"
+tasks:
+  - id: "1"
+    name: "T1"
+    status: todo
+  - id: "2"
+    name: "T2"
+    status: todo
+  - id: "3"
+    name: "T3"
+    status: todo
+"#;
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(yaml).unwrap();
+        app.sidebar_state.refresh(&tf);
+        app.sidebar_state.visible = true;
+        app.sidebar_state.scroll_offset = 1; // przewinięto o 1
+
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+
+        // Klik w wierszu 2 (pierwszy wiersz treści): row_within_inner = 0, task_index = 0 + 1 = 1 ("T2")
+        let click = make_mouse_click(5, 2);
+        let result = app.handle_mouse(click);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.sidebar_state.selected_index, 1); // "T2"
     }
 
     #[test]
