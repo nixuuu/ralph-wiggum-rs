@@ -3,7 +3,7 @@
 //! Migrated from `dashboard_input.rs` — full keyboard routing:
 //! quit flow, focus navigation, restart, preview, scroll, overlay.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
 use crate::commands::task::orchestrate::app::{OrchestrateApp, QuitState, RestartState};
@@ -344,6 +344,18 @@ impl OrchestrateApp {
 
     // ── Mouse handling ──────────────────────────────────────────────
 
+    /// Zwraca worker_id pierwszego panelu, którego rect zawiera punkt (column, row).
+    ///
+    /// Używa cache `grid_rects` z ostatniego draw().
+    fn hit_test_worker(&self, column: u16, row: u16) -> Option<u32> {
+        use ratatui::layout::Position;
+        let pos = Position::new(column, row);
+        self.grid_rects
+            .iter()
+            .find(|&&(_, rect)| rect.contains(pos))
+            .map(|&(worker_id, _)| worker_id)
+    }
+
     /// Obsługa zdarzeń myszy.
     ///
     /// Routing:
@@ -351,27 +363,41 @@ impl OrchestrateApp {
     /// - `ScrollUp`/`ScrollDown` → hit-test na grid_rects → scroll panelu pod kursorem
     /// - Pozostałe zdarzenia → ignorowane
     ///
-    /// Guard (hover): gdy command palette lub text input overlay jest aktywny, hover jest ignorowany.
+    /// `MouseDown Left` wykonuje hit-test i ustawia focus jak `MouseMoved`,
+    /// ale dodatkowo anuluje `quit_pending` i `restart_pending`.
+    /// Scroll offset resetuje się do 0 (follow tail) przez `set_focus()`.
+    ///
+    /// Guard: gdy command palette lub text input overlay jest aktywny, zdarzenia myszy są ignorowane.
+    /// Spójna blokada z `handle_key()` (palette → priorytet 1, overlay → priorytet 2).
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> EventResult {
+        // Guard: overlay lub palette aktywne — ignoruj zdarzenia myszy.
+        // Zapobiega zmianie focusu workera gdy użytkownik pisze w overlay lub nawiguje paletą.
+        if self.is_palette_open() || self.is_overlay_active() {
+            return EventResult::Ignored;
+        }
+
         match mouse.kind {
             MouseEventKind::Moved => {
-                // Guard: overlay lub palette aktywne — ignoruj hover myszy.
-                if self.is_palette_open() || self.is_overlay_active() {
-                    return EventResult::Ignored;
+                if let Some(worker_id) = self.hit_test_worker(mouse.column, mouse.row) {
+                    self.set_focus(Some(worker_id));
+                    EventResult::Consumed
+                } else {
+                    // Kursor poza wszystkimi panelami — brak zmiany focusu
+                    EventResult::Ignored
                 }
-
-                let pos = Position::new(mouse.column, mouse.row);
-
-                // Iteruj po cache'owanych rectach workerów z ostatniego draw()
-                for &(worker_id, rect) in &self.grid_rects {
-                    if rect.contains(pos) {
-                        self.set_focus(Some(worker_id));
-                        return EventResult::Consumed;
-                    }
+            }
+            // Left click na worker panel → focus, anuluje quit/restart pending
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(worker_id) = self.hit_test_worker(mouse.column, mouse.row) {
+                    // Klik na worker panel — anuluj oczekujące dialogi i ustaw focus.
+                    // set_focus() resetuje scroll_offset do 0 (follow tail) przy zmianie focusu.
+                    self.cancel_quit_pending();
+                    self.cancel_restart_pending();
+                    self.set_focus(Some(worker_id));
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
                 }
-
-                // Kursor poza wszystkimi panelami — brak zmiany focusu
-                EventResult::Ignored
             }
             MouseEventKind::ScrollUp => self.handle_mouse_scroll(mouse.column, mouse.row, true),
             MouseEventKind::ScrollDown => {
@@ -1489,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_click_does_not_change_focus() {
+    fn mouse_left_click_on_worker_sets_focus() {
         let mut app = make_app(2);
         app.focused_worker = Some(1);
         app.grid_rects = vec![
@@ -1497,12 +1523,109 @@ mod tests {
             (2, ratatui::layout::Rect::new(20, 0, 20, 20)),
         ];
 
-        // Klik w obszarze workera 2 — nie powinien zmieniać focusu (tylko MouseMoved)
+        // Left click w obszarze workera 2 — powinien zmienić focus
         let mouse = make_mouse_click(25, 5);
         let result = app.handle_mouse(mouse);
 
-        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.focused_worker, Some(2));
+    }
+
+    #[test]
+    fn mouse_left_click_cancels_quit_pending() {
+        let mut app = make_app(2);
+        app.quit_state = crate::commands::task::orchestrate::app::QuitState::Pending;
+        app.grid_rects = vec![(1, ratatui::layout::Rect::new(0, 0, 40, 20))];
+
+        let mouse = make_mouse_click(10, 5);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(
+            app.quit_state,
+            crate::commands::task::orchestrate::app::QuitState::Normal
+        );
         assert_eq!(app.focused_worker, Some(1));
+    }
+
+    #[test]
+    fn mouse_left_click_cancels_restart_pending() {
+        let mut app = make_app(2);
+        app.restart_state = RestartState::Pending { worker_id: 2 };
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 20, 20)),
+            (2, ratatui::layout::Rect::new(20, 0, 20, 20)),
+        ];
+
+        let mouse = make_mouse_click(5, 5);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.restart_state, RestartState::None);
+        assert_eq!(app.focused_worker, Some(1));
+    }
+
+    #[test]
+    fn mouse_left_click_resets_scroll_offset() {
+        let mut app = make_app(2);
+        // Worker 2 ma scroll offset > 0
+        app.panels.get_mut(&2).unwrap().scroll_offset = 10;
+        app.focused_worker = Some(1);
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 20, 20)),
+            (2, ratatui::layout::Rect::new(20, 0, 20, 20)),
+        ];
+
+        // Click na worker 2 — powinien zresetować scroll offset
+        let mouse = make_mouse_click(25, 5);
+        app.handle_mouse(mouse);
+
+        assert_eq!(app.focused_worker, Some(2));
+        assert_eq!(app.panels[&2].scroll_offset, 0);
+    }
+
+    #[test]
+    fn mouse_left_click_outside_rects_returns_ignored() {
+        let mut app = make_app(2);
+        app.focused_worker = Some(1);
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 20, 20)),
+            (2, ratatui::layout::Rect::new(20, 0, 20, 20)),
+        ];
+
+        // Click poza wszystkimi panelami
+        let mouse = make_mouse_click(100, 100);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored);
+        // Focus nie zmieniony
+        assert_eq!(app.focused_worker, Some(1));
+    }
+
+    #[test]
+    fn mouse_left_click_ignored_when_palette_open() {
+        let mut app = make_app(2);
+        app.grid_rects = vec![(1, ratatui::layout::Rect::new(0, 0, 40, 20))];
+        app.open_command_palette();
+
+        let mouse = make_mouse_click(10, 5);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.focused_worker, None);
+    }
+
+    #[test]
+    fn mouse_left_click_ignored_when_overlay_active() {
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+        let mut app = OrchestrateApp::new(2, overlay);
+        app.grid_rects = vec![(1, ratatui::layout::Rect::new(0, 0, 40, 20))];
+
+        let mouse = make_mouse_click(10, 5);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.focused_worker, None);
     }
 
     #[test]
@@ -1761,12 +1884,12 @@ mod tests {
     }
 
     #[test]
-    fn mouse_non_scroll_event_ignored() {
+    fn mouse_right_click_ignored() {
         let mut app = make_app(1);
         set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
 
         use crossterm::event::MouseButton;
-        let click = make_scroll(MouseEventKind::Down(MouseButton::Left), 10, 5);
+        let click = make_scroll(MouseEventKind::Down(MouseButton::Right), 10, 5);
         let result = app.handle_mouse(click);
 
         assert_eq!(result, EventResult::Ignored);
