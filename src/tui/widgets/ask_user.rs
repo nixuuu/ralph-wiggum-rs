@@ -12,7 +12,7 @@
 // Konwersja z MCP Question → AskUserQuestion odbywa się w warstwie integracyjnej.
 
 use ansi_to_tui::IntoText;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -26,6 +26,7 @@ use crate::shared::markdown::render_markdown_for_width;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::ask_user_choice::QuestionOption;
 use crate::tui::widgets::multiline_text_input::MultilineTextInput;
+use crate::tui::widgets::text_input_overlay::InputAction;
 use crate::tui::widgets::{
     ChoiceState, ConfirmState, MultiSelectOption, MultiSelectState, MultilineTextInputState,
     TextInputState,
@@ -301,6 +302,61 @@ impl AskUserWidget {
             }
             InnerState::Multi(state) => handle_multi_key(state, key.code),
             InnerState::Confirm(state) => handle_confirm_key(state, key.code),
+        }
+    }
+
+    /// Obsługuje kliknięcie myszą.
+    ///
+    /// Deleguje do powidgetu dla Confirm (klik na [Yes]/[No]).
+    /// Inne typy pytań nie obsługują kliknięć (ignorują).
+    ///
+    /// `area` — obszar, w którym widget jest renderowany (pełny rect z ramką).
+    ///
+    /// Returns `AskUserAction`:
+    /// - `Submit(answer)` — klik na przycisk Yes/No
+    /// - `Continue` — klik poza przyciskami lub nie-Confirm type
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> AskUserAction {
+        let AskUserState::Active(InnerState::Confirm(ref mut state)) = self.state else {
+            return AskUserAction::Continue;
+        };
+
+        // Odtwarzamy layout z render_widget_inner dla stanu Active:
+        // - Borders::TOP: 1 wiersz border na górze
+        // - Padding::new(left=2, right=2, top=1, bottom=1)
+        // inner_y = area.y + border_top(1) + padding_top(1) = area.y + 2
+        // inner_x = area.x + padding_left(2) = area.x + 2
+        // inner_width = area.width - padding_left(2) - padding_right(2)
+        let inner_x = area.x.saturating_add(2);
+        let inner_y = area.y.saturating_add(2);
+        let inner_width = area.width.saturating_sub(4).max(1) as usize;
+
+        // Wysokość pytania — liczba wierszy po markdown renderingu
+        let q_height =
+            count_rendered_lines_for_width(self.question.question.trim_end(), inner_width);
+
+        // Area przycisków = pierwszy wiersz content area (bezpośrednio po pytaniu).
+        // Uwzględniamy scroll_offset: przy scrollowaniu w dół treść przesuwa się ku górze,
+        // więc efektywna pozycja przycisków na ekranie = inner_y + q_height - scroll_offset.
+        let button_y = inner_y
+            .saturating_add(q_height)
+            .saturating_sub(self.scroll_offset);
+
+        // Jeśli przyciski zostały wyprzesunięte poza widoczny obszar — ignoruj klik
+        let widget_bottom = area.y.saturating_add(area.height);
+        if button_y < inner_y || button_y >= widget_bottom {
+            return AskUserAction::Continue;
+        }
+
+        let button_area = Rect {
+            x: inner_x,
+            y: button_y,
+            width: inner_width as u16,
+            height: 1,
+        };
+
+        match state.handle_mouse(mouse, button_area) {
+            Some(InputAction::Send(answer)) => AskUserAction::Submit(answer),
+            _ => AskUserAction::Continue,
         }
     }
 
@@ -1966,5 +2022,92 @@ mod tests {
         let h = widget.height_for_width(50);
         let buffer = render_widget_to_buffer(widget, 50, h);
         insta::assert_snapshot!(snap(&buffer));
+    }
+
+    // ── handle_mouse Tests ─────────────────────────────────────────
+
+    fn make_left_click(col: u16, row: u16) -> MouseEvent {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Layout widgetu: border_top(1) + padding_top(1) = inner_y = area.y + 2
+    /// Pytanie "Are you sure?" = 1 wiersz → button_y = inner_y + 1 = area.y + 3
+    #[test]
+    fn test_handle_mouse_confirm_click_yes() {
+        let mut widget = AskUserWidget::new(confirm_question());
+        // area = (x=0, y=0, w=80, h=20)
+        // inner_y = 2, q_height = 1 → button_y = 3
+        // button_x = inner_x = 2, yes_rect = x=2..6
+        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let result = widget.handle_mouse(make_left_click(3, 3), area);
+        assert_eq!(result, AskUserAction::Submit("yes".into()));
+    }
+
+    #[test]
+    fn test_handle_mouse_confirm_click_no() {
+        let mut widget = AskUserWidget::new(confirm_question());
+        // no_rect = x = inner_x + 7 = 9, width=4 → x=9..12
+        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let result = widget.handle_mouse(make_left_click(10, 3), area);
+        assert_eq!(result, AskUserAction::Submit("no".into()));
+    }
+
+    #[test]
+    fn test_handle_mouse_confirm_click_outside_ignored() {
+        let mut widget = AskUserWidget::new(confirm_question());
+        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        // Klik poza przyciskami (x=50)
+        let result = widget.handle_mouse(make_left_click(50, 3), area);
+        assert_eq!(result, AskUserAction::Continue);
+    }
+
+    #[test]
+    fn test_handle_mouse_confirm_scroll_offset_shifts_buttons() {
+        let mut widget = AskUserWidget::new(confirm_question());
+        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+
+        // scroll_offset=1 → button_y = inner_y(2) + q_height(1) - scroll_offset(1) = 2
+        // Ustawiamy bezpośrednio — scroll_down klampuje do full_height - max_height,
+        // więc przy małej treści i dużym obszarze nie scrolluje.
+        widget.scroll_offset = 1;
+
+        // Klik na starą pozycję (row=3) → teraz poza przyciskami (przyciski są w row=2)
+        let result_old = widget.handle_mouse(make_left_click(3, 3), area);
+        assert_eq!(
+            result_old,
+            AskUserAction::Continue,
+            "Klik na starą pozycję po scrollu powinien być ignorowany"
+        );
+
+        // Klik na nową pozycję (row=2) → przyciski na ekranie
+        let result_new = widget.handle_mouse(make_left_click(3, 2), area);
+        assert_eq!(
+            result_new,
+            AskUserAction::Submit("yes".into()),
+            "Klik na nową pozycję po scrollu powinien trafić w Yes"
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_confirm_scrolled_out_of_view_ignored() {
+        let mut widget = AskUserWidget::new(confirm_question());
+        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+
+        // scroll_offset >= q_height+1 → button_y < inner_y → poza widocznym obszarem
+        // inner_y=2, q_height=1 → button_y = 2 + 1 - 2 = 1 < inner_y=2 → ignoruj
+        widget.scroll_offset = 2;
+
+        let result = widget.handle_mouse(make_left_click(3, 1), area);
+        assert_eq!(
+            result,
+            AskUserAction::Continue,
+            "Klik na obszar gdzie przyciski są poza content area powinien być ignorowany"
+        );
     }
 }

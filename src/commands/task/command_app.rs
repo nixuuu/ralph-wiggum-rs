@@ -244,6 +244,8 @@ pub struct TaskCommandApp {
     last_known_width: u16,
     /// Liczba linii przewijana przy zdarzeniu scroll myszy (z TuiConfig)
     scroll_step: usize,
+    /// Ostatni znany rect ask_user widget (obliczony przy draw, używany do hit-testów myszy)
+    last_known_ask_user_rect: Rect,
 }
 
 impl TaskCommandApp {
@@ -259,6 +261,7 @@ impl TaskCommandApp {
             ask_user_viewport_height: 0,
             last_known_width: 80,
             scroll_step: 3,
+            last_known_ask_user_rect: Rect::default(),
         }
     }
 
@@ -462,6 +465,8 @@ impl AppState for TaskCommandApp {
         }
 
         // ── Ask user widget (if active, rendered via AskUserWidget::render) ──
+        // Zapisujemy rect do użycia w handle_event() (hit-testy myszy)
+        self.last_known_ask_user_rect = chunks[2];
         if let Some(ref widget) = self.active_widget {
             let widget_clone = widget.clone();
             widget_clone.render(chunks[2], frame.buffer_mut());
@@ -478,10 +483,29 @@ impl AppState for TaskCommandApp {
         event: AppEvent,
         _resolver: &crate::tui::KeybindingResolver,
     ) -> EventResult {
-        // Obsługa scroll myszki — priorytet przed key handling
+        // Obsługa zdarzeń myszy — priorytet przed key handling
         if let AppEvent::Mouse(mouse) = event {
-            use crossterm::event::MouseEventKind;
+            use crossterm::event::{MouseButton, MouseEventKind};
             match mouse.kind {
+                // Lewy klik — obsługa przycisków ask_user (Yes/No w Confirm)
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(widget) = self.active_widget.as_mut() {
+                        let area = self.last_known_ask_user_rect;
+                        let action = widget.handle_mouse(mouse, area);
+                        return match action {
+                            AskUserAction::Submit(answer) => {
+                                self.advance_question(answer);
+                                EventResult::Consumed
+                            }
+                            AskUserAction::Cancel => {
+                                self.cancel_ask_user();
+                                EventResult::Consumed
+                            }
+                            AskUserAction::Continue => EventResult::Consumed,
+                        };
+                    }
+                    return EventResult::Ignored;
+                }
                 MouseEventKind::ScrollUp => {
                     if self.active_widget.is_some() {
                         if let Some(w) = self.active_widget.as_mut() {

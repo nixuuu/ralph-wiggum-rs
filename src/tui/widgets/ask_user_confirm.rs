@@ -3,15 +3,17 @@
 /// Renderuje pytanie (markdown) + przyciski [Yes] [No].
 /// Obsługa klawiszy (y→Yes, n→No, ←→ Tab→toggle, Enter→submit)
 /// jest w warstwie integracyjnej, nie w tym widgecie.
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Widget,
 };
 
 use crate::shared::markdown::render_markdown;
+use crate::tui::widgets::text_input_overlay::InputAction;
 
 /// Stan confirm widget
 #[derive(Debug, Clone)]
@@ -55,6 +57,34 @@ impl ConfirmState {
     pub fn value(&self) -> &'static str {
         if self.selected { "yes" } else { "no" }
     }
+
+    /// Obsługuje kliknięcie myszą na przyciski [Yes] / [No].
+    ///
+    /// `area` — wiersz z przyciskami (pierwszy wiersz content area, bez pytania).
+    ///
+    /// Aktualizuje stan `selected` i zwraca:
+    /// - `Some(InputAction::Send("yes"))` — klik na [Yes]
+    /// - `Some(InputAction::Send("no"))` — klik na [No]
+    /// - `None` — klik poza przyciskami (ignorowany)
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> Option<InputAction> {
+        // Obsługujemy tylko lewy przycisk myszy (klik w dół)
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return None;
+        }
+
+        let pos = Position::new(mouse.column, mouse.row);
+        let (yes_rect, no_rect) = ConfirmWidget::button_rects(area);
+
+        if yes_rect.contains(pos) {
+            self.selected = true;
+            Some(InputAction::Send("yes".to_string()))
+        } else if no_rect.contains(pos) {
+            self.selected = false;
+            Some(InputAction::Send("no".to_string()))
+        } else {
+            None
+        }
+    }
 }
 
 /// Widget confirm — renderuje pytanie (markdown) + przyciski [Yes] [No].
@@ -73,6 +103,28 @@ impl<'a> ConfirmWidget<'a> {
     /// Tworzy nowy widget
     pub fn new(question: &'a str, state: &'a ConfirmState) -> Self {
         Self { question, state }
+    }
+
+    /// Oblicza recty przycisków [Yes] i [No] względem podanego obszaru.
+    ///
+    /// `area` — wiersz z przyciskami (pierwszy wiersz content area, po pytaniu).
+    /// Layout: `[Yes]` (5 znaków) + `  ` (2 znaki) + `[No]` (4 znaki).
+    ///
+    /// Returns `(yes_rect, no_rect)`.
+    pub fn button_rects(area: Rect) -> (Rect, Rect) {
+        let yes_rect = Rect {
+            x: area.x,
+            y: area.y,
+            width: 5, // "[Yes]"
+            height: 1,
+        };
+        let no_rect = Rect {
+            x: area.x.saturating_add(7), // "[Yes]" (5) + "  " (2)
+            y: area.y,
+            width: 4, // "[No]"
+            height: 1,
+        };
+        (yes_rect, no_rect)
     }
 }
 
@@ -341,5 +393,242 @@ mod tests {
         let output = snap(&buffer);
         // Przyciski nie powinny się zmieścić
         assert!(!output.contains("[Yes]"));
+    }
+
+    // ── Testy button_rects ──
+
+    #[test]
+    fn test_button_rects_positions() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+        let (yes_rect, no_rect) = ConfirmWidget::button_rects(area);
+
+        // Yes: x=0, width=5 ("[Yes]")
+        assert_eq!(yes_rect.x, 0);
+        assert_eq!(yes_rect.y, 0);
+        assert_eq!(yes_rect.width, 5);
+        assert_eq!(yes_rect.height, 1);
+
+        // No: x=7 (5+"  "), width=4 ("[No]")
+        assert_eq!(no_rect.x, 7);
+        assert_eq!(no_rect.y, 0);
+        assert_eq!(no_rect.width, 4);
+        assert_eq!(no_rect.height, 1);
+    }
+
+    #[test]
+    fn test_button_rects_with_offset() {
+        // Area z offsetem (np. wewnątrz AskUserWidget)
+        let area = Rect {
+            x: 10,
+            y: 5,
+            width: 60,
+            height: 1,
+        };
+        let (yes_rect, no_rect) = ConfirmWidget::button_rects(area);
+
+        assert_eq!(yes_rect.x, 10);
+        assert_eq!(yes_rect.y, 5);
+
+        assert_eq!(no_rect.x, 17); // 10 + 7
+        assert_eq!(no_rect.y, 5);
+    }
+
+    // ── Testy handle_mouse ──
+
+    fn make_left_click(col: u16, row: u16) -> MouseEvent {
+        use crossterm::event::KeyModifiers;
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn make_right_click(col: u16, row: u16) -> MouseEvent {
+        use crossterm::event::KeyModifiers;
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn test_handle_mouse_click_yes() {
+        let mut state = ConfirmState::new(false); // domyślnie No
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+
+        // Klik na "[Yes]" (x=0..4)
+        let result = state.handle_mouse(make_left_click(2, 0), area);
+        assert_eq!(result, Some(InputAction::Send("yes".to_string())));
+        assert!(
+            state.selected,
+            "state.selected powinno być true po kliknięciu Yes"
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_click_no() {
+        let mut state = ConfirmState::new(true); // domyślnie Yes
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+
+        // Klik na "[No]" (x=7..10)
+        let result = state.handle_mouse(make_left_click(8, 0), area);
+        assert_eq!(result, Some(InputAction::Send("no".to_string())));
+        assert!(
+            !state.selected,
+            "state.selected powinno być false po kliknięciu No"
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_click_outside() {
+        let mut state = ConfirmState::new(true);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+
+        // Klik poza przyciskami (x=20)
+        let result = state.handle_mouse(make_left_click(20, 0), area);
+        assert_eq!(
+            result, None,
+            "Klik poza przyciskami powinien być ignorowany"
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_click_between_buttons() {
+        let mut state = ConfirmState::new(true);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+
+        // Klik w odstępie między przyciskami (x=5 lub x=6, "  ")
+        let result5 = state.handle_mouse(make_left_click(5, 0), area);
+        let result6 = state.handle_mouse(make_left_click(6, 0), area);
+        assert_eq!(result5, None);
+        assert_eq!(result6, None);
+    }
+
+    #[test]
+    fn test_handle_mouse_wrong_row() {
+        let mut state = ConfirmState::new(true);
+        let area = Rect {
+            x: 0,
+            y: 5,
+            width: 80,
+            height: 1,
+        };
+
+        // Klik w złym wierszu (row=0, ale area.y=5)
+        let result = state.handle_mouse(make_left_click(2, 0), area);
+        assert_eq!(result, None, "Klik w złym wierszu powinien być ignorowany");
+    }
+
+    #[test]
+    fn test_handle_mouse_right_click_ignored() {
+        let mut state = ConfirmState::new(false);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+
+        // Prawy klik nie powinien być obsługiwany
+        let result = state.handle_mouse(make_right_click(2, 0), area);
+        assert_eq!(result, None, "Prawy klik powinien być ignorowany");
+        assert!(
+            !state.selected,
+            "Stan nie powinien się zmienić przy prawym kliku"
+        );
+    }
+
+    #[test]
+    fn test_handle_mouse_click_yes_boundary() {
+        let mut state = ConfirmState::new(false);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+
+        // Klik na ostatnim znaku "[Yes]" (x=4)
+        let result = state.handle_mouse(make_left_click(4, 0), area);
+        assert_eq!(result, Some(InputAction::Send("yes".to_string())));
+
+        // Klik poza "[Yes]" (x=5, to już odstęp)
+        let result_out = state.handle_mouse(make_left_click(5, 0), area);
+        assert_eq!(result_out, None);
+    }
+
+    #[test]
+    fn test_handle_mouse_click_no_boundary() {
+        let mut state = ConfirmState::new(true);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+
+        // Klik na pierwszym znaku "[No]" (x=7)
+        let result_start = state.handle_mouse(make_left_click(7, 0), area);
+        assert_eq!(result_start, Some(InputAction::Send("no".to_string())));
+
+        // Reset
+        state.selected = true;
+
+        // Klik na ostatnim znaku "[No]" (x=10)
+        let result_end = state.handle_mouse(make_left_click(10, 0), area);
+        assert_eq!(result_end, Some(InputAction::Send("no".to_string())));
+    }
+
+    #[test]
+    fn test_handle_mouse_with_area_offset() {
+        let mut state = ConfirmState::new(false);
+        // Area z offsetem — przyciski zaczynają się od x=10
+        let area = Rect {
+            x: 10,
+            y: 3,
+            width: 60,
+            height: 1,
+        };
+
+        // Klik na Yes (x=10+2=12, row=3)
+        let result = state.handle_mouse(make_left_click(12, 3), area);
+        assert_eq!(result, Some(InputAction::Send("yes".to_string())));
+
+        // Klik na No (x=10+7=17, row=3)
+        let result_no = state.handle_mouse(make_left_click(17, 3), area);
+        assert_eq!(result_no, Some(InputAction::Send("no".to_string())));
+
+        // Klik przed area (x=5, row=3) → poza przyciskami
+        let result_out = state.handle_mouse(make_left_click(5, 3), area);
+        assert_eq!(result_out, None);
     }
 }
