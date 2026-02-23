@@ -963,6 +963,7 @@ mod tests {
         };
 
         let file_config = FileConfig {
+            includes: vec![],
             prompt: PromptConfig {
                 prefix: Some("PREFIX TEXT".to_string()),
                 suffix: Some("SUFFIX TEXT".to_string()),
@@ -1028,6 +1029,7 @@ mod tests {
         };
 
         let file_config = FileConfig {
+            includes: vec![],
             prompt: PromptConfig {
                 prefix: Some("   ".to_string()),    // Only whitespace
                 suffix: Some("".to_string()),       // Empty string
@@ -1083,6 +1085,7 @@ mod tests {
         };
 
         let file_config = FileConfig {
+            includes: vec![],
             prompt: PromptConfig {
                 prefix: None,
                 suffix: None,

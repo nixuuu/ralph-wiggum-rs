@@ -21,40 +21,84 @@ fn create_skin() -> MadSkin {
     let mut skin = MadSkin::default();
 
     // Headers — Catppuccin hierarchy: Lavender → Blue → Mauve
-    skin.headers[0].set_fg(Color::Rgb { r: 180, g: 190, b: 254 }); // Lavender #b4befe
+    skin.headers[0].set_fg(Color::Rgb {
+        r: 180,
+        g: 190,
+        b: 254,
+    }); // Lavender #b4befe
     skin.headers[0].add_attr(termimad::crossterm::style::Attribute::Bold);
-    skin.headers[1].set_fg(Color::Rgb { r: 137, g: 180, b: 250 }); // Blue #89b4fa
+    skin.headers[1].set_fg(Color::Rgb {
+        r: 137,
+        g: 180,
+        b: 250,
+    }); // Blue #89b4fa
     skin.headers[1].add_attr(termimad::crossterm::style::Attribute::Bold);
-    skin.headers[2].set_fg(Color::Rgb { r: 203, g: 166, b: 247 }); // Mauve #cba6f7
+    skin.headers[2].set_fg(Color::Rgb {
+        r: 203,
+        g: 166,
+        b: 247,
+    }); // Mauve #cba6f7
     skin.headers[2].add_attr(termimad::crossterm::style::Attribute::Bold);
 
     // Bold text — Text #cdd6f4
-    skin.bold.set_fg(Color::Rgb { r: 205, g: 214, b: 244 });
+    skin.bold.set_fg(Color::Rgb {
+        r: 205,
+        g: 214,
+        b: 244,
+    });
     skin.bold
         .add_attr(termimad::crossterm::style::Attribute::Bold);
 
     // Italic — Subtext0 #a6adc8
-    skin.italic.set_fg(Color::Rgb { r: 166, g: 173, b: 200 });
+    skin.italic.set_fg(Color::Rgb {
+        r: 166,
+        g: 173,
+        b: 200,
+    });
     skin.italic
         .add_attr(termimad::crossterm::style::Attribute::Italic);
 
     // Inline code — Yellow #f9e2af
-    skin.inline_code.set_fg(Color::Rgb { r: 249, g: 226, b: 175 });
+    skin.inline_code.set_fg(Color::Rgb {
+        r: 249,
+        g: 226,
+        b: 175,
+    });
 
     // Code blocks — Green #a6e3a1
-    skin.code_block.set_fg(Color::Rgb { r: 166, g: 227, b: 161 });
+    skin.code_block.set_fg(Color::Rgb {
+        r: 166,
+        g: 227,
+        b: 161,
+    });
 
     // Quote blocks — Overlay0 #6c7086
-    skin.quote_mark.set_fg(Color::Rgb { r: 108, g: 112, b: 134 });
+    skin.quote_mark.set_fg(Color::Rgb {
+        r: 108,
+        g: 112,
+        b: 134,
+    });
 
     // Bullet points — Sky #89dceb
-    skin.bullet.set_fg(Color::Rgb { r: 137, g: 220, b: 235 });
+    skin.bullet.set_fg(Color::Rgb {
+        r: 137,
+        g: 220,
+        b: 235,
+    });
 
     // Horizontal rule — Surface1 #45475a
-    skin.horizontal_rule.set_fg(Color::Rgb { r: 69, g: 71, b: 90 });
+    skin.horizontal_rule.set_fg(Color::Rgb {
+        r: 69,
+        g: 71,
+        b: 90,
+    });
 
     // Table borders — Overlay0 #6c7086
-    skin.table.set_fg(Color::Rgb { r: 108, g: 112, b: 134 });
+    skin.table.set_fg(Color::Rgb {
+        r: 108,
+        g: 112,
+        b: 134,
+    });
 
     // Paragraph — reset to default
     skin.paragraph.set_fg(Color::Reset);
@@ -100,8 +144,6 @@ mod tests {
         let result = render_markdown("Hello world");
         assert!(!result.is_empty());
     }
-
-
 
     #[test]
     fn test_render_code_block() {

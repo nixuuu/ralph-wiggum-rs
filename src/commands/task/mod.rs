@@ -28,13 +28,34 @@ pub async fn execute(command: TaskCommands, file_config: &FileConfig) -> Result<
         TaskCommands::Prd(args) => prd::execute(args, file_config).await,
         TaskCommands::Continue => continue_cmd::execute(file_config).await,
         TaskCommands::Add(args) => {
-            execute_task_command(TaskCommandMode::Add, args.file, args.prompt, args.model, file_config).await
+            execute_task_command(
+                TaskCommandMode::Add,
+                args.file,
+                args.prompt,
+                args.model,
+                file_config,
+            )
+            .await
         }
         TaskCommands::Edit(args) => {
-            execute_task_command(TaskCommandMode::Edit, args.file, args.prompt, args.model, file_config).await
+            execute_task_command(
+                TaskCommandMode::Edit,
+                args.file,
+                args.prompt,
+                args.model,
+                file_config,
+            )
+            .await
         }
         TaskCommands::Plan(args) => {
-            execute_task_command(TaskCommandMode::Plan, args.file, args.prompt, args.model, file_config).await
+            execute_task_command(
+                TaskCommandMode::Plan,
+                args.file,
+                args.prompt,
+                args.model,
+                file_config,
+            )
+            .await
         }
         TaskCommands::Status => status::execute(file_config),
         TaskCommands::Orchestrate(args) => {

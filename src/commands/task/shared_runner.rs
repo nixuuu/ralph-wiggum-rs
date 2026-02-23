@@ -148,8 +148,7 @@ fn build_prompt(
 ) -> String {
     match mode {
         TaskCommandMode::Add => {
-            let profiles_section =
-                build_profiles_section(&file_config.task.orchestrate.profiles);
+            let profiles_section = build_profiles_section(&file_config.task.orchestrate.profiles);
             templates::ADD_PROMPT_YAML
                 .replace("{requirements}", input)
                 .replace("{profiles_section}", &profiles_section)

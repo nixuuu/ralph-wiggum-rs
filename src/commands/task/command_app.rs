@@ -21,10 +21,10 @@ use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarStat
 use tokio::sync::oneshot;
 
 use crate::commands::mcp::ask_user::{Answer, Question, QuestionType};
-use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::app::AppState;
 use crate::tui::events::{AppEvent, EventResult};
 use crate::tui::ring_buffer::OutputRingBuffer;
+use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::ask_user::{AskUserAction, AskUserQuestion, AskUserWidget, QuestionKind};
 use crate::tui::widgets::ask_user_choice::QuestionOption as TuiQuestionOption;
 use crate::tui::widgets::{OutputView, OutputViewState};
@@ -422,13 +422,14 @@ impl AppState for TaskCommandApp {
             width: chunks[1].width.saturating_sub(1),
             ..chunks[1]
         };
-        let output_view = OutputView::new(&self.ring_buffer)
-            .dimmed(self.active_widget.is_some());
+        let output_view = OutputView::new(&self.ring_buffer).dimmed(self.active_widget.is_some());
         frame.render_stateful_widget(output_view, output_content_area, &mut self.output_state);
 
         // ── Output scrollbar (VerticalRight, widoczny tylko gdy content > viewport) ──
         {
-            let total_visual = self.ring_buffer.total_visual_rows(output_content_area.width);
+            let total_visual = self
+                .ring_buffer
+                .total_visual_rows(output_content_area.width);
             let viewport_h = output_content_area.height as usize;
             if total_visual > viewport_h {
                 let max_scroll = total_visual.saturating_sub(viewport_h);

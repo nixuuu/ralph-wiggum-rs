@@ -3,6 +3,85 @@ use std::path::{Path, PathBuf};
 
 use crate::shared::error::{RalphError, Result};
 
+// ── Merge helpers ──────────────────────────────────────────────────────
+// Semantyka: overlay nadpisuje base tylko gdy wartość jest inna niż default.
+
+/// Scalar: użyj overlay jeśli różni się od default, inaczej base.
+fn merge_scalar<T: PartialEq>(base: T, overlay: T, default: T) -> T {
+    if overlay != default { overlay } else { base }
+}
+
+/// Option: overlay Some > base Some > None.
+fn merge_option<T>(base: Option<T>, overlay: Option<T>) -> Option<T> {
+    overlay.or(base)
+}
+
+/// Vec: overlay zastępuje base w całości jeśli niepusty.
+fn merge_vec<T>(base: Vec<T>, overlay: Vec<T>) -> Vec<T> {
+    if overlay.is_empty() { base } else { overlay }
+}
+
+// ── Includes support ────────────────────────────────────────────────────────
+
+/// Wyciąga listę includes z sparsowanej wartości TOML.
+fn extract_includes(value: &toml::Value) -> Vec<String> {
+    value
+        .get("includes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Sprawdza czy wartość TOML zawiera niepuste pole `includes`.
+fn has_includes(value: &toml::Value) -> bool {
+    value
+        .get("includes")
+        .and_then(|v| v.as_array())
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false)
+}
+
+/// Rozwiązuje ścieżkę do pliku include względem katalogu bazowego.
+/// Ścieżki bezwzględne są zwracane bez zmian.
+fn resolve_include_path(config_dir: &Path, include_name: &str) -> PathBuf {
+    let p = Path::new(include_name);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        config_dir.join(p)
+    }
+}
+
+/// Scala wartość `override_val` w `base` (last wins).
+///
+/// Dla tablic TOML: klucze z override są rekurencyjnie mergowane do base.
+/// Dla pozostałych typów: override_val zastępuje base.
+fn merge_toml(base: &mut toml::Value, override_val: toml::Value) {
+    match override_val {
+        toml::Value::Table(override_map) => {
+            if let toml::Value::Table(base_map) = base {
+                for (key, val) in override_map {
+                    if let Some(base_val) = base_map.get_mut(&key) {
+                        merge_toml(base_val, val);
+                    } else {
+                        base_map.insert(key, val);
+                    }
+                }
+            } else {
+                // base nie jest tabelą — zastąp całkowicie
+                *base = toml::Value::Table(override_map);
+            }
+        }
+        other => {
+            *base = other;
+        }
+    }
+}
+
 /// A setup command to run after creating a worktree.
 ///
 /// Can be a simple string or an object with `run` and optional `name`.
@@ -89,6 +168,12 @@ impl VerifyCommand {
 /// Configuration loaded from .ralph.toml file
 #[derive(Debug, Default, Deserialize)]
 pub struct FileConfig {
+    /// Lista plików konfiguracyjnych do zainkludowania.
+    /// Ścieżki relatywne są rozwiązywane względem katalogu zawierającego config.toml.
+    /// Pliki są mergowane w kolejności (last wins). Max depth = 1 (bez rekursji).
+    #[serde(default)]
+    #[allow(dead_code)] // Odczytywane przez load_from_path via TOML value, nie przez Rust code
+    pub includes: Vec<String>,
     #[serde(default)]
     pub prompt: PromptConfig,
     #[serde(default)]
@@ -113,6 +198,15 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self { nerd_font: true }
+    }
+}
+
+impl UiConfig {
+    fn merge(base: Self, overlay: Self) -> Self {
+        let d = Self::default();
+        Self {
+            nerd_font: merge_scalar(base.nerd_font, overlay.nerd_font, d.nerd_font),
+        }
     }
 }
 
@@ -142,6 +236,26 @@ impl Default for TuiConfig {
             sidebar_width: default_sidebar_width(),
             sidebar_visible: default_true(),
             theme: default_theme(),
+        }
+    }
+}
+
+impl TuiConfig {
+    fn merge(base: Self, overlay: Self) -> Self {
+        let d = Self::default();
+        Self {
+            output_buffer_size: merge_scalar(
+                base.output_buffer_size,
+                overlay.output_buffer_size,
+                d.output_buffer_size,
+            ),
+            sidebar_width: merge_scalar(base.sidebar_width, overlay.sidebar_width, d.sidebar_width),
+            sidebar_visible: merge_scalar(
+                base.sidebar_visible,
+                overlay.sidebar_visible,
+                d.sidebar_visible,
+            ),
+            theme: merge_scalar(base.theme, overlay.theme, d.theme),
         }
     }
 }
@@ -179,6 +293,16 @@ pub struct PromptConfig {
     pub system: Option<String>,
 }
 
+impl PromptConfig {
+    fn merge(base: Self, overlay: Self) -> Self {
+        Self {
+            prefix: merge_option(base.prefix, overlay.prefix),
+            suffix: merge_option(base.suffix, overlay.suffix),
+            system: merge_option(base.system, overlay.system),
+        }
+    }
+}
+
 /// Logging configuration for diagnostic logs
 #[derive(Debug, Deserialize)]
 pub struct LoggingConfig {
@@ -195,6 +319,16 @@ impl Default for LoggingConfig {
         Self {
             log_dir: default_log_dir(),
             max_log_files: default_max_log_files(),
+        }
+    }
+}
+
+impl LoggingConfig {
+    fn merge(base: Self, overlay: Self) -> Self {
+        let d = Self::default();
+        Self {
+            log_dir: merge_scalar(base.log_dir, overlay.log_dir, d.log_dir),
+            max_log_files: merge_scalar(base.max_log_files, overlay.max_log_files, d.max_log_files),
         }
     }
 }
@@ -223,6 +357,19 @@ impl Default for TaskConfig {
             output_dir: None,
             default_model: None,
             orchestrate: OrchestrateConfig::default(),
+        }
+    }
+}
+
+impl TaskConfig {
+    fn merge(base: Self, overlay: Self) -> Self {
+        let d = Self::default();
+        Self {
+            progress_file: merge_scalar(base.progress_file, overlay.progress_file, d.progress_file),
+            tasks_file: merge_scalar(base.tasks_file, overlay.tasks_file, d.tasks_file),
+            output_dir: merge_option(base.output_dir, overlay.output_dir),
+            default_model: merge_option(base.default_model, overlay.default_model),
+            orchestrate: OrchestrateConfig::merge(base.orchestrate, overlay.orchestrate),
         }
     }
 }
@@ -328,6 +475,51 @@ impl Default for OrchestrateConfig {
     }
 }
 
+impl OrchestrateConfig {
+    fn merge(base: Self, overlay: Self) -> Self {
+        let d = Self::default();
+        Self {
+            workers: merge_scalar(base.workers, overlay.workers, d.workers),
+            max_retries: merge_scalar(base.max_retries, overlay.max_retries, d.max_retries),
+            worktree_prefix: merge_option(base.worktree_prefix, overlay.worktree_prefix),
+            default_model: merge_option(base.default_model, overlay.default_model),
+            verify_commands: merge_vec(base.verify_commands, overlay.verify_commands),
+            setup_commands: merge_vec(base.setup_commands, overlay.setup_commands),
+            conflict_resolution_model: merge_option(
+                base.conflict_resolution_model,
+                overlay.conflict_resolution_model,
+            ),
+            watchdog_interval_secs: merge_scalar(
+                base.watchdog_interval_secs,
+                overlay.watchdog_interval_secs,
+                d.watchdog_interval_secs,
+            ),
+            phase_timeout_minutes: merge_scalar(
+                base.phase_timeout_minutes,
+                overlay.phase_timeout_minutes,
+                d.phase_timeout_minutes,
+            ),
+            git_timeout_secs: merge_scalar(
+                base.git_timeout_secs,
+                overlay.git_timeout_secs,
+                d.git_timeout_secs,
+            ),
+            setup_timeout_secs: merge_scalar(
+                base.setup_timeout_secs,
+                overlay.setup_timeout_secs,
+                d.setup_timeout_secs,
+            ),
+            merge_timeout_minutes: merge_scalar(
+                base.merge_timeout_minutes,
+                overlay.merge_timeout_minutes,
+                d.merge_timeout_minutes,
+            ),
+            review_model: merge_option(base.review_model, overlay.review_model),
+            profiles: merge_vec(base.profiles, overlay.profiles),
+        }
+    }
+}
+
 fn default_workers() -> u32 {
     2
 }
@@ -373,8 +565,14 @@ fn default_max_log_files() -> u32 {
 }
 
 impl FileConfig {
-    /// Load configuration from a specific path
-    /// Returns default config if file doesn't exist
+    /// Load configuration from a specific path.
+    /// Returns default config if file doesn't exist.
+    ///
+    /// Obsługuje pole `includes`: lista plików TOML do zainkludowania.
+    /// - Ścieżki relatywne rozwiązywane względem katalogu `path`.
+    /// - Mergowanie: base → include1 → include2 → ... (last wins).
+    /// - Max depth = 1: includes w include files są ignorowane (z ostrzeżeniem).
+    /// - Brakujący plik include → ostrzeżenie na stderr, nie błąd.
     pub fn load_from_path(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -383,8 +581,103 @@ impl FileConfig {
         let content = std::fs::read_to_string(path)
             .map_err(|e| RalphError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
-        toml::from_str(&content)
-            .map_err(|e| RalphError::Config(format!("Failed to parse {}: {}", path.display(), e)))
+        let mut base_value: toml::Value = toml::from_str(&content).map_err(|e| {
+            RalphError::Config(format!("Failed to parse {}: {}", path.display(), e))
+        })?;
+
+        // Wyciągnij listę includes zanim przystąpimy do mergowania
+        let includes = extract_includes(&base_value);
+
+        if !includes.is_empty() {
+            let config_dir = path.parent().unwrap_or(Path::new("."));
+            Self::apply_includes(&mut base_value, config_dir, &includes);
+        }
+
+        // Serializuj z powrotem do TOML string i parsuj do FileConfig
+        // (round-trip gwarantuje poprawną deserializację po merge)
+        let merged_str = toml::to_string(&base_value)
+            .map_err(|e| RalphError::Config(format!("Failed to serialize merged config: {}", e)))?;
+
+        toml::from_str(&merged_str).map_err(|e| {
+            RalphError::Config(format!(
+                "Failed to parse merged config for {}: {}",
+                path.display(),
+                e
+            ))
+        })
+    }
+
+    /// Aplikuje include files do base wartości TOML (depth = 1).
+    fn apply_includes(base: &mut toml::Value, config_dir: &Path, includes: &[String]) {
+        for include_name in includes {
+            let include_path = resolve_include_path(config_dir, include_name);
+
+            if !include_path.exists() {
+                eprintln!(
+                    "[ralph] Warning: include file not found: {}",
+                    include_path.display()
+                );
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&include_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "[ralph] Warning: failed to read include {}: {}",
+                        include_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            let mut include_value: toml::Value = match toml::from_str(&content) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "[ralph] Warning: failed to parse include {}: {}",
+                        include_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            // Ostrzeżenie o przekroczeniu max depth = 1
+            if has_includes(&include_value) {
+                eprintln!(
+                    "[ralph] Warning: includes in {} are ignored (max depth = 1)",
+                    include_path.display()
+                );
+            }
+
+            // Usuń klucz `includes` z include_value przed merge,
+            // żeby nie nadpisać oryginalnej listy includes z base config
+            if let toml::Value::Table(ref mut map) = include_value {
+                map.remove("includes");
+            }
+
+            // Merge: include wygrywa nad base
+            merge_toml(base, include_value);
+        }
+    }
+
+    /// Merge dwóch warstw konfiguracji: overlay nadpisuje base (non-default only).
+    ///
+    /// Semantyka:
+    /// - Scalar fields: overlay zastępuje base jeśli overlay ≠ default
+    /// - Option fields: overlay Some > base Some > None
+    /// - Vec fields: overlay zastępuje base w całości jeśli niepusty
+    pub fn merge(base: Self, overlay: Self) -> Self {
+        Self {
+            includes: merge_vec(base.includes, overlay.includes),
+            prompt: PromptConfig::merge(base.prompt, overlay.prompt),
+            ui: UiConfig::merge(base.ui, overlay.ui),
+            tui: TuiConfig::merge(base.tui, overlay.tui),
+            task: TaskConfig::merge(base.task, overlay.task),
+            logging: LoggingConfig::merge(base.logging, overlay.logging),
+        }
     }
 
     /// Apply prefix and suffix to user prompt
@@ -405,6 +698,33 @@ impl FileConfig {
 
         result
     }
+}
+
+/// Ładuje konfigurację z trzech warstw: defaults → global → local.
+///
+/// Kolejność merge:
+/// 1. `FileConfig::default()` — wartości domyślne
+/// 2. Global config (`~/.config/ralph/config.toml`) — nadpisuje defaults
+/// 3. Local config (`local_path`, zwykle `.ralph.toml`) — nadpisuje global
+///
+/// Brakujący plik (global lub local) nie powoduje błędu — używane są wartości
+/// z niższej warstwy. Błąd zwracany jest tylko gdy plik istnieje ale ma
+/// niepoprawny format TOML.
+pub fn load_merged_config(local_path: &Path) -> Result<FileConfig> {
+    let defaults = FileConfig::default();
+
+    let global = match crate::shared::global_config::load_global_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            crate::diag_warn!("Global config error (using defaults): {}", e);
+            FileConfig::default()
+        }
+    };
+    let local = FileConfig::load_from_path(local_path)?;
+
+    // defaults → global → local
+    let merged = FileConfig::merge(defaults, global);
+    Ok(FileConfig::merge(merged, local))
 }
 
 /// Formats a list of verification profiles into a human-readable string.
@@ -2493,5 +2813,637 @@ nerd_font = false
         assert_eq!(config.tui.output_buffer_size, 7500);
         assert_eq!(config.tui.theme, "solarized");
         assert!(!config.ui.nerd_font);
+    }
+
+    // ── Task 10.2: Cascading config merge tests ─────────────────────────
+
+    #[test]
+    fn test_merge_overlay_overrides_base_option_fields() {
+        let base = FileConfig {
+            prompt: PromptConfig {
+                prefix: Some("base-prefix".into()),
+                suffix: None,
+                system: Some("base-system".into()),
+            },
+            ..Default::default()
+        };
+        let overlay = FileConfig {
+            prompt: PromptConfig {
+                prefix: Some("overlay-prefix".into()),
+                suffix: Some("overlay-suffix".into()),
+                system: None,
+            },
+            ..Default::default()
+        };
+
+        let merged = FileConfig::merge(base, overlay);
+        // overlay Some nadpisuje base Some
+        assert_eq!(merged.prompt.prefix.as_deref(), Some("overlay-prefix"));
+        // overlay Some nadpisuje base None
+        assert_eq!(merged.prompt.suffix.as_deref(), Some("overlay-suffix"));
+        // overlay None → base Some zachowane
+        assert_eq!(merged.prompt.system.as_deref(), Some("base-system"));
+    }
+
+    #[test]
+    fn test_merge_overlay_overrides_base_scalar_fields() {
+        let base: FileConfig = toml::from_str(
+            r#"
+[task.orchestrate]
+workers = 8
+max_retries = 5
+phase_timeout_minutes = 60
+"#,
+        )
+        .unwrap();
+
+        let overlay: FileConfig = toml::from_str(
+            r#"
+[task.orchestrate]
+workers = 4
+"#,
+        )
+        .unwrap();
+
+        let merged = FileConfig::merge(base, overlay);
+        // overlay workers=4 (non-default) nadpisuje base workers=8
+        assert_eq!(merged.task.orchestrate.workers, 4);
+        // overlay max_retries=3 (default) → base max_retries=5 zachowane
+        assert_eq!(merged.task.orchestrate.max_retries, 5);
+        // overlay phase_timeout_minutes=30 (default) → base 60 zachowane
+        assert_eq!(merged.task.orchestrate.phase_timeout_minutes, 60);
+    }
+
+    #[test]
+    fn test_merge_vec_fields_replace_entirely() {
+        let base = FileConfig {
+            task: TaskConfig {
+                orchestrate: OrchestrateConfig {
+                    verify_commands: vec![
+                        VerifyCommand::Simple("cargo test".into()),
+                        VerifyCommand::Simple("cargo clippy".into()),
+                    ],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let overlay = FileConfig {
+            task: TaskConfig {
+                orchestrate: OrchestrateConfig {
+                    verify_commands: vec![VerifyCommand::Simple("npm test".into())],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = FileConfig::merge(base, overlay);
+        // Overlay Vec niepusty → zastępuje base w całości (nie appenduje)
+        assert_eq!(merged.task.orchestrate.verify_commands.len(), 1);
+        assert_eq!(
+            merged.task.orchestrate.verify_commands[0].command(),
+            "npm test"
+        );
+    }
+
+    // ── Task 10.3: Includes support tests ───────────────────────────────────
+
+    /// Helper: tworzy tymczasowy katalog z plikami TOML dla testów includes.
+    fn write_temp_toml(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_includes_field_parses_as_empty_by_default() {
+        // Plik bez `includes` — pole domyślnie puste
+        let config: FileConfig = toml::from_str("").unwrap();
+        assert!(config.includes.is_empty());
+    }
+
+    #[test]
+    fn test_includes_field_parses_vec_of_strings() {
+        // `includes` parsuje się jako Vec<String>
+        let toml_content = r#"
+includes = ["keybindings.toml", "notifications.toml"]
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            config.includes,
+            vec!["keybindings.toml", "notifications.toml"]
+        );
+    }
+
+    #[test]
+    fn test_merge_empty_vec_overlay_keeps_base() {
+        let base = FileConfig {
+            task: TaskConfig {
+                orchestrate: OrchestrateConfig {
+                    verify_commands: vec![VerifyCommand::Simple("cargo test".into())],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // overlay z pustym Vec — zachowaj base
+        let overlay = FileConfig::default();
+
+        let merged = FileConfig::merge(base, overlay);
+        assert_eq!(merged.task.orchestrate.verify_commands.len(), 1);
+        assert_eq!(
+            merged.task.orchestrate.verify_commands[0].command(),
+            "cargo test"
+        );
+    }
+
+    #[test]
+    fn test_merge_defaults_into_defaults_is_default() {
+        let base = FileConfig::default();
+        let overlay = FileConfig::default();
+        let merged = FileConfig::merge(base, overlay);
+
+        // Merge dwóch defaults → wynik jest identyczny z default
+        assert!(merged.prompt.prefix.is_none());
+        assert!(merged.prompt.suffix.is_none());
+        assert!(merged.ui.nerd_font);
+        assert_eq!(merged.task.orchestrate.workers, 2);
+        assert_eq!(merged.task.orchestrate.max_retries, 3);
+        assert!(merged.task.orchestrate.verify_commands.is_empty());
+    }
+
+    #[test]
+    fn test_merge_three_layers_cascading() {
+        // Symulacja: defaults → global → local
+        let defaults = FileConfig::default();
+
+        let global: FileConfig = toml::from_str(
+            r#"
+[prompt]
+prefix = "global-prefix"
+
+[task.orchestrate]
+workers = 6
+default_model = "sonnet"
+verify_commands = ["cargo test"]
+"#,
+        )
+        .unwrap();
+
+        let local: FileConfig = toml::from_str(
+            r#"
+[prompt]
+suffix = "local-suffix"
+
+[task.orchestrate]
+workers = 3
+verify_commands = ["npm test", "npm lint"]
+"#,
+        )
+        .unwrap();
+
+        let step1 = FileConfig::merge(defaults, global);
+        let merged = FileConfig::merge(step1, local);
+
+        // prefix z global (local nie ma)
+        assert_eq!(merged.prompt.prefix.as_deref(), Some("global-prefix"));
+        // suffix z local
+        assert_eq!(merged.prompt.suffix.as_deref(), Some("local-suffix"));
+        // workers: local=3 nadpisuje global=6
+        assert_eq!(merged.task.orchestrate.workers, 3);
+        // default_model z global (local nie ustawia)
+        assert_eq!(
+            merged.task.orchestrate.default_model.as_deref(),
+            Some("sonnet")
+        );
+        // verify_commands: local niepusty → zastępuje global
+        assert_eq!(merged.task.orchestrate.verify_commands.len(), 2);
+        assert_eq!(
+            merged.task.orchestrate.verify_commands[0].command(),
+            "npm test"
+        );
+    }
+
+    #[test]
+    fn test_merge_partial_overrides_preserve_base() {
+        let base: FileConfig = toml::from_str(
+            r#"
+[ui]
+nerd_font = false
+
+[tui]
+output_buffer_size = 10000
+sidebar_width = 40
+theme = "dark"
+
+[logging]
+log_dir = "custom/logs"
+max_log_files = 20
+"#,
+        )
+        .unwrap();
+
+        // overlay zmienia tylko theme i log_dir
+        let overlay: FileConfig = toml::from_str(
+            r#"
+[tui]
+theme = "light"
+
+[logging]
+log_dir = "other/logs"
+"#,
+        )
+        .unwrap();
+
+        let merged = FileConfig::merge(base, overlay);
+
+        // ui.nerd_font: overlay=true (default) → base=false zachowane
+        assert!(!merged.ui.nerd_font);
+        // tui: overlay theme="light" nadpisuje, reszta z base
+        assert_eq!(merged.tui.theme, "light");
+        assert_eq!(merged.tui.output_buffer_size, 10000);
+        assert_eq!(merged.tui.sidebar_width, 40);
+        // logging: overlay log_dir nadpisuje, max_log_files z base
+        assert_eq!(merged.logging.log_dir, PathBuf::from("other/logs"));
+        assert_eq!(merged.logging.max_log_files, 20);
+    }
+
+    #[test]
+    fn test_load_merged_config_missing_local_uses_global() {
+        // load_merged_config z nieistniejącym local_path → używa global + defaults
+        let result = load_merged_config(&PathBuf::from("/tmp/nonexistent/.ralph.toml"));
+        assert!(
+            result.is_ok(),
+            "Brak local .ralph.toml nie powinien powodować błędu"
+        );
+    }
+
+    #[test]
+    fn test_includes_empty_array_parses() {
+        // Jawna pusta tablica includes = []
+        let toml_content = r#"
+includes = []
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert!(config.includes.is_empty());
+    }
+
+    #[test]
+    fn test_load_from_path_no_includes() {
+        // load_from_path bez includes — działa jak poprzednio
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let config_path = write_temp_toml(
+            tmp.path(),
+            "config.toml",
+            r#"
+[prompt]
+prefix = "BasePrefix"
+"#,
+        );
+
+        let config = FileConfig::load_from_path(&config_path).unwrap();
+        assert_eq!(config.prompt.prefix.as_deref(), Some("BasePrefix"));
+    }
+
+    #[test]
+    fn test_load_from_path_single_include_merges() {
+        // Jeden plik include — jego wartości są mergowane (include wygrywa)
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        write_temp_toml(
+            tmp.path(),
+            "extra.toml",
+            r#"
+[prompt]
+suffix = "IncludeSuffix"
+
+[ui]
+nerd_font = false
+"#,
+        );
+
+        let config_path = write_temp_toml(
+            tmp.path(),
+            "config.toml",
+            r#"
+includes = ["extra.toml"]
+
+[prompt]
+prefix = "BasePrefix"
+"#,
+        );
+
+        let config = FileConfig::load_from_path(&config_path).unwrap();
+        // prefix z base, suffix z include
+        assert_eq!(config.prompt.prefix.as_deref(), Some("BasePrefix"));
+        assert_eq!(config.prompt.suffix.as_deref(), Some("IncludeSuffix"));
+        // ui.nerd_font z include
+        assert!(!config.ui.nerd_font);
+    }
+
+    #[test]
+    fn test_load_from_path_multiple_includes_last_wins() {
+        // Wiele includes — ostatni wygrywa
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        write_temp_toml(
+            tmp.path(),
+            "first.toml",
+            r#"
+[prompt]
+prefix = "FirstPrefix"
+suffix = "FirstSuffix"
+"#,
+        );
+
+        write_temp_toml(
+            tmp.path(),
+            "second.toml",
+            r#"
+[prompt]
+suffix = "SecondSuffix"
+"#,
+        );
+
+        let config_path = write_temp_toml(
+            tmp.path(),
+            "config.toml",
+            r#"
+includes = ["first.toml", "second.toml"]
+
+[prompt]
+prefix = "BasePrefix"
+"#,
+        );
+
+        let config = FileConfig::load_from_path(&config_path).unwrap();
+        // prefix: base → first.toml → second.toml (second nie ma prefix, więc first wygrywa)
+        assert_eq!(config.prompt.prefix.as_deref(), Some("FirstPrefix"));
+        // suffix: base nie ma → first → second wins
+        assert_eq!(config.prompt.suffix.as_deref(), Some("SecondSuffix"));
+    }
+
+    #[test]
+    fn test_load_from_path_missing_include_is_warning_not_error() {
+        // Brakujący plik include — OK (ostrzeżenie na stderr), reszta działa
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let config_path = write_temp_toml(
+            tmp.path(),
+            "config.toml",
+            r#"
+includes = ["nonexistent.toml"]
+
+[prompt]
+prefix = "BasePrefix"
+"#,
+        );
+
+        // Powinno zwrócić Ok, nie Err
+        let result = FileConfig::load_from_path(&config_path);
+        assert!(
+            result.is_ok(),
+            "Brakujący include nie powinien zwracać błędu"
+        );
+
+        let config = result.unwrap();
+        assert_eq!(config.prompt.prefix.as_deref(), Some("BasePrefix"));
+    }
+
+    #[test]
+    fn test_load_from_path_include_overrides_base() {
+        // Include wygrywa nad bazowym configiem (last wins)
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        write_temp_toml(
+            tmp.path(),
+            "override.toml",
+            r#"
+[prompt]
+prefix = "OverridePrefix"
+"#,
+        );
+
+        let config_path = write_temp_toml(
+            tmp.path(),
+            "config.toml",
+            r#"
+includes = ["override.toml"]
+
+[prompt]
+prefix = "BasePrefix"
+suffix = "BaseSuffix"
+"#,
+        );
+
+        let config = FileConfig::load_from_path(&config_path).unwrap();
+        // prefix z override (wygrywa nad base)
+        assert_eq!(config.prompt.prefix.as_deref(), Some("OverridePrefix"));
+        // suffix tylko w base — zachowany
+        assert_eq!(config.prompt.suffix.as_deref(), Some("BaseSuffix"));
+    }
+
+    #[test]
+    fn test_load_from_path_include_depth_limit() {
+        // Includes w plikach include są ignorowane (depth = 1)
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // nested.toml sam ma includes — powinny być ignorowane
+        write_temp_toml(
+            tmp.path(),
+            "nested.toml",
+            r#"
+includes = ["another.toml"]
+
+[prompt]
+suffix = "NestedSuffix"
+"#,
+        );
+
+        // another.toml — NIE powinien być załadowany (depth limit)
+        write_temp_toml(
+            tmp.path(),
+            "another.toml",
+            r#"
+[prompt]
+suffix = "AnotherSuffix"
+"#,
+        );
+
+        let config_path = write_temp_toml(
+            tmp.path(),
+            "config.toml",
+            r#"
+includes = ["nested.toml"]
+
+[prompt]
+prefix = "BasePrefix"
+"#,
+        );
+
+        let config = FileConfig::load_from_path(&config_path).unwrap();
+        assert_eq!(config.prompt.prefix.as_deref(), Some("BasePrefix"));
+        // suffix z nested.toml (bezpośredni include)
+        assert_eq!(config.prompt.suffix.as_deref(), Some("NestedSuffix"));
+        // another.toml NIE jest zainkludowany — AnotherSuffix nie powinien nadpisać
+    }
+
+    #[test]
+    fn test_load_from_path_relative_include_path() {
+        // Ścieżki relatywne rozwiązywane względem katalogu config.toml
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sub_dir = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        // extra.toml w tym samym katalogu co config.toml (sub/)
+        write_temp_toml(
+            &sub_dir,
+            "extra.toml",
+            r#"
+[ui]
+nerd_font = false
+"#,
+        );
+
+        let config_path = write_temp_toml(
+            &sub_dir,
+            "config.toml",
+            r#"
+includes = ["extra.toml"]
+"#,
+        );
+
+        let config = FileConfig::load_from_path(&config_path).unwrap();
+        assert!(
+            !config.ui.nerd_font,
+            "nerd_font powinno być false z relatywnego include"
+        );
+    }
+
+    #[test]
+    fn test_load_merged_config_malformed_local_returns_error() {
+        let tmp = std::env::temp_dir().join("ralph-test-malformed.toml");
+        std::fs::write(&tmp, "[broken\ngarbage!!!").unwrap();
+        let result = load_merged_config(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            result.is_err(),
+            "Malformed local .ralph.toml powinien zwrócić Err"
+        );
+    }
+
+    #[test]
+    fn test_load_from_path_empty_includes_array() {
+        // includes = [] — brak includes, domyślna konfiguracja
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let config_path = write_temp_toml(
+            tmp.path(),
+            "config.toml",
+            r#"
+includes = []
+
+[prompt]
+prefix = "OnlyBase"
+"#,
+        );
+
+        let config = FileConfig::load_from_path(&config_path).unwrap();
+        assert_eq!(config.prompt.prefix.as_deref(), Some("OnlyBase"));
+        assert!(config.prompt.suffix.is_none());
+    }
+
+    #[test]
+    fn test_includes_merge_preserves_nested_config() {
+        // Include merguje zagnieżdżone sekcje (np. task.orchestrate)
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        write_temp_toml(
+            tmp.path(),
+            "orch.toml",
+            r#"
+[task.orchestrate]
+workers = 8
+"#,
+        );
+
+        let config_path = write_temp_toml(
+            tmp.path(),
+            "config.toml",
+            r#"
+includes = ["orch.toml"]
+
+[task]
+default_model = "claude-sonnet-4-6"
+"#,
+        );
+
+        let config = FileConfig::load_from_path(&config_path).unwrap();
+        // workers z include
+        assert_eq!(config.task.orchestrate.workers, 8);
+        // default_model z base
+        assert_eq!(
+            config.task.default_model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn test_load_from_path_absolute_include_path() {
+        // Ścieżki bezwzględne w includes są obsługiwane bez zmian
+        let tmp_base = tempfile::TempDir::new().unwrap();
+        let tmp_extra = tempfile::TempDir::new().unwrap();
+
+        // extra.toml w oddzielnym (absolutnym) katalogu
+        let extra_path = write_temp_toml(
+            tmp_extra.path(),
+            "extra.toml",
+            r#"
+[prompt]
+suffix = "AbsoluteSuffix"
+"#,
+        );
+
+        // config.toml z bezwzględną ścieżką do extra.toml
+        let includes_line = format!(r#"includes = ["{}"]"#, extra_path.display());
+        let config_path = write_temp_toml(
+            tmp_base.path(),
+            "config.toml",
+            &format!(
+                r#"
+{includes_line}
+
+[prompt]
+prefix = "BasePrefix"
+"#
+            ),
+        );
+
+        let config = FileConfig::load_from_path(&config_path).unwrap();
+        assert_eq!(config.prompt.prefix.as_deref(), Some("BasePrefix"));
+        assert_eq!(config.prompt.suffix.as_deref(), Some("AbsoluteSuffix"));
+    }
+
+    #[test]
+    fn test_merge_toml_array_overwrite() {
+        // merge_toml dla tablic: override zastępuje (nie appenduje) base
+        let mut base: toml::Value =
+            toml::from_str(r#"verify = ["cargo test", "cargo build"]"#).unwrap();
+        let override_val: toml::Value = toml::from_str(r#"verify = ["cargo clippy"]"#).unwrap();
+
+        merge_toml(&mut base, override_val);
+
+        let result_arr = base.get("verify").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(
+            result_arr.len(),
+            1,
+            "Tablica powinna być zastąpiona (nie appendowana)"
+        );
+        assert_eq!(result_arr[0].as_str(), Some("cargo clippy"));
     }
 }

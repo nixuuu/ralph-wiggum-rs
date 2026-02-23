@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use super::args::RunArgs;
 use super::state::StateManager;
 use crate::shared::error::{RalphError, Result};
-use crate::shared::file_config::FileConfig;
+use crate::shared::file_config;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -29,8 +29,8 @@ pub struct Config {
 
 impl Config {
     pub fn build(args: RunArgs) -> Result<Self> {
-        // Load file config (.ralph.toml)
-        let file_config = FileConfig::load_from_path(&args.config)?;
+        // Load cascading config: defaults → global → local .ralph.toml
+        let file_config = file_config::load_merged_config(&args.config)?;
 
         // CLI --no-nf has priority, then .ralph.toml, default = true
         let use_nerd_font = if args.no_nf {

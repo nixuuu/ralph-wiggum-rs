@@ -1,0 +1,17 @@
+---
+source: src/tui/widgets/command_palette.rs
+expression: snap(&buffer)
+---
+
+
+
+
+
+                 > │
+                 ──────────────────────────────────────────────
+                 [Task] Add Task  Create a new task
+                 [Task] Edit Task  Modify existing task
+                 [Task] Delete Task
+                 [Worker] Start Worker  Launch a new worker
+                 [Worker] Stop Worker
+                 [Setting] Change Theme  Switch color theme

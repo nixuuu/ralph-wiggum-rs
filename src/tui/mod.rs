@@ -5,6 +5,8 @@ pub mod events;
 pub mod formatter;
 #[allow(dead_code)]
 pub mod formatting;
+#[allow(dead_code)]
+pub mod fuzzy;
 pub mod responsive;
 pub mod ring_buffer;
 #[allow(dead_code)]
@@ -28,6 +30,9 @@ pub use events::{
 pub use formatting::{
     format_duration_span, format_duration_string, format_tokens_span, format_tokens_string,
 };
+// Re-eksport fuzzy matching API — używane przez widgety z filtrowaniem (np. task explorer)
+#[allow(unused_imports)]
+pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 // Re-eksport publicznego API formattera — używane przez przyszłe implementacje RatuiFormatter
 #[allow(unused_imports)]
 pub use formatter::{
@@ -44,8 +49,9 @@ pub use theme::{DEFAULT_THEME, Theme};
 pub use tool_formatting::{colorize_tool_name, format_tool_details, shorten_path, truncate_string};
 #[allow(unused_imports)] // Re-exporty — będą używane przez per-command widoki TUI
 pub use widgets::{
-    AskUserAction, AskUserQuestion, AskUserWidget, FlatRow, Header, HeaderData, InputAction,
-    MultiSelectOption, MultiSelectState, MultiSelectWidget, ProgressData, QuestionKind,
-    SplashScreen, StatusBar, StatusBarData, TaskSidebar, TaskSidebarState, TaskTreeWidget,
-    TextInputOverlay, TextInputState, TextInputWidget, TreeState, render_task_preview,
+    AskUserAction, AskUserQuestion, AskUserWidget, CommandPaletteState, CommandPaletteWidget,
+    FlatRow, Header, HeaderData, InputAction, MultiSelectOption, MultiSelectState,
+    MultiSelectWidget, PaletteAction, PaletteItem, ProgressData, QuestionKind, SplashScreen,
+    StatusBar, StatusBarData, TaskSidebar, TaskSidebarState, TaskTreeWidget, TextInputOverlay,
+    TextInputState, TextInputWidget, TreeState, render_task_preview,
 };

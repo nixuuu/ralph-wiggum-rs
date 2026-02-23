@@ -1,0 +1,14 @@
+---
+source: src/tui/widgets/command_palette.rs
+expression: snap(&buffer)
+---
+
+
+      > │
+      ────────────────────────────
+      [Task] Add Task  Create a ne
+      [Task] Edit Task  Modify exi
+      [Task] Delete Task
+      [Worker] Start Worker  Launc
+      [Worker] Stop Worker
+      [Setting] Change Theme  Swit

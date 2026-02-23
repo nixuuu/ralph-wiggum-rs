@@ -1,0 +1,11 @@
+---
+source: src/tui/widgets/command_palette.rs
+expression: snap(&buffer)
+---
+
+
+
+             > │
+             ──────────────────────────────────
+             + [Task] Add Task  Create new
+             - [Task] Delete Task

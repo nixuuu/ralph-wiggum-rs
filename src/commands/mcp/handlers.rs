@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::shared::file_config::FileConfig;
+use crate::shared::file_config;
 use crate::shared::progress::TaskStatus;
 use crate::shared::tasks::{TaskNode, TasksFile};
 
@@ -476,7 +476,7 @@ pub fn ask_user(params: &Value) -> Result<Value, String> {
 /// Returns error if .ralph.toml cannot be loaded or parsed.
 pub fn list_profiles(config_path: &Path, _params: &Value) -> Result<Value, String> {
     // Load FileConfig from .ralph.toml
-    let config = FileConfig::load_from_path(config_path).map_err(|e| e.to_string())?;
+    let config = file_config::load_merged_config(config_path).map_err(|e| e.to_string())?;
 
     // Convert profiles to JSON-serializable format
     let profiles: Vec<Value> = config
@@ -1569,7 +1569,10 @@ name = "minimal"
         .unwrap();
 
         let result = tasks_get(&path, &json!({"id": "1.1"})).unwrap();
-        assert_eq!(result["acceptance_criteria"], json!(["Done when X is true"]));
+        assert_eq!(
+            result["acceptance_criteria"],
+            json!(["Done when X is true"])
+        );
     }
 
     #[test]

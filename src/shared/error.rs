@@ -58,6 +58,9 @@ pub enum RalphError {
 
     #[error("MCP error: {0}")]
     Mcp(String),
+
+    #[error("Notification error: {0}")]
+    Notification(String),
 }
 
 pub type Result<T> = std::result::Result<T, RalphError>;

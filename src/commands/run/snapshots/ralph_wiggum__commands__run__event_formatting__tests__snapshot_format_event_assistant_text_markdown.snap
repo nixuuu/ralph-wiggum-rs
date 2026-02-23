@@ -3,9 +3,9 @@ source: src/commands/run/event_formatting.rs
 expression: output
 ---
 Line 0: [Rgb(137, 180, 250)]▍[Rgb(137, 180, 250),BOLD]Claude
-Line 1: [Rgb(137, 180, 250)]▍[Reset]                                    [Indexed(14),BOLD]Heading
+Line 1: [Rgb(137, 180, 250)]▍[Reset]                                    [Rgb(180, 190, 254),BOLD]Heading
 Line 2: [Rgb(137, 180, 250)]▍
-Line 3: [Rgb(137, 180, 250)]▍[Reset]Some [Indexed(15),BOLD]bold[Reset] and [Indexed(7),ITALIC]italic[Reset] text.
+Line 3: [Rgb(137, 180, 250)]▍[Reset]Some [Rgb(205, 214, 244),BOLD]bold[Reset] and [Rgb(166, 173, 200),ITALIC]italic[Reset] text.
 Line 4: [Rgb(137, 180, 250)]▍
 Line 5: [Rgb(137, 180, 250)]▍[Reset]- List item 1
 Line 6: [Rgb(137, 180, 250)]▍[Reset]- List item 2

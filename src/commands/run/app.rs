@@ -450,7 +450,11 @@ impl AppState for RunApp {
                     width: output_area.width.saturating_sub(1),
                     ..output_area
                 };
-                frame.render_stateful_widget(output_view, output_content_area, &mut self.output_view_state);
+                frame.render_stateful_widget(
+                    output_view,
+                    output_content_area,
+                    &mut self.output_view_state,
+                );
             } else {
                 // Sidebar ukryty — output zajmuje pełną content width
                 let full_content = Rect {
@@ -480,7 +484,11 @@ impl AppState for RunApp {
                 width: layout.content.width.saturating_sub(1),
                 ..layout.content
             };
-            frame.render_stateful_widget(output_view, output_content_area, &mut self.output_view_state);
+            frame.render_stateful_widget(
+                output_view,
+                output_content_area,
+                &mut self.output_view_state,
+            );
 
             // Overlay sidebar na wierzchu (jeśli visible)
             if self.sidebar.visible {

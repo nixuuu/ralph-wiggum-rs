@@ -4,8 +4,10 @@ pub mod ask_user_choice;
 pub mod ask_user_confirm;
 pub mod ask_user_multi;
 pub mod ask_user_text;
+pub mod command_palette;
 #[allow(dead_code)]
 pub mod header;
+pub mod multiline_text_input;
 pub mod splash;
 #[allow(dead_code)]
 pub mod status_bar;
@@ -38,6 +40,8 @@ pub use ask_user_text::TextInputState;
 #[allow(unused_imports)] // Re-exported for tests and future TUI integration
 pub use ask_user_text::TextInputWidget;
 pub use header::{Header, HeaderData};
+#[allow(unused_imports)] // TUI component — will be used when multiline input is integrated
+pub use multiline_text_input::MultilineTextInputState;
 pub use splash::SplashScreen;
 pub use status_bar::{ProgressData, StatusBar, StatusBarData};
 #[allow(unused_imports)] // TUI component — will be used when full TUI is integrated
@@ -49,4 +53,5 @@ pub use task_tree::{FlatRow, TaskTreeWidget, TreeState};
 pub use text_input_overlay::{InputAction, TextInputOverlay};
 
 pub use ask_user::{AskUserAction, AskUserQuestion, AskUserWidget, QuestionKind};
+pub use command_palette::{CommandPaletteState, CommandPaletteWidget, PaletteAction, PaletteItem};
 pub use output_view::{OutputView, OutputViewState};

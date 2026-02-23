@@ -511,10 +511,10 @@ mod integration_tests {
         // ↑ z JWT → "Other", Enter → aktivuje text input, Esc → wróć do listy
         // ↑ → OAuth, Enter → Submit("OAuth")
         app.inject_keys(vec![
-            make_key(KeyCode::Up),   // → "Other" (index 3)
+            make_key(KeyCode::Up),    // → "Other" (index 3)
             make_key(KeyCode::Enter), // aktywuje text input
-            make_key(KeyCode::Esc),  // wróć do listy
-            make_key(KeyCode::Up),   // → OAuth (index 2)
+            make_key(KeyCode::Esc),   // wróć do listy
+            make_key(KeyCode::Up),    // → OAuth (index 2)
             make_key(KeyCode::Enter), // Submit "OAuth"
         ]);
         app.drain_events();

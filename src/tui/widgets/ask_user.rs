@@ -196,12 +196,14 @@ impl AskUserWidget {
                     //         + 2 dodatkowe (text input + hint) gdy tryb "Other" aktywny
                     InnerState::Choice(_, other_input) => {
                         let base = question_lines + self.question.options.len() as u16 + 1;
-                        if other_input.is_some() { base + 2 } else { base }
+                        if other_input.is_some() {
+                            base + 2
+                        } else {
+                            base
+                        }
                     }
                     // Multi: pytanie + opcje + hint line
-                    InnerState::Multi(state) => {
-                        question_lines + state.options.len() as u16 + 1
-                    }
+                    InnerState::Multi(state) => question_lines + state.options.len() as u16 + 1,
                     // Confirm: pytanie + buttons line
                     InnerState::Confirm(_) => question_lines + 1,
                 };
@@ -464,7 +466,13 @@ impl Widget for AskUserWidget {
             height: full_height,
         };
         let mut virt_buf = Buffer::empty(virt_rect);
-        render_widget_inner(&self.question, &self.state, &title, virt_rect, &mut virt_buf);
+        render_widget_inner(
+            &self.question,
+            &self.state,
+            &title,
+            virt_rect,
+            &mut virt_buf,
+        );
 
         // Kopiuj slice [scroll_offset .. scroll_offset + area.height] do realnego buf
         let copy_rows = area.height.min(full_height.saturating_sub(scroll_offset));

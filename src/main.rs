@@ -19,9 +19,9 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    // Load configuration to get logging settings
+    // Load cascading configuration: defaults → global → local .ralph.toml
     let file_config =
-        shared::file_config::FileConfig::load_from_path(&std::path::PathBuf::from(".ralph.toml"))
+        shared::file_config::load_merged_config(&std::path::PathBuf::from(".ralph.toml"))
             .unwrap_or_default();
 
     // Initialize diagnostics logger with config
