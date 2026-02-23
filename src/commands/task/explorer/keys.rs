@@ -206,7 +206,24 @@ impl TaskExplorerApp {
     /// Lewy klik na wiersz drzewa → zaznacz task (zmień selected_index).
     /// Kliknięcie na już zaznaczony task → toggle expand/collapse.
     /// Klik poza wierszami drzewa → bez zmian.
+    /// ScrollUp/ScrollDown → nawigacja po task tree (select_prev/select_next).
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> EventResult {
+        // Scroll wheel → nawigacja po task tree (krok = 1 per event)
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.tree_state.select_prev();
+                self.sync_selected_id();
+                return EventResult::Consumed;
+            }
+            MouseEventKind::ScrollDown => {
+                let row_count = self.visible_rows().len();
+                self.tree_state.select_next(row_count);
+                self.sync_selected_id();
+                return EventResult::Consumed;
+            }
+            _ => {}
+        }
+
         // Obsługujemy tylko lewy MouseDown
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return EventResult::Ignored;

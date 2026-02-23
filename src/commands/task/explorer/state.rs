@@ -1197,4 +1197,102 @@ tasks:
 
         assert_eq!(app.detail_scroll, 0);
     }
+
+    // ── Scroll wheel tests ──
+
+    fn make_mouse_scroll_up() -> AppEvent {
+        AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn make_mouse_scroll_down() -> AppEvent {
+        AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn scroll_down_selects_next_task() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+        assert_eq!(app.selected_id, Some("1".to_string()));
+
+        let result = app.handle_event(make_mouse_scroll_down(), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.selected_id, Some("1.1".to_string()));
+        assert_eq!(app.tree_state.selected, 1);
+    }
+
+    #[test]
+    fn scroll_up_selects_prev_task() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+        // Nawiguj do "1.2" (index 2)
+        app.handle_event(make_mouse_scroll_down(), &resolver);
+        app.handle_event(make_mouse_scroll_down(), &resolver);
+        assert_eq!(app.selected_id, Some("1.2".to_string()));
+
+        let result = app.handle_event(make_mouse_scroll_up(), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.selected_id, Some("1.1".to_string()));
+        assert_eq!(app.tree_state.selected, 1);
+    }
+
+    #[test]
+    fn scroll_up_at_top_stays() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+        assert_eq!(app.tree_state.selected, 0);
+        assert_eq!(app.selected_id, Some("1".to_string()));
+
+        // Scroll up na pierwszym elemencie — selekcja bez zmian
+        let result = app.handle_event(make_mouse_scroll_up(), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.tree_state.selected, 0);
+        assert_eq!(app.selected_id, Some("1".to_string()));
+    }
+
+    #[test]
+    fn scroll_down_at_bottom_stays() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+        // Nawiguj do ostatniego elementu: 1, 1.1, 1.2, 2, 2.1, 2.2 (6 wierszy, indeks 5)
+        for _ in 0..10 {
+            app.handle_event(make_mouse_scroll_down(), &resolver);
+        }
+        assert_eq!(app.selected_id, Some("2.2".to_string()));
+        assert_eq!(app.tree_state.selected, 5);
+
+        // Kolejny scroll down — selekcja nie wykracza poza zakres
+        let result = app.handle_event(make_mouse_scroll_down(), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.selected_id, Some("2.2".to_string()));
+        assert_eq!(app.tree_state.selected, 5);
+    }
+
+    #[test]
+    fn scroll_wheel_works_regardless_of_focus() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+        // Scroll wheel nawiguje po drzewie nawet gdy focus jest na Detail
+        app.focus = Panel::Detail;
+        assert_eq!(app.selected_id, Some("1".to_string()));
+
+        app.handle_event(make_mouse_scroll_down(), &resolver);
+
+        assert_eq!(app.selected_id, Some("1.1".to_string()));
+        // Focus pozostaje na Detail (scroll nie zmienia focus)
+        assert_eq!(app.focus, Panel::Detail);
+    }
 }

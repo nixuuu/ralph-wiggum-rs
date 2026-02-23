@@ -1661,20 +1661,24 @@ tasks:
         assert_eq!(app.focus, FocusArea::Sidebar);
     }
 
-    /// ScrollUp (nie Left click) → zawsze ignorowany przez handle_mouse.
+    /// ScrollUp nad output_rect → obsługuje scroll output buffera (Consumed).
+    ///
+    /// handle_mouse obsługuje ScrollUp/ScrollDown od task 13.4.4 —
+    /// ten test weryfikuje że kursor nad output_rect zwraca Consumed.
     #[test]
-    fn mouse_scroll_up_in_output_rect_is_ignored() {
+    fn mouse_scroll_up_in_output_rect_is_consumed() {
         let mut app = default_run_app();
         let resolver = KeybindingResolver::with_defaults();
 
         app.focus = FocusArea::Sidebar;
         app.output_rect = Some(Rect::new(0, 2, 60, 20));
 
-        // Scroll w obszarze output_rect — powinien być ignorowany (handle_mouse nie obsługuje scroll)
+        // Scroll w obszarze output_rect — obsługiwany (scroll output buffera)
         let mouse = make_mouse_scroll_up(5, 5);
         let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
 
-        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(result, EventResult::Consumed);
+        // Focus nie zmienia się przy scroll (tylko klik zmienia focus)
         assert_eq!(app.focus, FocusArea::Sidebar);
     }
 
