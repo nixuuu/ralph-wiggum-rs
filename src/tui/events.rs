@@ -7,7 +7,9 @@
 //! Wspólne handlery: Ctrl+C (shutdown), q (quit flow), resize.
 //! Per-command handlers definiowane przez trait `KeyHandler`.
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -281,6 +283,44 @@ pub fn is_scroll_down(key: &KeyEvent) -> bool {
     key.code == KeyCode::Down
 }
 
+// ── Pomocnicze funkcje do obsługi zdarzeń myszy ──────────────────────
+
+/// Sprawdź czy zdarzenie to lewy klik myszy.
+#[allow(dead_code)] // Public API — używane przez per-command widoki TUI
+pub fn is_left_click(mouse: &MouseEvent) -> bool {
+    matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+}
+
+/// Sprawdź czy zdarzenie to prawy klik myszy.
+#[allow(dead_code)] // Public API — używane przez per-command widoki TUI
+pub fn is_right_click(mouse: &MouseEvent) -> bool {
+    matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right))
+}
+
+/// Sprawdź czy zdarzenie to scroll myszy w górę.
+#[allow(dead_code)] // Public API — używane przez per-command widoki TUI
+pub fn is_mouse_scroll_up(mouse: &MouseEvent) -> bool {
+    matches!(mouse.kind, MouseEventKind::ScrollUp)
+}
+
+/// Sprawdź czy zdarzenie to scroll myszy w dół.
+#[allow(dead_code)] // Public API — używane przez per-command widoki TUI
+pub fn is_mouse_scroll_down(mouse: &MouseEvent) -> bool {
+    matches!(mouse.kind, MouseEventKind::ScrollDown)
+}
+
+/// Sprawdź czy zdarzenie to ruch myszy.
+#[allow(dead_code)] // Public API — używane przez per-command widoki TUI
+pub fn is_mouse_move(mouse: &MouseEvent) -> bool {
+    matches!(mouse.kind, MouseEventKind::Moved)
+}
+
+/// Zwróć pozycję myszy jako (kolumna, rząd).
+#[allow(dead_code)] // Public API — używane przez per-command widoki TUI
+pub fn mouse_position(mouse: &MouseEvent) -> (u16, u16) {
+    (mouse.column, mouse.row)
+}
+
 /// Przetwórz zdarzenie klawiatury przez wspólne handlery + KeyHandler.
 ///
 /// **UWAGA:** Legacy API — `App::run()` nie korzysta z `dispatch_key()`.
@@ -323,6 +363,16 @@ mod tests {
             modifiers,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
+        }
+    }
+
+    /// Helper: tworzy MouseEvent z podanym typem i pozycją.
+    fn make_mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
         }
     }
 
@@ -668,5 +718,151 @@ mod tests {
         let char_key = make_key(KeyCode::Char('j'), KeyModifiers::NONE);
         assert!(!is_scroll_up(&char_key));
         assert!(!is_scroll_down(&char_key));
+    }
+
+    // ── Mouse event helper tests ──
+
+    #[test]
+    fn is_left_click_detects_left_mouse_button() {
+        let mouse = make_mouse(MouseEventKind::Down(MouseButton::Left), 10, 5);
+        assert!(is_left_click(&mouse));
+    }
+
+    #[test]
+    fn is_left_click_rejects_right_mouse_button() {
+        let mouse = make_mouse(MouseEventKind::Down(MouseButton::Right), 10, 5);
+        assert!(!is_left_click(&mouse));
+    }
+
+    #[test]
+    fn is_left_click_rejects_middle_mouse_button() {
+        let mouse = make_mouse(MouseEventKind::Down(MouseButton::Middle), 10, 5);
+        assert!(!is_left_click(&mouse));
+    }
+
+    #[test]
+    fn is_left_click_rejects_mouse_move() {
+        let mouse = make_mouse(MouseEventKind::Moved, 10, 5);
+        assert!(!is_left_click(&mouse));
+    }
+
+    #[test]
+    fn is_right_click_detects_right_mouse_button() {
+        let mouse = make_mouse(MouseEventKind::Down(MouseButton::Right), 10, 5);
+        assert!(is_right_click(&mouse));
+    }
+
+    #[test]
+    fn is_right_click_rejects_left_mouse_button() {
+        let mouse = make_mouse(MouseEventKind::Down(MouseButton::Left), 10, 5);
+        assert!(!is_right_click(&mouse));
+    }
+
+    #[test]
+    fn is_right_click_rejects_middle_mouse_button() {
+        let mouse = make_mouse(MouseEventKind::Down(MouseButton::Middle), 10, 5);
+        assert!(!is_right_click(&mouse));
+    }
+
+    #[test]
+    fn is_mouse_scroll_up_detects_scroll_up() {
+        let mouse = make_mouse(MouseEventKind::ScrollUp, 10, 5);
+        assert!(is_mouse_scroll_up(&mouse));
+    }
+
+    #[test]
+    fn is_mouse_scroll_up_rejects_scroll_down() {
+        let mouse = make_mouse(MouseEventKind::ScrollDown, 10, 5);
+        assert!(!is_mouse_scroll_up(&mouse));
+    }
+
+    #[test]
+    fn is_mouse_scroll_up_rejects_mouse_move() {
+        let mouse = make_mouse(MouseEventKind::Moved, 10, 5);
+        assert!(!is_mouse_scroll_up(&mouse));
+    }
+
+    #[test]
+    fn is_mouse_scroll_down_detects_scroll_down() {
+        let mouse = make_mouse(MouseEventKind::ScrollDown, 10, 5);
+        assert!(is_mouse_scroll_down(&mouse));
+    }
+
+    #[test]
+    fn is_mouse_scroll_down_rejects_scroll_up() {
+        let mouse = make_mouse(MouseEventKind::ScrollUp, 10, 5);
+        assert!(!is_mouse_scroll_down(&mouse));
+    }
+
+    #[test]
+    fn is_mouse_scroll_down_rejects_mouse_move() {
+        let mouse = make_mouse(MouseEventKind::Moved, 10, 5);
+        assert!(!is_mouse_scroll_down(&mouse));
+    }
+
+    #[test]
+    fn is_mouse_move_detects_moved_event() {
+        let mouse = make_mouse(MouseEventKind::Moved, 10, 5);
+        assert!(is_mouse_move(&mouse));
+    }
+
+    #[test]
+    fn is_mouse_move_rejects_click_events() {
+        let mouse = make_mouse(MouseEventKind::Down(MouseButton::Left), 10, 5);
+        assert!(!is_mouse_move(&mouse));
+    }
+
+    #[test]
+    fn is_mouse_move_rejects_scroll_events() {
+        let mouse = make_mouse(MouseEventKind::ScrollUp, 10, 5);
+        assert!(!is_mouse_move(&mouse));
+    }
+
+    #[test]
+    fn mouse_position_returns_column_and_row() {
+        let mouse = make_mouse(MouseEventKind::Moved, 42, 17);
+        let (col, row) = mouse_position(&mouse);
+        assert_eq!(col, 42);
+        assert_eq!(row, 17);
+    }
+
+    #[test]
+    fn mouse_position_works_with_zero_coordinates() {
+        let mouse = make_mouse(MouseEventKind::Moved, 0, 0);
+        let (col, row) = mouse_position(&mouse);
+        assert_eq!(col, 0);
+        assert_eq!(row, 0);
+    }
+
+    #[test]
+    fn mouse_position_works_with_large_coordinates() {
+        let mouse = make_mouse(MouseEventKind::Moved, 200, 100);
+        let (col, row) = mouse_position(&mouse);
+        assert_eq!(col, 200);
+        assert_eq!(row, 100);
+    }
+
+    #[test]
+    fn mouse_click_helpers_are_mutually_exclusive() {
+        let left = make_mouse(MouseEventKind::Down(MouseButton::Left), 10, 5);
+        let right = make_mouse(MouseEventKind::Down(MouseButton::Right), 10, 5);
+
+        assert!(is_left_click(&left));
+        assert!(!is_right_click(&left));
+
+        assert!(is_right_click(&right));
+        assert!(!is_left_click(&right));
+    }
+
+    #[test]
+    fn mouse_scroll_helpers_are_mutually_exclusive() {
+        let scroll_up = make_mouse(MouseEventKind::ScrollUp, 10, 5);
+        let scroll_down = make_mouse(MouseEventKind::ScrollDown, 10, 5);
+
+        assert!(is_mouse_scroll_up(&scroll_up));
+        assert!(!is_mouse_scroll_down(&scroll_up));
+
+        assert!(is_mouse_scroll_down(&scroll_down));
+        assert!(!is_mouse_scroll_up(&scroll_down));
     }
 }
