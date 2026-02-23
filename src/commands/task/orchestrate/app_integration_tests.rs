@@ -11,11 +11,21 @@
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     use crate::commands::task::orchestrate::app::{OrchestrateApp, QuitState, RestartState};
     use crate::commands::task::orchestrate::worker_status::WorkerState;
     use crate::tui::test_helpers::{TestApp, TestStep, make_key};
+
+    /// Helper: tworzy KeyEvent z modyfikatorami (dla testów wymagających Ctrl/Shift/Alt).
+    fn make_key_mod(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
 
     // ── Test helpers ────────────────────────────────────────────────
 
@@ -544,6 +554,215 @@ mod tests {
             // Cancel restart
             TestStep::KeyPress(make_key(KeyCode::Char('n'))),
             TestStep::AssertState(Box::new(|s| s.restart_state == RestartState::None)),
+        ]);
+    }
+
+    // ── Integration Test 7: Command Palette flow ─────────────────────
+
+    /// Test integracyjny: Ctrl+P → type query → Enter → action executed.
+    ///
+    /// Scenario:
+    /// - Ctrl+P → palette otwiera się
+    /// - Wpisz "reload" → filtruje do "Reload Tasks"
+    /// - Enter → wybiera akcję i ją wykonuje (reload_requested = true)
+    /// - Palette zamknięta po wyborze
+    #[test]
+    fn integration_ctrl_p_type_query_enter_executes_action() {
+        let state = make_app(2);
+        let mut app = TestApp::new(state, 80, 24);
+        assert!(!app.state().reload_requested);
+
+        app.run_steps(vec![
+            // Palette nie jest otwarta
+            TestStep::AssertState(Box::new(|s| !s.is_palette_open())),
+            // Ctrl+P → otwórz palette
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Wpisz "reload" → filtruje do "Reload Tasks"
+            TestStep::KeyPress(make_key(KeyCode::Char('r'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('e'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('l'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('o'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('a'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('d'))),
+            // Palette nadal otwarta po wpisaniu query
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Enter → wybierz i wykonaj akcję
+            TestStep::KeyPress(make_key(KeyCode::Enter)),
+            // Palette zamknięta po wyborze
+            TestStep::AssertState(Box::new(|s| !s.is_palette_open())),
+            // reload_requested = true (Reload Tasks ustawia flagę)
+            TestStep::AssertState(Box::new(|s| s.reload_requested)),
+        ]);
+    }
+
+    /// Test: klawisze aplikacyjne NIE triggerują efektów gdy palette otwarta.
+    ///
+    /// Scenario:
+    /// - Ctrl+P → palette otwiera się
+    /// - 'q' trafia do filtru palette, nie do obsługi quit
+    /// - Esc zamyka palette
+    #[test]
+    fn integration_palette_app_keys_go_to_filter() {
+        let state = make_app(1);
+        let mut app = TestApp::new(state, 80, 24);
+
+        app.run_steps(vec![
+            // Ctrl+P → otwórz palette
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // 'q' → idzie do filtru palette (nie triggeruje quit)
+            TestStep::KeyPress(make_key(KeyCode::Char('q'))),
+            TestStep::AssertState(Box::new(|s| s.quit_state == QuitState::Normal)),
+            // Palette nadal otwarta — 'q' było traktowane jako char filtra
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Query w palette zawiera 'q'
+            TestStep::AssertState(Box::new(|s| {
+                s.command_palette
+                    .as_ref()
+                    .map(|p| p.query() == "q")
+                    .unwrap_or(false)
+            })),
+            // Esc → zamknij palette
+            TestStep::KeyPress(make_key(KeyCode::Esc)),
+            TestStep::AssertState(Box::new(|s| !s.is_palette_open())),
+            // Quit state nadal Normal
+            TestStep::AssertState(Box::new(|s| s.quit_state == QuitState::Normal)),
+        ]);
+    }
+
+    /// Test: Ctrl+P → Esc → palette zamknięta bez działania.
+    ///
+    /// Scenario:
+    /// - Ctrl+P → palette otwiera się
+    /// - Esc → palette zamykana, brak side effects
+    #[test]
+    fn integration_ctrl_p_esc_closes_without_action() {
+        let state = make_app(2);
+        let mut app = TestApp::new(state, 80, 24);
+
+        app.run_steps(vec![
+            // Ctrl+P → otwórz palette
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Wpisz trochę tekstu
+            TestStep::KeyPress(make_key(KeyCode::Char('q'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('u'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('i'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('t'))),
+            // Palette nadal otwarta, quit nie triggerowany
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            TestStep::AssertState(Box::new(|s| s.quit_state == QuitState::Normal)),
+            // Esc → zamknij palette
+            TestStep::KeyPress(make_key(KeyCode::Esc)),
+            TestStep::AssertState(Box::new(|s| !s.is_palette_open())),
+            // Brak side effects — quit nie został wywołany, reload nie requestowany
+            TestStep::AssertState(Box::new(|s| s.quit_state == QuitState::Normal)),
+            TestStep::AssertState(Box::new(|s| !s.reload_requested)),
+        ]);
+    }
+
+    /// Test: Ctrl+P → select ToggleSidebar via palette → sidebar toggle executed.
+    ///
+    /// Scenario:
+    /// - Ctrl+P → palette otwiera się
+    /// - Wpisz "sidebar" → filtruje do "Toggle Sidebar"
+    /// - Enter → wykonuje ToggleSidebar
+    /// - Sidebar visibility zmieniona
+    #[test]
+    fn integration_ctrl_p_select_toggle_sidebar() {
+        let state = make_app(1);
+        let mut app = TestApp::new(state, 80, 24);
+        let initial_visible = app.state().sidebar_state.visible;
+
+        app.run_steps(vec![
+            // Ctrl+P → otwórz palette
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Wpisz "sidebar"
+            TestStep::KeyPress(make_key(KeyCode::Char('s'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('i'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('d'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('e'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('b'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('a'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('r'))),
+            // Enter → wybierz i wykonaj
+            TestStep::KeyPress(make_key(KeyCode::Enter)),
+            // Palette zamknięta
+            TestStep::AssertState(Box::new(|s| !s.is_palette_open())),
+            // Sidebar visibility zmieniona (toggle)
+            TestStep::AssertState(Box::new(move |s| {
+                s.sidebar_state.visible != initial_visible
+            })),
+        ]);
+    }
+
+    /// Test: Ctrl+P blokuje wszystkie klawisze podczas otwartej palette.
+    ///
+    /// Sprawdza że klawisze aplikacyjne (q, R, r) nie wywołują efektów
+    /// gdy palette jest otwarta — trafiają do filtru palette.
+    #[test]
+    fn integration_palette_blocks_app_keys() {
+        let state = make_app(3);
+        let mut app = TestApp::new(state, 80, 24);
+        activate_workers(app.state_mut(), &[1, 2, 3]);
+        app.state_mut().focused_worker = Some(1);
+
+        app.run_steps(vec![
+            // Ctrl+P → otwórz palette
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // 'R' (restart) — nie triggeruje restart gdy palette otwarta
+            TestStep::KeyPress(make_key(KeyCode::Char('R'))),
+            TestStep::AssertState(Box::new(|s| s.restart_state == RestartState::None)),
+            // 'q' — nie triggeruje quit gdy palette otwarta
+            TestStep::KeyPress(make_key(KeyCode::Char('q'))),
+            TestStep::AssertState(Box::new(|s| s.quit_state == QuitState::Normal)),
+            // 'r' (reload) — nie triggeruje reload gdy palette otwarta (trafia do filtru)
+            TestStep::KeyPress(make_key(KeyCode::Char('r'))),
+            TestStep::AssertState(Box::new(|s| !s.reload_requested)),
+            // Palette nadal otwarta
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Esc → zamknij
+            TestStep::KeyPress(make_key(KeyCode::Esc)),
+            TestStep::AssertState(Box::new(|s| !s.is_palette_open())),
+        ]);
+    }
+
+    /// Test: Otwieranie palette odświeża jej zawartość (fresh state).
+    ///
+    /// Scenario:
+    /// - Otwórz palette → wpisz query
+    /// - Zamknij palette
+    /// - Otwórz ponownie → query wyczyszczone (fresh state)
+    #[test]
+    fn integration_palette_reopens_with_fresh_state() {
+        let state = make_app(1);
+        let mut app = TestApp::new(state, 80, 24);
+
+        app.run_steps(vec![
+            // Otwórz palette
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Wpisz query
+            TestStep::KeyPress(make_key(KeyCode::Char('t'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('e'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('s'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('t'))),
+            // Zamknij
+            TestStep::KeyPress(make_key(KeyCode::Esc)),
+            TestStep::AssertState(Box::new(|s| !s.is_palette_open())),
+            // Otwórz ponownie
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Query powinno być wyczyszczone (fresh state)
+            TestStep::AssertState(Box::new(|s| {
+                s.command_palette
+                    .as_ref()
+                    .map(|p| p.query().is_empty())
+                    .unwrap_or(false)
+            })),
         ]);
     }
 }

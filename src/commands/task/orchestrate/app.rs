@@ -25,6 +25,7 @@ use crate::commands::task::orchestrate::worker_status::{WorkerState, WorkerStatu
 use crate::shared::tasks::TasksFile;
 use crate::tui::app::AppState;
 use crate::tui::events::{AppEvent, EventResult};
+use crate::tui::keybindings::{KeyAction, KeybindingResolver};
 use crate::tui::ring_buffer::OutputRingBuffer;
 use crate::tui::widgets::{
     CommandPaletteState, CommandPaletteWidget, TaskSidebar, TaskSidebarState, TextInputOverlay,
@@ -142,6 +143,11 @@ pub struct OrchestrateApp {
     // ── Command palette ──
     /// Stan command palette. `Some` gdy palette jest otwarta (Ctrl+P).
     pub(crate) command_palette: Option<CommandPaletteState>,
+
+    // ── Keybinding resolver ──
+    /// Resolver keybindingów — umożliwia konfigurowalny klawisz Ctrl+P.
+    /// Domyślnie inicjalizowany z defaults; użyj `with_resolver()` dla custom bindingów.
+    pub(crate) resolver: KeybindingResolver,
 }
 
 #[allow(dead_code)] // Public API — zostanie podłączony w task 6.9
@@ -176,7 +182,16 @@ impl OrchestrateApp {
             pending_user_messages: VecDeque::new(),
             log_lines: VecDeque::with_capacity(50),
             command_palette: None,
+            resolver: KeybindingResolver::with_defaults(),
         }
+    }
+
+    /// Builder: ustaw custom `KeybindingResolver` (np. z `.ralph.toml` user config).
+    ///
+    /// Pozwala na konfigurowalny klawisz command palette (domyślnie Ctrl+P).
+    pub fn with_resolver(mut self, resolver: KeybindingResolver) -> Self {
+        self.resolver = resolver;
+        self
     }
 
     // ── Public API (called by orchestrator loop) ────────────────────
@@ -561,13 +576,19 @@ impl AppState for OrchestrateApp {
             );
         }
 
-        // Render global status bar
+        // Render global status bar — użyj resolvera do wyświetlenia konfigurowalnego keybindingu
+        let palette_key = self
+            .resolver
+            .key_for_action(KeyAction::CommandPalette)
+            .map(|combo| KeybindingResolver::format_key(&combo))
+            .unwrap_or_else(|| "Ctrl+p".to_string());
         let status_bar = render_global_bar(
             &self.orchestrator_status,
             self.focused_worker,
             self.show_task_preview,
             self.sidebar_focused && self.sidebar_state.visible,
             self.show_idle,
+            &palette_key,
         );
         frame.render_widget(status_bar, vertical[1]);
 

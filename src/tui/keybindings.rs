@@ -610,6 +610,7 @@ impl_pairs!(ExplorerBindings;
 ///
 /// Przekazywany do `KeybindingResolver::resolve()` żeby wybrać właściwe
 /// view-specific bindingi przed globalnym fallbackiem.
+// Warianty Global/Run/Explorer zostaną użyte przy integracji z innymi widokami
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)] // Public API — będzie używane przez per-command widoki TUI
 pub enum View {

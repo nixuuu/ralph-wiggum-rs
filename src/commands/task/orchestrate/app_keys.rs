@@ -10,6 +10,7 @@ use crate::commands::task::orchestrate::command_registry::{
     OrchestrateAction, execute_palette_action,
 };
 use crate::tui::events::EventResult;
+use crate::tui::keybindings::{KeyAction, View};
 use crate::tui::widgets::{InputAction, PaletteAction};
 
 impl OrchestrateApp {
@@ -35,8 +36,12 @@ impl OrchestrateApp {
             return self.handle_overlay_key(key);
         }
 
-        // Priorytet 3: Ctrl+P — otwórz command palette (przed sidebar i innymi skrótami)
-        if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Priorytet 3: Command palette — keybinding przez KeybindingResolver (domyślnie Ctrl+P,
+        // konfiguralny przez .ralph.toml)
+        if matches!(
+            self.resolver.resolve(&key, View::Orchestrate),
+            Some(KeyAction::CommandPalette)
+        ) {
             self.open_command_palette();
             return EventResult::Consumed;
         }

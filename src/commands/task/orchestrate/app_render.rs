@@ -193,6 +193,7 @@ pub(super) fn render_global_bar<'a>(
     preview_active: bool,
     sidebar_focused: bool,
     show_idle: bool,
+    palette_key: &str,
 ) -> Paragraph<'a> {
     let theme = &DEFAULT_THEME;
     let total = status.scheduler.total;
@@ -285,7 +286,7 @@ pub(super) fn render_global_bar<'a>(
             "h=show-idle"
         };
         queue_line_spans.push(Span::styled(
-            format!("q Tab ↑↓ Esc p=tasks t=sidebar {idle_hint} r=reload R=restart"),
+            format!("q Tab ↑↓ Esc p=tasks t=sidebar {idle_hint} r=reload R=restart {palette_key}=palette"),
             theme.muted_style(),
         ));
     }

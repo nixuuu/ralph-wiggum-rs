@@ -22,6 +22,7 @@ use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::{FileConfig, SetupCommand, VerifyCommand, VerifyProfile};
 use crate::shared::tasks::TasksFile;
 use crate::templates;
+use crate::tui::keybindings::{KeybindingResolver, KeybindingsConfig};
 
 use super::assignment::{WorkerSlot, get_mtime};
 use super::config::{InputFlags, ResolvedConfig};
@@ -44,6 +45,8 @@ pub struct Orchestrator {
     pub(super) prompt_suffix: Option<String>,
     /// Verification profiles from config — passed to workers for git-based profile matching.
     pub(super) profiles: Vec<VerifyProfile>,
+    /// Keybindings config — used to create KeybindingResolver for the TUI.
+    pub(super) keybindings_config: KeybindingsConfig,
 }
 
 impl Orchestrator {
@@ -99,6 +102,7 @@ impl Orchestrator {
             prompt_prefix,
             prompt_suffix,
             profiles,
+            keybindings_config: file_config.keybindings.clone(),
         })
     }
 
@@ -202,8 +206,10 @@ impl Orchestrator {
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
+        let resolver = KeybindingResolver::from_user_config(self.keybindings_config.clone());
         let mut tui = TuiContext {
-            app: OrchestrateApp::new(worker_count, Arc::clone(&shared_overlay)),
+            app: OrchestrateApp::new(worker_count, Arc::clone(&shared_overlay))
+                .with_resolver(resolver),
             terminal,
             mux_output: MultiplexedOutput::new(),
             task_start_times: HashMap::new(),
@@ -347,6 +353,7 @@ mod tests {
             prompt_prefix: None,
             prompt_suffix: None,
             profiles: Vec::new(),
+            keybindings_config: KeybindingsConfig::default(),
         };
 
         assert_eq!(
@@ -413,6 +420,7 @@ mod tests {
             prompt_prefix: None,
             prompt_suffix: None,
             profiles: Vec::new(),
+            keybindings_config: KeybindingsConfig::default(),
         };
 
         assert_eq!(
