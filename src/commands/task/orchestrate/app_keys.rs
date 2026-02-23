@@ -472,8 +472,9 @@ impl OrchestrateApp {
     /// Priorytet:
     /// 1. Gdy overlay aktywny — ignoruj (overlay obsługuje własny input)
     /// 2. Gdy task preview aktywny — scrolluj preview
-    /// 3. Hit-test na grid_rects → scroll panelu pod kursorem
-    /// 4. Kursor poza panelami → ignoruj
+    /// 3. Hit-test na sidebar_rect → nawiguj po task tree (krok 1 per event)
+    /// 4. Hit-test na grid_rects → scroll panelu pod kursorem
+    /// 5. Kursor poza panelami → ignoruj
     ///
     /// `scroll_up=true` → w górę (ku starszym liniom, offset rośnie).
     /// `scroll_up=false` → w dół (ku nowszym liniom, offset maleje).
@@ -500,6 +501,19 @@ impl OrchestrateApp {
                     self.preview_scroll_offset = self.preview_scroll_offset.saturating_add(down);
                 }
                 _ => {}
+            }
+            return EventResult::Consumed;
+        }
+
+        // Hit-test na sidebar: scroll nawiguje po task tree (krok 1 per event, nie scroll_step).
+        // sidebar_rect jest Some tylko gdy sidebar jest widoczny (ustawiany w draw()).
+        if let Some(sidebar_rect) = self.sidebar_rect
+            && sidebar_rect.contains(pos)
+        {
+            if scroll_up {
+                self.sidebar_state.select_prev();
+            } else {
+                self.sidebar_state.select_next();
             }
             return EventResult::Consumed;
         }
@@ -2180,6 +2194,135 @@ tasks:
 
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.sidebar_state.selected_index, 1); // "T2"
+    }
+
+    // ── Sidebar scroll tests ────────────────────────────────────────
+
+    #[test]
+    fn mouse_scroll_up_over_sidebar_calls_select_prev() {
+        let mut app = make_app(1);
+        let yaml = r#"
+tasks:
+  - id: "1"
+    name: "T1"
+    status: todo
+  - id: "2"
+    name: "T2"
+    status: todo
+"#;
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(yaml).unwrap();
+        app.sidebar_state.refresh(&tf);
+        app.sidebar_state.visible = true;
+        app.sidebar_state.selected_index = 1;
+        // Ustaw sidebar_rect symulując wyrendowany sidebar
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 30, 20));
+
+        // Scroll up nad sidebar (kursor: 5, 5)
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 5, 5);
+        let result = app.handle_mouse(scroll_up);
+
+        assert_eq!(result, EventResult::Consumed);
+        // select_prev() powinno zmniejszyć indeks z 1 do 0
+        assert_eq!(app.sidebar_state.selected_index, 0);
+    }
+
+    #[test]
+    fn mouse_scroll_down_over_sidebar_calls_select_next() {
+        let mut app = make_app(1);
+        let yaml = r#"
+tasks:
+  - id: "1"
+    name: "T1"
+    status: todo
+  - id: "2"
+    name: "T2"
+    status: todo
+"#;
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(yaml).unwrap();
+        app.sidebar_state.refresh(&tf);
+        app.sidebar_state.visible = true;
+        app.sidebar_state.selected_index = 0;
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 30, 20));
+
+        // Scroll down nad sidebar (kursor: 5, 5)
+        let scroll_down = make_scroll(MouseEventKind::ScrollDown, 5, 5);
+        let result = app.handle_mouse(scroll_down);
+
+        assert_eq!(result, EventResult::Consumed);
+        // select_next() powinno zwiększyć indeks z 0 do 1
+        assert_eq!(app.sidebar_state.selected_index, 1);
+    }
+
+    #[test]
+    fn mouse_scroll_over_sidebar_uses_step_1_not_scroll_step() {
+        let mut app = make_app(1).with_scroll_step(5);
+        let yaml = r#"
+tasks:
+  - id: "1"
+    name: "T1"
+    status: todo
+  - id: "2"
+    name: "T2"
+    status: todo
+  - id: "3"
+    name: "T3"
+    status: todo
+"#;
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(yaml).unwrap();
+        app.sidebar_state.refresh(&tf);
+        app.sidebar_state.visible = true;
+        app.sidebar_state.selected_index = 0;
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 30, 20));
+
+        // Jeden scroll down — powinien przesunąć o 1, nie o scroll_step=5
+        let scroll_down = make_scroll(MouseEventKind::ScrollDown, 5, 5);
+        app.handle_mouse(scroll_down);
+
+        assert_eq!(app.sidebar_state.selected_index, 1);
+    }
+
+    #[test]
+    fn mouse_scroll_outside_sidebar_hits_worker_not_sidebar() {
+        let mut app = make_app(1);
+        app.sidebar_rect = Some(ratatui::layout::Rect::new(0, 0, 30, 20));
+        app.sidebar_state.visible = true;
+        // Sidebar zajmuje x: 0-29, worker panel zajmuje x: 30-79
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(30, 0, 50, 20));
+
+        let yaml = r#"
+tasks:
+  - id: "1"
+    name: "T1"
+    status: todo
+"#;
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(yaml).unwrap();
+        app.sidebar_state.refresh(&tf);
+        app.sidebar_state.selected_index = 0;
+
+        // Scroll nad worker panelem (kursor: 40, 5) — nie powinien zmieniać sidebar
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 40, 5);
+        let result = app.handle_mouse(scroll_up);
+
+        assert_eq!(result, EventResult::Consumed);
+        // sidebar_state bez zmian
+        assert_eq!(app.sidebar_state.selected_index, 0);
+        // worker panel przewinięty
+        assert_eq!(app.panels[&1].scroll_offset, 3); // scroll_step=3
+    }
+
+    #[test]
+    fn mouse_scroll_over_sidebar_when_no_sidebar_rect_falls_through_to_grid() {
+        let mut app = make_app(1);
+        // sidebar_rect = None (sidebar niewidoczny)
+        app.sidebar_rect = None;
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 5, 5);
+        let result = app.handle_mouse(scroll_up);
+
+        assert_eq!(result, EventResult::Consumed);
+        // Worker panel przewinięty (brak sidebar → fall-through)
+        assert_eq!(app.panels[&1].scroll_offset, 3);
     }
 
     #[test]
