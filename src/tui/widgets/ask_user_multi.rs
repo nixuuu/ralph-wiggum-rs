@@ -33,6 +33,9 @@ pub struct MultiSelectState {
     pub cursor: usize,
     /// Flagi zaznaczenia dla każdej opcji (true = checked)
     pub checked: Vec<bool>,
+    /// Indeks opcji pod kursorem myszy (hover, tylko wizualny feedback).
+    /// None = brak hover. Aktualizowany przez kallerów na podstawie MouseMoved.
+    pub hovered: Option<usize>,
 }
 
 impl MultiSelectState {
@@ -43,7 +46,14 @@ impl MultiSelectState {
             options,
             cursor: 0,
             checked: vec![false; count],
+            hovered: None,
         }
+    }
+
+    /// Ustaw hover na opcję o podanym indeksie (None = brak hover).
+    /// Wywoływane przez kallerów na podstawie hit-testu pozycji myszy.
+    pub fn set_hovered(&mut self, index: Option<usize>) {
+        self.hovered = index;
     }
 
     /// Przesuwa kursor w górę (z zawijaniem)
@@ -187,8 +197,15 @@ impl<'a> MultiSelectWidget<'a> {
             .collect()
     }
 
-    /// Renderuje pojedynczą opcję z checkboxem
-    fn render_option_line(&self, index: usize, option: &MultiSelectOption) -> Line<'a> {
+    /// Renderuje pojedynczą opcję z checkboxem.
+    ///
+    /// `is_hovered` — czy opcja jest pod kursorem myszy (subtelne tło).
+    fn render_option_line(
+        &self,
+        index: usize,
+        option: &MultiSelectOption,
+        is_hovered: bool,
+    ) -> Line<'a> {
         let mut spans = Vec::new();
 
         // Prefix: kursor ("> " lub "  ")
@@ -223,6 +240,14 @@ impl<'a> MultiSelectWidget<'a> {
                 format!("  {}", desc),
                 self.theme.muted_style(),
             ));
+        }
+
+        // Hover: subtelne tło — zachowuje fg (kursor i kolor zaznaczenia)
+        if is_hovered {
+            let hover_bg = self.theme.hover_row_bg;
+            for span in &mut spans {
+                span.style = span.style.bg(hover_bg);
+            }
         }
 
         Line::from(spans)
@@ -264,7 +289,10 @@ impl<'a> Widget for MultiSelectWidget<'a> {
                 break;
             }
 
-            let option_line = self.render_option_line(i, option);
+            // Hover: wizualny feedback — pokazywany nawet gdy cursor == hover
+            // (kursor ">" jest tekstem, hover to tło — nie kolidują)
+            let is_hovered = self.state.hovered == Some(i);
+            let option_line = self.render_option_line(i, option, is_hovered);
             buf.set_line(area.x, option_y, &option_line, area.width);
         }
     }
@@ -775,6 +803,76 @@ mod tests {
         assert_eq!(
             result, None,
             "Klik przy pustej liście powinien być ignorowany"
+        );
+    }
+
+    // ── Hover Tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_hovered_updates_field() {
+        let options = create_options(&["A", "B"]);
+        let mut state = MultiSelectState::new(options);
+        assert_eq!(state.hovered, None);
+
+        state.set_hovered(Some(1));
+        assert_eq!(state.hovered, Some(1));
+
+        state.set_hovered(None);
+        assert_eq!(state.hovered, None);
+    }
+
+    #[test]
+    fn test_hover_new_state_has_none() {
+        let options = create_options(&["A", "B", "C"]);
+        let state = MultiSelectState::new(options);
+        assert_eq!(state.hovered, None, "Domyślny hover powinien być None");
+    }
+
+    #[test]
+    fn test_hovered_option_has_hover_bg() {
+        let theme = Theme::default();
+        let options = create_options(&["Auth", "API", "Logging"]);
+        let mut state = MultiSelectState::new(options);
+        state.hovered = Some(1); // hover na opcję "API"
+
+        let buffer = render_widget_to_buffer(
+            MultiSelectWidget::new("Select:", &state, &theme, true),
+            40,
+            6,
+        );
+
+        // Opcje zaczynają się od y=2 (pytanie y=0, separator y=1)
+        // Opcja "API" jest na y=3 (y=2 + offset 1)
+        let hovered_cell = buffer.cell((0, 3)).expect("cell");
+        assert_eq!(
+            hovered_cell.bg, theme.hover_row_bg,
+            "Hovered option powinna mieć hover_row_bg"
+        );
+
+        // Opcja "Auth" (y=2) nie powinna mieć hover_row_bg
+        let normal_cell = buffer.cell((0, 2)).expect("cell");
+        assert_ne!(
+            normal_cell.bg, theme.hover_row_bg,
+            "Normalny wiersz nie powinien mieć hover_row_bg"
+        );
+    }
+
+    #[test]
+    fn test_hover_does_not_change_cursor_text() {
+        let theme = Theme::default();
+        let options = create_options(&["Auth", "API"]);
+        let mut state = MultiSelectState::new(options);
+        state.cursor = 0; // kursor na "Auth"
+        state.hovered = Some(0); // hover na "Auth" (kursor i hover na tej samej opcji)
+
+        let buffer =
+            render_widget_to_buffer(MultiSelectWidget::new("Q:", &state, &theme, true), 40, 4);
+
+        // Opcja "Auth" powinna mieć hover bg (y=2)
+        let cell = buffer.cell((0, 2)).expect("cell");
+        assert_eq!(
+            cell.bg, theme.hover_row_bg,
+            "Kursor+hover: hover_row_bg stosowane nawet gdy cursor==hover"
         );
     }
 

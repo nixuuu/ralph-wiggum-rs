@@ -52,6 +52,9 @@ pub struct TaskSidebarState {
     total_count: usize,
     /// ID of the task being worked on (for highlighting)
     current_task_id: Option<String>,
+    /// Indeks wiersza pod kursorem myszy (hover, tylko wizualny feedback).
+    /// None gdy kursor poza sidebar. Aktualizowany przez kallerów (hit-test myszy).
+    pub hovered_index: Option<usize>,
 }
 
 impl Default for TaskSidebarState {
@@ -66,6 +69,7 @@ impl Default for TaskSidebarState {
             done_count: 0,
             total_count: 0,
             current_task_id: None,
+            hovered_index: None,
         }
     }
 }
@@ -118,6 +122,12 @@ impl TaskSidebarState {
     /// Set current task ID for highlighting.
     pub fn set_current_task(&mut self, task_id: Option<String>) {
         self.current_task_id = task_id;
+    }
+
+    /// Ustaw hover na wiersz o podanym indeksie (None = brak hover).
+    /// Wywoływane przez kallerów na podstawie hit-testu pozycji myszy.
+    pub fn set_hovered(&mut self, index: Option<usize>) {
+        self.hovered_index = index;
     }
 
     /// Move selection up by one row.
@@ -255,9 +265,11 @@ impl<'a> TaskSidebar<'a> {
             let abs_index = self.state.scroll_offset + i;
             let is_selected = abs_index == self.state.selected_index;
             let is_current = self.state.current_task_id.as_ref() == Some(&row.id);
+            // Hover: wizualny feedback — nie zmienia stanu, wyłączony gdy wiersz wybrany
+            let is_hovered = self.state.hovered_index == Some(abs_index) && !is_selected;
             let y = inner.y + i as u16;
 
-            let line = build_row_line(row, is_selected, is_current);
+            let line = build_row_line(row, is_selected, is_current, is_hovered);
             let paragraph = Paragraph::new(line);
             let row_area = Rect::new(inner.x, y, inner.width, 1);
             paragraph.render(row_area, buf);
@@ -290,7 +302,13 @@ impl<'a> TaskSidebar<'a> {
 /// - `row` — task data
 /// - `is_selected` — true if this row is currently selected (focus indicator)
 /// - `is_current` — true if this row is the task being worked on (bold + primary)
-fn build_row_line(row: &FlatRow, is_selected: bool, is_current: bool) -> Line<'static> {
+/// - `is_hovered` — true if mouse cursor is over this row (subtelne bg highlight)
+fn build_row_line(
+    row: &FlatRow,
+    is_selected: bool,
+    is_current: bool,
+    is_hovered: bool,
+) -> Line<'static> {
     let theme = &DEFAULT_THEME;
     let mut spans: Vec<Span<'static>> = Vec::new();
 
@@ -348,14 +366,22 @@ fn build_row_line(row: &FlatRow, is_selected: bool, is_current: bool) -> Line<'s
         spans.push(Span::styled(format!(" {}", deps_text), theme.muted_style()));
     }
 
-    // Selection indicator: override every span's fg for readability on highlighted bg
+    // Priorytet stylów: selected > hover > normalny
     if is_selected {
+        // Zaznaczony: primary bg + czarny fg (najwyższy priorytet)
         let highlight_fg = ratatui::style::Color::Black;
         let highlight_bg = theme.primary;
         for span in &mut spans {
             span.style = span.style.fg(highlight_fg).bg(highlight_bg);
         }
         Line::from(spans).style(Style::default().bg(highlight_bg).fg(highlight_fg))
+    } else if is_hovered {
+        // Hover: subtelne tło — zachowuje fg kolorów statusu i current_task
+        let hover_bg = theme.hover_row_bg;
+        for span in &mut spans {
+            span.style = span.style.bg(hover_bg);
+        }
+        Line::from(spans).style(Style::default().bg(hover_bg))
     } else {
         Line::from(spans)
     }
@@ -815,5 +841,64 @@ tasks:
 
         let buffer = render_sidebar(&mut state, 40, 8);
         insta::assert_snapshot!(snap(&buffer));
+    }
+
+    #[test]
+    fn test_set_hovered_updates_field() {
+        let mut state = TaskSidebarState::new();
+        assert_eq!(state.hovered_index, None);
+
+        state.set_hovered(Some(1));
+        assert_eq!(state.hovered_index, Some(1));
+
+        state.set_hovered(None);
+        assert_eq!(state.hovered_index, None);
+    }
+
+    #[test]
+    fn test_hover_row_has_hover_bg_color() {
+        let mut state = TaskSidebarState::new();
+        let tf = sample_tasks_file();
+        state.refresh(&tf);
+
+        // Expand epic "1" żeby mieć więcej wierszy
+        state.toggle_expand();
+        // Hover na wiersz 1 (1.1 — Subtask A), wybrany wiersz = 0
+        state.set_hovered(Some(1));
+
+        let buffer = render_sidebar(&mut state, 40, 12);
+
+        // Layout: inner_top = title (1) + padding_top (2) = y=3
+        // Row 0 (selected) → y=3, Row 1 (hovered) → y=4
+        let hover_bg = DEFAULT_THEME.hover_row_bg;
+
+        // Wiersz 1 (abs_index=1) → y = inner.y + 1 = 3 + 1 = 4
+        // x=4 jest w tekście (inner.x=2, więc 3. znak: "  " indent + "✓" icon)
+        let hovered_row_y = 4;
+        let cell = buffer.cell((4, hovered_row_y)).expect("Valid cell");
+        assert_eq!(cell.bg, hover_bg, "Hovered row powinien mieć hover_row_bg");
+    }
+
+    #[test]
+    fn test_selected_has_priority_over_hover() {
+        let mut state = TaskSidebarState::new();
+        let tf = sample_tasks_file();
+        state.refresh(&tf);
+        state.toggle_expand();
+
+        // Ustaw i selected i hovered na ten sam wiersz (index 1)
+        state.selected_index = 1;
+        state.set_hovered(Some(1));
+
+        let buffer = render_sidebar(&mut state, 40, 12);
+
+        // Layout: inner_top = title (1) + padding_top (2) = 3
+        // Row 1 (selected=1, hovered=1) → y = 3 + 1 = 4
+        let selected_row_y = 4;
+        let cell = buffer.cell((4, selected_row_y)).expect("Valid cell");
+        assert_eq!(
+            cell.bg, DEFAULT_THEME.primary,
+            "Wybrany wiersz ma priorytet nad hover"
+        );
     }
 }

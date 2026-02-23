@@ -37,6 +37,9 @@ pub struct QuestionOption {
 pub struct ChoiceState {
     /// Indeks wybranej opcji w liście `options`
     pub selected: usize,
+    /// Indeks opcji pod kursorem myszy (hover, tylko wizualny feedback).
+    /// None = brak hover. Aktualizowany przez kallerów na podstawie MouseMoved.
+    pub hovered: Option<usize>,
 }
 
 impl ChoiceState {
@@ -47,7 +50,15 @@ impl ChoiceState {
 
     /// Tworzy stan z wybraną opcją o podanym indeksie
     pub fn with_selected(index: usize) -> Self {
-        Self { selected: index }
+        Self {
+            selected: index,
+            hovered: None,
+        }
+    }
+
+    /// Ustaw hover na opcję o podanym indeksie (None = brak hover).
+    pub fn set_hovered(&mut self, index: Option<usize>) {
+        self.hovered = index;
     }
 
     /// Przesuwa wybór w górę (z wrappingiem)
@@ -166,6 +177,8 @@ impl<'a> ChoiceWidget<'a> {
             }
 
             let is_selected = idx == state.selected;
+            // Hover: wizualny feedback — wyłączony gdy opcja jest wybrana
+            let is_hovered = state.hovered == Some(idx) && !is_selected;
 
             // Radio button + label
             let radio = if is_selected { "●" } else { "○" };
@@ -177,12 +190,21 @@ impl<'a> ChoiceWidget<'a> {
                 DEFAULT_THEME.muted_style()
             };
 
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(radio, style),
                 Span::raw(" "),
-                Span::styled(&option.label, style),
-            ]);
+                Span::styled(option.label.as_str(), style),
+            ];
 
+            // Hover: subtelne tło (zachowuje fg kolorów wybranej opcji)
+            if is_hovered {
+                let hover_bg = DEFAULT_THEME.hover_row_bg;
+                for span in &mut spans {
+                    span.style = span.style.bg(hover_bg);
+                }
+            }
+
+            let line = Line::from(spans);
             buf.set_line(area.x, y, &line, area.width);
             y += 1;
 
@@ -850,5 +872,95 @@ mod tests {
         // Down z 2 → 0
         state.move_down(3);
         assert_eq!(state.selected, 0);
+    }
+
+    // ── Hover Tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_hovered_updates_field() {
+        let mut state = ChoiceState::new();
+        assert_eq!(state.hovered, None);
+
+        state.set_hovered(Some(1));
+        assert_eq!(state.hovered, Some(1));
+
+        // Ta sama wartość — stan bez zmian
+        state.set_hovered(Some(1));
+        assert_eq!(state.hovered, Some(1));
+
+        // Zmiana na None
+        state.set_hovered(None);
+        assert_eq!(state.hovered, None);
+    }
+
+    #[test]
+    fn test_hovered_option_has_hover_bg() {
+        let options = vec![
+            QuestionOption {
+                label: "Alpha".into(),
+                description: None,
+            },
+            QuestionOption {
+                label: "Beta".into(),
+                description: None,
+            },
+        ];
+
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        let mut state = ChoiceState::new(); // selected=0
+        state.hovered = Some(1); // hover na drugą opcję
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, 3);
+                let widget = ChoiceWidget::new(&options, None);
+                frame.render_stateful_widget(widget, area, &mut state);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+
+        // Wiersz 0: opcja Alpha (selected, nie hovered) — primary bg
+        let row0_cell = buffer.cell((0, 0)).expect("cell");
+        assert_eq!(row0_cell.fg, DEFAULT_THEME.primary);
+
+        // Wiersz 1: opcja Beta (hovered, nie selected) — hover_row_bg
+        let row1_cell = buffer.cell((0, 1)).expect("cell");
+        assert_eq!(
+            row1_cell.bg, DEFAULT_THEME.hover_row_bg,
+            "Hovered option powinna mieć hover_row_bg"
+        );
+    }
+
+    #[test]
+    fn test_selected_has_priority_over_hover_choice() {
+        let options = vec![QuestionOption {
+            label: "Only".into(),
+            description: None,
+        }];
+
+        let backend = TestBackend::new(40, 2);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        let mut state = ChoiceState::new(); // selected=0
+        state.hovered = Some(0); // hover na tę samą opcję
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, 2);
+                let widget = ChoiceWidget::new(&options, None);
+                frame.render_stateful_widget(widget, area, &mut state);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        // Wybrany wiersz (idx=0=selected → is_hovered=false) ma primary fg
+        let cell = buffer.cell((0, 0)).expect("cell");
+        assert_eq!(
+            cell.fg, DEFAULT_THEME.primary,
+            "Wybrany item ma priorytet nad hover"
+        );
     }
 }

@@ -157,6 +157,7 @@ fn flatten_node(node: &TaskNode, depth: usize, expanded: &HashSet<String>, out: 
 /// - Component tag `[comp]` in DarkGray after the name
 /// - Deps arrows `→ dep_id` in DarkGray on the right
 /// - Selected item: reverse video (bg=primary, fg=black)
+/// - Hovered item: subtelne tło (hover_row_bg), tylko wizualny feedback
 ///
 /// Implements `StatefulWidget` with `TreeState`.
 /// Supports two modes:
@@ -165,6 +166,8 @@ fn flatten_node(node: &TaskNode, depth: usize, expanded: &HashSet<String>, out: 
 pub struct TaskTreeWidget<'a> {
     nodes: Option<&'a [TaskNode]>,
     pre_rows: Option<Vec<FlatRow>>,
+    /// Indeks wiersza pod kursorem myszy (None = brak hover)
+    hovered: Option<usize>,
 }
 
 impl<'a> TaskTreeWidget<'a> {
@@ -172,6 +175,7 @@ impl<'a> TaskTreeWidget<'a> {
         Self {
             nodes: Some(nodes),
             pre_rows: None,
+            hovered: None,
         }
     }
 
@@ -180,7 +184,15 @@ impl<'a> TaskTreeWidget<'a> {
         Self {
             nodes: None,
             pre_rows: Some(rows),
+            hovered: None,
         }
+    }
+
+    /// Ustaw indeks hoverowanego wiersza (builder pattern).
+    /// Używane przez explorer do przekazania pozycji kursora myszy.
+    pub fn with_hover(mut self, hovered: Option<usize>) -> Self {
+        self.hovered = hovered;
+        self
     }
 }
 
@@ -212,9 +224,11 @@ impl StatefulWidget for TaskTreeWidget<'_> {
         for (i, row) in visible_slice.enumerate() {
             let abs_index = state.scroll_offset + i;
             let is_selected = abs_index == state.selected;
+            // Hover: wizualny feedback — wyłączony gdy wiersz jest wybrany
+            let is_hovered = self.hovered == Some(abs_index) && !is_selected;
             let y = area.y + i as u16;
 
-            let line = build_row_line(row, is_selected, area.width as usize);
+            let line = build_row_line(row, is_selected, is_hovered, area.width as usize);
             let row_area = Rect::new(area.x, y, area.width, 1);
             Paragraph::new(line).render(row_area, buf);
         }
@@ -224,7 +238,18 @@ impl StatefulWidget for TaskTreeWidget<'_> {
 // ── Row rendering ───────────────────────────────────────────────────
 
 /// Build a styled Line for a single tree row.
-fn build_row_line(row: &FlatRow, is_selected: bool, max_width: usize) -> Line<'static> {
+///
+/// # Arguments
+/// - `row` — task data
+/// - `is_selected` — true if this row is currently selected (primary bg)
+/// - `is_hovered` — true if mouse cursor is over this row (hover_row_bg, subtelne)
+/// - `max_width` — max width for right-aligned dep arrows
+fn build_row_line(
+    row: &FlatRow,
+    is_selected: bool,
+    is_hovered: bool,
+    max_width: usize,
+) -> Line<'static> {
     let theme = &DEFAULT_THEME;
     let mut spans: Vec<Span<'static>> = Vec::new();
 
@@ -285,7 +310,7 @@ fn build_row_line(row: &FlatRow, is_selected: bool, max_width: usize) -> Line<'s
         spans.push(Span::styled(deps_text, theme.muted_style()));
     }
 
-    // Selection: reverse video
+    // Priorytet stylów: selected > hover > normalny
     let mut line = Line::from(spans);
     if is_selected {
         line = line.style(
@@ -293,6 +318,9 @@ fn build_row_line(row: &FlatRow, is_selected: bool, max_width: usize) -> Line<'s
                 .bg(theme.primary)
                 .fg(ratatui::style::Color::Black),
         );
+    } else if is_hovered {
+        // Hover: subtelne tło — nie zmienia fg kolorów statusów
+        line = line.style(Style::default().bg(theme.hover_row_bg));
     }
 
     line
@@ -624,5 +652,93 @@ tasks:
 
         let buffer = render_tree(&tasks, &mut state, 55, 3);
         insta::assert_snapshot!(snap(&buffer));
+    }
+
+    // ── Hover tests ──────────────────────────────────────────────────
+
+    /// Helper: render tree widget with hover support.
+    fn render_tree_with_hover(
+        nodes: &[TaskNode],
+        state: &mut TreeState,
+        hovered: Option<usize>,
+        width: u16,
+        height: u16,
+    ) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("Failed to create test terminal");
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, width, height);
+                let widget = TaskTreeWidget::new(nodes).with_hover(hovered);
+                frame.render_stateful_widget(widget, area, state);
+            })
+            .expect("Failed to draw");
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn test_with_hover_builder_sets_field() {
+        let tasks = sample_tasks();
+        let widget = TaskTreeWidget::new(&tasks).with_hover(Some(2));
+        assert_eq!(widget.hovered, Some(2));
+
+        let widget_none = TaskTreeWidget::new(&tasks);
+        assert_eq!(widget_none.hovered, None);
+    }
+
+    #[test]
+    fn test_hover_row_has_hover_bg() {
+        let tasks = sample_tasks();
+        let mut state = TreeState::new();
+
+        // Hover na wiersz 1 (abs_index=1 = "2"), wybrany = 0
+        let buffer = render_tree_with_hover(&tasks, &mut state, Some(1), 50, 4);
+
+        // Wiersz 0: normalny (nie hovered)
+        let normal_cell = buffer.cell((0, 0)).expect("Valid cell");
+        assert_ne!(
+            normal_cell.bg, DEFAULT_THEME.hover_row_bg,
+            "Normalny wiersz nie powinien mieć hover_row_bg"
+        );
+
+        // Wiersz 1: hovered → hover_row_bg
+        let hovered_cell = buffer.cell((0, 1)).expect("Valid cell");
+        assert_eq!(
+            hovered_cell.bg, DEFAULT_THEME.hover_row_bg,
+            "Hovered wiersz powinien mieć hover_row_bg"
+        );
+    }
+
+    #[test]
+    fn test_selected_has_priority_over_hover() {
+        let tasks = sample_tasks();
+        let mut state = TreeState::new();
+        // selected = 1, hover = 1 → selected ma priorytet
+        state.selected = 1;
+        let buffer = render_tree_with_hover(&tasks, &mut state, Some(1), 50, 4);
+
+        // Wiersz 1: wybrany → primary bg (nie hover_row_bg)
+        let cell = buffer.cell((0, 1)).expect("Valid cell");
+        assert_eq!(
+            cell.bg, DEFAULT_THEME.primary,
+            "Wybrany wiersz ma priorytet — primary bg, nie hover_row_bg"
+        );
+    }
+
+    #[test]
+    fn test_no_hover_has_no_hover_bg() {
+        let tasks = sample_tasks();
+        let mut state = TreeState::new();
+
+        // Brak hover — żaden wiersz nie ma hover_row_bg
+        let buffer = render_tree_with_hover(&tasks, &mut state, None, 50, 4);
+
+        for y in 0..2 {
+            let cell = buffer.cell((0, y)).expect("Valid cell");
+            assert_ne!(
+                cell.bg, DEFAULT_THEME.hover_row_bg,
+                "Wiersz {y} nie powinien mieć hover_row_bg gdy hover=None"
+            );
+        }
     }
 }

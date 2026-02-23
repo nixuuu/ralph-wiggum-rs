@@ -439,6 +439,7 @@ impl RunApp {
     /// Aktualizuj `hovered_area` na podstawie pozycji kursora (hit-test).
     ///
     /// Hover jest niezależny od focus — przesunięcie myszy nie zmienia `self.focus`.
+    /// Dodatkowo aktualizuje `hovered_index` w sidebarze gdy kursor jest nad sidebar.
     fn handle_mouse_moved(&mut self, col: u16, row: u16) -> EventResult {
         let pos = Position::new(col, row);
 
@@ -454,8 +455,30 @@ impl RunApp {
             None
         };
 
-        if self.hovered_area != new_hover {
-            self.hovered_area = new_hover;
+        let mut changed = self.hovered_area != new_hover;
+        self.hovered_area = new_hover;
+
+        // Aktualizuj hover wiersza w sidebarze (do podświetlenia konkretnego taska)
+        let prev_sidebar_hover = self.sidebar.hovered_index;
+        if new_hover == Some(FocusArea::Sidebar) {
+            if let Some(sidebar_rect) = self.sidebar_rect {
+                let inner_y = sidebar_rect.y.saturating_add(SIDEBAR_PADDING_TOP);
+                let new_row_hover = if row >= inner_y {
+                    let row_within_inner = (row - inner_y) as usize;
+                    Some(self.sidebar.scroll_offset + row_within_inner)
+                } else {
+                    None
+                };
+                self.sidebar.set_hovered(new_row_hover);
+            }
+        } else {
+            self.sidebar.set_hovered(None);
+        }
+        if self.sidebar.hovered_index != prev_sidebar_hover {
+            changed = true;
+        }
+
+        if changed {
             EventResult::Consumed
         } else {
             EventResult::Ignored

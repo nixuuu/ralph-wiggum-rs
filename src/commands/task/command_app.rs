@@ -530,6 +530,14 @@ impl AppState for TaskCommandApp {
                     }
                     return EventResult::Consumed;
                 }
+                MouseEventKind::Moved => {
+                    if let Some(widget) = self.active_widget.as_mut() {
+                        let area = self.last_known_ask_user_rect;
+                        widget.handle_hover(mouse, area);
+                        return EventResult::Consumed;
+                    }
+                    return EventResult::Ignored;
+                }
                 _ => return EventResult::Ignored,
             }
         }

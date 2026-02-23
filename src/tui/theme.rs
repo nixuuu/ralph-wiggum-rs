@@ -54,6 +54,10 @@ pub struct Theme {
     /// Kolor obramowania panelu hovered (kursor myszy, bez focusa)
     /// Subtelny — wyraźniejszy niż border_normal, ale ciemniejszy niż border_focused
     pub border_hover: Color,
+
+    /// Kolor tła hoverowanego wiersza (row hover w tree/sidebar/opcjach).
+    /// Subtelne podświetlenie — Surface0 #313244, lekko wyżej niż panel_bg.
+    pub hover_row_bg: Color,
 }
 
 /// Domyślny motyw — Catppuccin Mocha
@@ -91,6 +95,8 @@ pub const DEFAULT_THEME: Theme = Theme {
     text: Color::Rgb(205, 214, 244),
     // Overlay1 #7f849c — hover border (between border_normal and border_focused)
     border_hover: Color::Rgb(127, 132, 156),
+    // Surface0 #313244 — hover row background (subtelne podświetlenie wiersza)
+    hover_row_bg: Color::Rgb(49, 50, 68),
 };
 
 #[allow(dead_code)] // Public API — paleta kolorów dla TUI widoków
@@ -183,6 +189,12 @@ impl Theme {
         } else {
             self.panel_bg
         }
+    }
+
+    /// Style dla hoverowanego wiersza — subtelne tło bez zmiany fg.
+    /// Używane w tree/sidebar/opcjach do podświetlenia elementu pod kursorem.
+    pub fn hover_row_style(&self) -> Style {
+        Style::default().bg(self.hover_row_bg)
     }
 
     /// Mapuje status tasku na odpowiedni kolor z palety.
@@ -330,5 +342,19 @@ mod tests {
         let style = DEFAULT_THEME.border_style_hover(true, false);
         assert_eq!(style.fg, Some(Color::Rgb(137, 180, 250)));
         assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn hover_row_bg_is_surface0_catppuccin_mocha() {
+        // Surface0 #313244
+        assert_eq!(DEFAULT_THEME.hover_row_bg, Color::Rgb(49, 50, 68));
+    }
+
+    #[test]
+    fn hover_row_style_sets_bg_only() {
+        let style = DEFAULT_THEME.hover_row_style();
+        assert_eq!(style.bg, Some(Color::Rgb(49, 50, 68)));
+        // fg nie jest ustawiane — nie zmienia koloru tekstu
+        assert_eq!(style.fg, None);
     }
 }

@@ -68,8 +68,6 @@ pub(crate) fn draw_all(frame: &mut Frame, area: Rect, app: &mut TaskExplorerApp)
         InputMode::Filter => draw_filter_input(frame, bottom_area, app),
         InputMode::Normal => draw_progress_bar(frame, bottom_area, app),
     }
-
-    // TODO(13.8.x): użyć app.hovered_row w draw_tree_panel() do podświetlenia wiersza pod kursorem
 }
 
 // ── Tree panel ───────────────────────────────────────────────────────
@@ -96,11 +94,12 @@ fn draw_tree_panel(frame: &mut Frame, area: Rect, app: &mut TaskExplorerApp) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Render tree widget z posortowanymi i przefiltrowanymi wierszami
+    // Render tree widget z posortowanymi i przefiltrowanymi wierszami.
+    // with_hover() przekazuje indeks wiersza pod kursorem myszy — wizualny feedback.
     if inner.width > 0 && inner.height > 0 {
         let rows = app.visible_rows();
         let row_count = rows.len();
-        let widget = TaskTreeWidget::from_rows(rows);
+        let widget = TaskTreeWidget::from_rows(rows).with_hover(app.hovered_row);
         frame.render_stateful_widget(widget, inner, &mut app.tree_state);
 
         // Cache rect każdego widocznego wiersza drzewa (po render, gdy scroll_offset jest aktualny)

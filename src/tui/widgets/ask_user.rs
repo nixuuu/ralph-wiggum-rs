@@ -348,6 +348,40 @@ impl AskUserWidget {
         }
     }
 
+    /// Obsługuje zdarzenie ruchu myszy (hover) w stanie Active.
+    ///
+    /// Aktualizuje stan hover dla sub-widgetów (Choice/Confirm/Multi) na podstawie
+    /// pozycji kursora. Wywoływane przy `MouseEventKind::Moved`.
+    /// Nie zmienia wyboru ani nie submituje — tylko wizualny feedback.
+    ///
+    /// `area` — obszar terminala, w którym widget jest renderowany (do hit-testu).
+    pub fn handle_hover(&mut self, mouse: MouseEvent, area: Rect) {
+        if !matches!(mouse.kind, MouseEventKind::Moved) {
+            return;
+        }
+
+        let inner = match &mut self.state {
+            AskUserState::Active(inner) => inner,
+            AskUserState::Answered(_) => return,
+        };
+
+        match inner {
+            InnerState::Choice(state, other_input) => {
+                // W trybie "Other" text input pomijamy hover listy opcji
+                if other_input.is_none() {
+                    hover_choice_mouse(state, &self.question, mouse, area, self.scroll_offset);
+                }
+            }
+            InnerState::Confirm(state) => {
+                hover_confirm_mouse(state, &self.question, mouse, area, self.scroll_offset);
+            }
+            InnerState::Multi(state) => {
+                hover_multi_mouse(state, &self.question, mouse, area, self.scroll_offset);
+            }
+            InnerState::Text(_) => {}
+        }
+    }
+
     /// Przechodzi do stanu Answered z podaną odpowiedzią
     pub fn set_answered(&mut self, answer: String) {
         self.state = AskUserState::Answered(answer);
@@ -649,6 +683,127 @@ fn handle_multi_mouse(
 
     state.handle_mouse(mouse, options_area);
     AskUserAction::Continue
+}
+
+// ── Hover handlers per question type ────────────────────────────────
+
+/// Aktualizuje hover index w ChoiceState na podstawie pozycji kursora.
+///
+/// Geometria taka sama jak w `handle_choice_mouse`.
+/// Wywołaj przy `MouseEventKind::Moved` — nie zmienia selected.
+fn hover_choice_mouse(
+    state: &mut ChoiceState,
+    question: &AskUserQuestion,
+    mouse: MouseEvent,
+    area: Rect,
+    scroll_offset: u16,
+) {
+    let col = mouse.column;
+    let row = mouse.row;
+
+    let inner_x_start = area.x.saturating_add(2);
+    let inner_x_end = area.x.saturating_add(area.width).saturating_sub(2);
+    if col < inner_x_start || col >= inner_x_end {
+        state.set_hovered(None);
+        return;
+    }
+
+    let inner_width = area.width.saturating_sub(4).max(1) as usize;
+    let q_height = count_rendered_lines_for_width(question.question.trim_end(), inner_width);
+
+    let virt_row = row as i32 - area.y as i32 + scroll_offset as i32;
+    let content_start = 2i32 + q_height as i32;
+    let option_offset = virt_row - content_start;
+
+    if option_offset < 0 || option_offset as usize >= question.options.len() {
+        state.set_hovered(None);
+        return;
+    }
+
+    state.set_hovered(Some(option_offset as usize));
+}
+
+/// Aktualizuje hover w ConfirmState na podstawie pozycji kursora.
+///
+/// Geometria taka sama jak w `handle_confirm_mouse`.
+/// Wywołaj przy `MouseEventKind::Moved`.
+fn hover_confirm_mouse(
+    state: &mut ConfirmState,
+    question: &AskUserQuestion,
+    mouse: MouseEvent,
+    area: Rect,
+    scroll_offset: u16,
+) {
+    let inner_x = area.x.saturating_add(2);
+    let inner_y = area.y.saturating_add(2);
+    let inner_width = area.width.saturating_sub(4).max(1) as usize;
+
+    let q_height = count_rendered_lines_for_width(question.question.trim_end(), inner_width);
+
+    let button_y = inner_y
+        .saturating_add(q_height)
+        .saturating_sub(scroll_offset);
+
+    let widget_bottom = area.y.saturating_add(area.height);
+    if button_y < inner_y || button_y >= widget_bottom {
+        state.set_hovered(None);
+        return;
+    }
+
+    let button_area = Rect {
+        x: inner_x,
+        y: button_y,
+        width: inner_width as u16,
+        height: 1,
+    };
+
+    state.update_hover(mouse, button_area);
+}
+
+/// Aktualizuje hover index w MultiSelectState na podstawie pozycji kursora.
+///
+/// Geometria taka sama jak w `handle_multi_mouse`.
+/// Wywołaj przy `MouseEventKind::Moved`.
+fn hover_multi_mouse(
+    state: &mut MultiSelectState,
+    question: &AskUserQuestion,
+    mouse: MouseEvent,
+    area: Rect,
+    scroll_offset: u16,
+) {
+    let inner_x = area.x.saturating_add(2);
+    let inner_y = area.y.saturating_add(2);
+    let inner_width = area.width.saturating_sub(4).max(1) as usize;
+
+    let q_height = count_rendered_lines_for_width(question.question.trim_end(), inner_width);
+
+    let options_start_y = inner_y
+        .saturating_add(q_height)
+        .saturating_sub(scroll_offset);
+
+    let col = mouse.column;
+    let row = mouse.row;
+
+    // Sprawdź granice x
+    let inner_x_end = inner_x.saturating_add(inner_width as u16);
+    if col < inner_x || col >= inner_x_end {
+        state.set_hovered(None);
+        return;
+    }
+
+    // Sprawdź granice y
+    if row < options_start_y {
+        state.set_hovered(None);
+        return;
+    }
+
+    let option_idx = (row - options_start_y) as usize;
+    if option_idx >= state.options.len() {
+        state.set_hovered(None);
+        return;
+    }
+
+    state.set_hovered(Some(option_idx));
 }
 
 fn handle_confirm_key(state: &mut ConfirmState, key: KeyCode) -> AskUserAction {

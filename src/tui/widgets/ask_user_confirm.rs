@@ -13,6 +13,7 @@ use ratatui::{
 };
 
 use crate::shared::markdown::render_markdown;
+use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::text_input_overlay::InputAction;
 
 /// Stan confirm widget
@@ -22,6 +23,9 @@ pub struct ConfirmState {
     pub default: bool,
     /// Aktualnie wybrany: true = Yes, false = No
     pub selected: bool,
+    /// Przycisk pod kursorem myszy (hover, tylko wizualny feedback).
+    /// Some(true) = [Yes] hovered, Some(false) = [No] hovered, None = brak hover.
+    pub hovered: Option<bool>,
 }
 
 impl ConfirmState {
@@ -30,6 +34,29 @@ impl ConfirmState {
         Self {
             default,
             selected: default,
+            hovered: None,
+        }
+    }
+
+    /// Ustaw hover na przycisk (true=[Yes], false=[No], None=brak hover).
+    /// Wywoływane przez kallerów na podstawie pozycji kursora myszy.
+    pub fn set_hovered(&mut self, button: Option<bool>) {
+        self.hovered = button;
+    }
+
+    /// Aktualizuje hover na podstawie pozycji myszy względem obszaru przycisków.
+    ///
+    /// `buttons_area` — wiersz z przyciskami (ten sam co przekazywany do handle_mouse).
+    pub fn update_hover(&mut self, mouse: MouseEvent, buttons_area: Rect) {
+        let pos = Position::new(mouse.column, mouse.row);
+        let (yes_rect, no_rect) = ConfirmWidget::button_rects(buttons_area);
+
+        if yes_rect.contains(pos) {
+            self.hovered = Some(true);
+        } else if no_rect.contains(pos) {
+            self.hovered = Some(false);
+        } else {
+            self.hovered = None;
         }
     }
 
@@ -171,11 +198,15 @@ impl<'a> Widget for ConfirmWidget<'a> {
             return; // Brak miejsca na przyciski
         }
 
+        // Priorytet: selected (Cyan bg) > hovered (border_hover fg) > normalny (DarkGray)
         let yes_style = if self.state.selected {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
+        } else if self.state.hovered == Some(true) {
+            // Hover na [Yes] (nie wybrany): subtelne podświetlenie fg
+            Style::default().fg(DEFAULT_THEME.border_hover)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -185,6 +216,9 @@ impl<'a> Widget for ConfirmWidget<'a> {
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
+        } else if self.state.hovered == Some(false) {
+            // Hover na [No] (nie wybrany): subtelne podświetlenie fg
+            Style::default().fg(DEFAULT_THEME.border_hover)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -630,5 +664,131 @@ mod tests {
         // Klik przed area (x=5, row=3) → poza przyciskami
         let result_out = state.handle_mouse(make_left_click(5, 3), area);
         assert_eq!(result_out, None);
+    }
+
+    // ── Hover Tests ──────────────────────────────────────────────────
+
+    fn make_moved(col: u16, row: u16) -> MouseEvent {
+        use crossterm::event::KeyModifiers;
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn test_confirm_state_new_has_no_hover() {
+        let state = ConfirmState::new(true);
+        assert_eq!(state.hovered, None);
+    }
+
+    #[test]
+    fn test_set_hovered_updates_field() {
+        let mut state = ConfirmState::new(true);
+        state.set_hovered(Some(true));
+        assert_eq!(state.hovered, Some(true));
+
+        state.set_hovered(Some(false));
+        assert_eq!(state.hovered, Some(false));
+
+        state.set_hovered(None);
+        assert_eq!(state.hovered, None);
+    }
+
+    #[test]
+    fn test_update_hover_yes_button() {
+        let mut state = ConfirmState::new(false);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+
+        // Ruch na [Yes] (x=2, w środku yes_rect x=0..4)
+        state.update_hover(make_moved(2, 0), area);
+        assert_eq!(state.hovered, Some(true));
+    }
+
+    #[test]
+    fn test_update_hover_no_button() {
+        let mut state = ConfirmState::new(true);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+
+        // Ruch na [No] (x=8, w środku no_rect x=7..10)
+        state.update_hover(make_moved(8, 0), area);
+        assert_eq!(state.hovered, Some(false));
+    }
+
+    #[test]
+    fn test_update_hover_outside_clears_hover() {
+        let mut state = ConfirmState::new(true);
+        state.hovered = Some(true);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+
+        // Ruch poza przyciskami (x=20)
+        state.update_hover(make_moved(20, 0), area);
+        assert_eq!(state.hovered, None);
+    }
+
+    #[test]
+    fn test_hovered_no_button_gets_hover_fg_when_not_selected() {
+        // selected=true (Yes wybrany), hover=[No] → [No] powinien mieć border_hover fg
+        let mut state = ConfirmState::new(true);
+        state.hovered = Some(false); // hover na [No]
+
+        let buffer = render_widget_to_buffer(ConfirmWidget::new("", &state), 80, 1);
+
+        // [No] zaczyna się od x=7
+        let no_cell = buffer.cell((7, 0)).expect("cell");
+        assert_eq!(
+            no_cell.fg, DEFAULT_THEME.border_hover,
+            "[No] hovered (nie wybrany) → border_hover fg"
+        );
+    }
+
+    #[test]
+    fn test_hovered_yes_button_gets_hover_fg_when_not_selected() {
+        // selected=false (No wybrany), hover=[Yes] → [Yes] powinien mieć border_hover fg
+        let mut state = ConfirmState::new(false);
+        state.hovered = Some(true); // hover na [Yes]
+
+        let buffer = render_widget_to_buffer(ConfirmWidget::new("", &state), 80, 1);
+
+        // [Yes] zaczyna się od x=0
+        let yes_cell = buffer.cell((0, 0)).expect("cell");
+        assert_eq!(
+            yes_cell.fg, DEFAULT_THEME.border_hover,
+            "[Yes] hovered (nie wybrany) → border_hover fg"
+        );
+    }
+
+    #[test]
+    fn test_selected_has_priority_over_hover_confirm() {
+        // selected=true (Yes wybrany), hover=[Yes] → [Yes] ma Cyan bg (priorytet)
+        let mut state = ConfirmState::new(true);
+        state.hovered = Some(true); // hover na [Yes] — ten sam co selected
+
+        let buffer = render_widget_to_buffer(ConfirmWidget::new("", &state), 80, 1);
+
+        // [Yes] ma Cyan bg ponieważ jest wybrany
+        let yes_cell = buffer.cell((0, 0)).expect("cell");
+        assert_eq!(
+            yes_cell.bg,
+            Color::Cyan,
+            "[Yes] wybrany → Cyan bg (priorytet nad hover)"
+        );
     }
 }
