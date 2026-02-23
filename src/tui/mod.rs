@@ -8,6 +8,7 @@ pub mod formatting;
 #[allow(dead_code)]
 pub mod fuzzy;
 #[allow(dead_code)]
+pub mod hit_map;
 pub mod keybindings;
 pub mod responsive;
 pub mod ring_buffer;
@@ -32,6 +33,8 @@ pub use events::{
 pub use formatting::{
     format_duration_span, format_duration_string, format_tokens_span, format_tokens_string,
 };
+#[allow(unused_imports)] // Re-exporty dla hit map — obsługa myszy
+pub use hit_map::{HitId, HitMap, HitRegion};
 // Re-eksport fuzzy matching API — używane przez widgety z filtrowaniem (np. task explorer)
 #[allow(unused_imports)]
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
