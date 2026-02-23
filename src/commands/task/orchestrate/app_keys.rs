@@ -368,12 +368,35 @@ impl OrchestrateApp {
     /// ale dodatkowo anuluje `quit_pending` i `restart_pending`.
     /// Scroll offset resetuje się do 0 (follow tail) przez `set_focus()`.
     ///
-    /// Guard: gdy command palette lub text input overlay jest aktywny, zdarzenia myszy są ignorowane.
-    /// Spójna blokada z `handle_key()` (palette → priorytet 1, overlay → priorytet 2).
+    /// Specjalne zachowanie gdy overlay aktywny:
+    /// - `MouseDown Left` poza `overlay_rect` → zamyka overlay (jak Esc, bez pending message)
+    /// - `MouseDown Left` wewnątrz `overlay_rect` → ignorowany (overlay obsługuje własny input)
+    /// - Pozostałe zdarzenia myszą → ignorowane
+    ///
+    /// Guard: gdy command palette jest aktywna, zdarzenia myszy są ignorowane.
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> EventResult {
-        // Guard: overlay lub palette aktywne — ignoruj zdarzenia myszy.
-        // Zapobiega zmianie focusu workera gdy użytkownik pisze w overlay lub nawiguje paletą.
-        if self.is_palette_open() || self.is_overlay_active() {
+        // Guard: palette aktywna — ignoruj zdarzenia myszy.
+        if self.is_palette_open() {
+            return EventResult::Ignored;
+        }
+
+        // Overlay aktywny — obsłuż tylko MouseDown Left.
+        // Click poza overlay_rect zamyka overlay (jak Esc, bez generowania pending message).
+        // Click wewnątrz overlay_rect jest ignorowany — overlay obsługuje własny input klawiaturą.
+        if self.is_overlay_active() {
+            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                let pos = Position::new(mouse.column, mouse.row);
+                // Click poza overlay_rect zamyka overlay bez generowania wiadomości
+                if let Some(overlay_rect) = self.overlay_rect
+                    && !overlay_rect.contains(pos)
+                {
+                    if let Ok(mut guard) = self.shared_overlay.lock() {
+                        *guard = None;
+                    }
+                    return EventResult::Consumed;
+                }
+                // Click wewnątrz overlay (lub overlay_rect niezainicjalizowany) — ignoruj
+            }
             return EventResult::Ignored;
         }
 
@@ -2178,5 +2201,101 @@ tasks:
 
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.panels[&1].scroll_offset, 3);
+    }
+
+    // ── Click poza/wewnątrz TextInputOverlay tests ──────────────────
+
+    #[test]
+    fn mouse_left_click_outside_overlay_rect_closes_overlay() {
+        // Overlay aktywny, click poza overlay_rect → overlay zamknięty, Consumed
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+        let mut app = OrchestrateApp::new(2, overlay);
+        // Symuluj overlay_rect w centrum terminala (20,10)-(59,19)
+        app.overlay_rect = Some(ratatui::layout::Rect::new(20, 10, 40, 10));
+
+        // Click poza overlay_rect — góry lewy róg (0, 0)
+        let mouse = make_mouse_click(0, 0);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert!(!app.is_overlay_active()); // overlay zamknięty
+    }
+
+    #[test]
+    fn mouse_left_click_inside_overlay_rect_does_not_close() {
+        // Overlay aktywny, click wewnątrz overlay_rect → overlay nadal aktywny, Ignored
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+        let mut app = OrchestrateApp::new(2, overlay);
+        // Symuluj overlay_rect (20,10)-(59,19)
+        app.overlay_rect = Some(ratatui::layout::Rect::new(20, 10, 40, 10));
+
+        // Click wewnątrz overlay_rect — środek (30, 14)
+        let mouse = make_mouse_click(30, 14);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(app.is_overlay_active()); // overlay nadal aktywny
+    }
+
+    #[test]
+    fn mouse_left_click_outside_overlay_no_pending_message() {
+        // Click poza overlay zamyka go bez generowania pending message
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+        let mut app = OrchestrateApp::new(1, overlay);
+        app.overlay_rect = Some(ratatui::layout::Rect::new(20, 10, 40, 10));
+
+        let mouse = make_mouse_click(0, 0); // poza overlay_rect
+        app.handle_mouse(mouse);
+
+        // Brak pending messages — overlay nie wysłał wiadomości
+        assert!(app.take_pending_messages().is_empty());
+        assert!(!app.is_overlay_active());
+    }
+
+    #[test]
+    fn mouse_left_click_on_overlay_corner_boundary_does_not_close() {
+        // Click dokładnie na granicy overlay_rect (wewnątrz) — overlay nie zamykany
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+        let mut app = OrchestrateApp::new(1, overlay);
+        // overlay_rect: x=20, y=10, width=40, height=10 → zawiera (20,10)..(59,19)
+        app.overlay_rect = Some(ratatui::layout::Rect::new(20, 10, 40, 10));
+
+        // Lewy górny róg overlay (x=20, y=10) — contains() zwraca true
+        let mouse = make_mouse_click(20, 10);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(app.is_overlay_active());
+    }
+
+    #[test]
+    fn mouse_left_click_outside_overlay_when_overlay_rect_none_returns_ignored() {
+        // Gdy overlay_rect jest None (draw() nie był wywołany) — click nie zamyka overlay
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+        let mut app = OrchestrateApp::new(1, overlay);
+        // overlay_rect pozostaje None (nie ustawiamy)
+        assert!(app.overlay_rect.is_none());
+
+        let mouse = make_mouse_click(0, 0);
+        let result = app.handle_mouse(mouse);
+
+        // overlay_rect=None → nie zamykamy, zwracamy Ignored
+        assert_eq!(result, EventResult::Ignored);
+        assert!(app.is_overlay_active()); // overlay nadal aktywny
+    }
+
+    #[test]
+    fn mouse_scroll_when_overlay_active_with_rect_still_ignored() {
+        // Scroll myszy gdy overlay aktywny — ignorowany niezależnie od overlay_rect
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+        let mut app = OrchestrateApp::new(1, overlay);
+        app.overlay_rect = Some(ratatui::layout::Rect::new(20, 10, 40, 10));
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 80, 24));
+
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 0, 0); // poza overlay_rect
+        let result = app.handle_mouse(scroll_up);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.panels[&1].scroll_offset, 0);
     }
 }

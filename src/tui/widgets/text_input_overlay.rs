@@ -185,17 +185,23 @@ impl TextInputOverlay {
         self.target_worker_id
     }
 
+    /// Compute the Rect where this overlay will be rendered within the given terminal area.
+    ///
+    /// Uses the same centering and sizing logic as `render()`. Useful for hit-testing
+    /// in mouse handlers — allows checking whether a click falls inside or outside the overlay.
+    pub fn compute_rect(area: Rect) -> Rect {
+        let overlay_width = (area.width * 6 / 10).clamp(40, 80);
+        let overlay_height = (area.height / 2).clamp(10, 20);
+        centered_rect(overlay_width, overlay_height, area)
+    }
+
     /// Render the overlay widget onto the given frame at the specified area.
     ///
     /// The overlay is centered within the area and has a fixed size
     /// (60% width, 50% height, minimum 40x10, maximum 80x20).
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        // Compute overlay size (centered, 60% width, 50% height)
-        let overlay_width = (area.width * 6 / 10).clamp(40, 80);
-        let overlay_height = (area.height / 2).clamp(10, 20);
-
-        // Center the overlay
-        let overlay_area = centered_rect(overlay_width, overlay_height, area);
+        // Delegate to compute_rect to avoid duplicating the sizing/centering logic.
+        let overlay_area = Self::compute_rect(area);
 
         // Clear background with semi-transparent effect (render a blank block)
         let backdrop = Block::default().style(Style::default().bg(self.theme.border_normal));
@@ -508,6 +514,84 @@ mod tests {
         overlay.scroll_offset = 0;
         overlay.handle_key(KeyEvent::from(KeyCode::Down));
         assert_eq!(overlay.scroll_offset, 1);
+    }
+
+    // ── compute_rect tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_compute_rect_standard_terminal() {
+        // Standardowy terminal 80x24 — weryfikuje rozmiar i centrowanie overlaya
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let rect = TextInputOverlay::compute_rect(area);
+
+        // overlay_width = (80 * 6 / 10).clamp(40, 80) = 48
+        // overlay_height = (24 / 2).clamp(10, 20) = 12
+        assert_eq!(rect.width, 48);
+        assert_eq!(rect.height, 12);
+        // Centered: x = (80 - 48) / 2 = 16, y = (24 - 12) / 2 = 6
+        assert_eq!(rect.x, 16);
+        assert_eq!(rect.y, 6);
+    }
+
+    #[test]
+    fn test_compute_rect_click_outside_returns_false() {
+        // Weryfikacja hit-testowania: click poza overlay_rect → contains() = false
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let rect = TextInputOverlay::compute_rect(area);
+
+        // Lewy górny róg całego terminala jest poza overlay (który zaczyna się od x=16, y=6)
+        assert!(!rect.contains(ratatui::layout::Position::new(0, 0)));
+        assert!(!rect.contains(ratatui::layout::Position::new(15, 5)));
+    }
+
+    #[test]
+    fn test_compute_rect_click_inside_returns_true() {
+        // Weryfikacja hit-testowania: click wewnątrz overlay_rect → contains() = true
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let rect = TextInputOverlay::compute_rect(area);
+
+        // Środek overlaya (x=16+24=40, y=6+6=12) powinien być wewnątrz
+        let center_x = rect.x + rect.width / 2;
+        let center_y = rect.y + rect.height / 2;
+        assert!(rect.contains(ratatui::layout::Position::new(center_x, center_y)));
+
+        // Lewy górny róg overlay_rect powinien być wewnątrz
+        assert!(rect.contains(ratatui::layout::Position::new(rect.x, rect.y)));
+    }
+
+    #[test]
+    fn test_compute_rect_matches_render_logic() {
+        // compute_rect musi być spójne z render() — ta sama logika centrowania
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let computed = TextInputOverlay::compute_rect(area);
+
+        // overlay_width = (120 * 6 / 10).clamp(40, 80) = 72.clamp(40, 80) = 72
+        // overlay_height = (40 / 2).clamp(10, 20) = 20.clamp(10, 20) = 20
+        assert_eq!(computed.width, 72);
+        assert_eq!(computed.height, 20);
+        // Centered: x = (120 - 72) / 2 = 24, y = (40 - 20) / 2 = 10
+        assert_eq!(computed.x, 24);
+        assert_eq!(computed.y, 10);
     }
 
     #[test]

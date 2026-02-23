@@ -645,12 +645,18 @@ impl AppState for OrchestrateApp {
         // Render text input overlay on top (if active)
         render_overlay(frame, area, &self.shared_overlay);
 
-        // Cache overlay rect dla hit-testingu — area całego terminala gdy overlay aktywny
-        self.overlay_rect = self
+        // Cache overlay rect dla hit-testingu — aktualna pozycja i rozmiar wycentrowanego overlaya.
+        // Używany do hit-testowania kliknięć myszą: click poza overlay_rect zamyka overlay.
+        let overlay_active = self
             .shared_overlay
             .lock()
-            .ok()
-            .and_then(|guard| guard.is_some().then_some(area));
+            .map(|g| g.is_some())
+            .unwrap_or(false);
+        self.overlay_rect = if overlay_active {
+            Some(TextInputOverlay::compute_rect(area))
+        } else {
+            None
+        };
 
         // Render command palette on very top — najwyższy z-order
         if let Some(ref mut palette) = self.command_palette {
