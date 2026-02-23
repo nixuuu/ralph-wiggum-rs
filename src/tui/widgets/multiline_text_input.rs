@@ -223,6 +223,17 @@ impl MultilineTextInputState {
         self.scroll_offset
     }
 
+    /// Ustawia pozycję kursora (row, col) z automatycznym clampem do granic bufora.
+    ///
+    /// Używane w testach i przy integracji z zewnętrznymi kontrolerami stanu.
+    /// Po ustawieniu wywołuje `clamp_cursor()` i `clamp_scroll()`.
+    pub fn set_cursor(&mut self, row: usize, col: usize) {
+        self.cursor_row = row;
+        self.cursor_col = col;
+        self.clamp_cursor();
+        self.clamp_scroll();
+    }
+
     /// Zwraca logiczne linie bufora.
     fn logical_lines(&self) -> Vec<&str> {
         if self.buffer.is_empty() {

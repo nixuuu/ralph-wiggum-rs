@@ -36,6 +36,7 @@ impl KeyCombo {
     /// Sprawdza czy KeyEvent dokładnie pasuje do tego combo.
     ///
     /// Porównanie jest ścisłe: zarówno key code jak i modyfikatory muszą się zgadzać.
+    #[allow(dead_code)]
     pub fn matches(&self, event: &KeyEvent) -> bool {
         event.code == self.key && event.modifiers == self.modifiers
     }
@@ -191,6 +192,7 @@ impl<'de> Deserialize<'de> for KeyCombo {
 /// Wszystkie możliwe akcje klawiszowe w aplikacji.
 ///
 /// Warianty pogrupowane semantycznie: globalne, orchestrate, run, explorer.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyAction {
     // ── Global (wspólne dla wszystkich widoków) ──
@@ -483,6 +485,7 @@ macro_rules! impl_pairs {
 
 impl GlobalBindings {
     /// Rozwiąż KeyEvent na globalną KeyAction, jeśli pasuje do któregoś bindingu.
+    #[allow(dead_code)]
     pub fn resolve(&self, event: &KeyEvent) -> Option<KeyAction> {
         resolve_bindings!(self, event;
             quit => KeyAction::Quit,
@@ -506,6 +509,7 @@ impl GlobalBindings {
 
 impl OrchestrateBindings {
     /// Rozwiąż KeyEvent na orchestrate-specific KeyAction.
+    #[allow(dead_code)]
     pub fn resolve(&self, event: &KeyEvent) -> Option<KeyAction> {
         resolve_bindings!(self, event;
             focus_next => KeyAction::FocusNext,
@@ -523,6 +527,7 @@ impl OrchestrateBindings {
 
 impl RunBindings {
     /// Rozwiąż KeyEvent na run-specific KeyAction.
+    #[allow(dead_code)]
     pub fn resolve(&self, event: &KeyEvent) -> Option<KeyAction> {
         resolve_bindings!(self, event;
             toggle_expand => KeyAction::ToggleExpand,
@@ -532,6 +537,7 @@ impl RunBindings {
 
 impl ExplorerBindings {
     /// Rozwiąż KeyEvent na explorer-specific KeyAction.
+    #[allow(dead_code)]
     pub fn resolve(&self, event: &KeyEvent) -> Option<KeyAction> {
         resolve_bindings!(self, event;
             cycle_sort => KeyAction::CycleSort,
