@@ -180,7 +180,8 @@ pub(super) fn render_worker_grid(frame: &mut Frame, area: Rect, config: &WorkerG
     }
 
     // Filter active workers
-    let active_workers = filter_active_workers(config.worker_count, config.panels, config.show_idle);
+    let active_workers =
+        filter_active_workers(config.worker_count, config.panels, config.show_idle);
 
     let active_count = active_workers.len() as u32;
     if active_count > 0 {

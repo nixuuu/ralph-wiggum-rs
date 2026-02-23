@@ -3,7 +3,7 @@
 //! Migrated from `dashboard_input.rs` — full keyboard routing:
 //! quit flow, focus navigation, restart, preview, scroll, overlay.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::commands::task::orchestrate::app::{OrchestrateApp, QuitState, RestartState};
 use crate::commands::task::orchestrate::command_registry::{
@@ -336,6 +336,44 @@ impl OrchestrateApp {
             KeyCode::BackTab => self.handle_tab(false),
             KeyCode::Char(ch) if ch.is_ascii_digit() && ch != '0' => {
                 self.handle_direct_focus(ch as u32 - '0' as u32)
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    // ── Mouse handling ──────────────────────────────────────────────
+
+    /// Obsługa zdarzeń myszy.
+    ///
+    /// `MouseMoved` wykonuje hit-test na `grid_rects` (cache z ostatniego draw()).
+    /// Jeśli kursor jest nad worker panelem → `set_focus(Some(worker_id))`.
+    /// Jeśli kursor poza wszystkimi panelami → focus pozostaje bez zmian.
+    ///
+    /// Guard: gdy command palette lub text input overlay jest aktywny, hover jest ignorowany.
+    /// Spójna blokada z `handle_key()` (palette → priorytet 1, overlay → priorytet 2).
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> EventResult {
+        // Guard: overlay lub palette aktywne — ignoruj hover myszy.
+        // Zapobiega zmianie focusu workera gdy użytkownik pisze w overlay lub nawiguje paletą.
+        if self.is_palette_open() || self.is_overlay_active() {
+            return EventResult::Ignored;
+        }
+
+        match mouse.kind {
+            MouseEventKind::Moved => {
+                use ratatui::layout::Position;
+                let pos = Position::new(mouse.column, mouse.row);
+
+                // Iteruj po cache'owanych rectach workerów z ostatniego draw()
+                for &(worker_id, rect) in &self.grid_rects {
+                    if rect.contains(pos) {
+                        // Kursor nad worker panelem — ustaw focus natychmiast
+                        self.set_focus(Some(worker_id));
+                        return EventResult::Consumed;
+                    }
+                }
+
+                // Kursor poza wszystkimi panelami — brak zmiany focusu
+                EventResult::Ignored
             }
             _ => EventResult::Ignored,
         }
@@ -1303,5 +1341,183 @@ mod tests {
         let minus = make_key(KeyCode::Char('-'), KeyModifiers::NONE);
         let result = app.handle_key(minus);
         assert_eq!(result, EventResult::Consumed);
+    }
+
+    // ── Mouse hover → focus tests ───────────────────────────────────
+
+    fn make_mouse_move(column: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn make_mouse_click(column: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_moved_over_worker_rect_sets_focus() {
+        let mut app = make_app(3);
+        // Symuluj cache grid_rects: worker 2 w obszarze (10,5)-(29,24)
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 10, 5)),
+            (2, ratatui::layout::Rect::new(10, 5, 20, 20)),
+            (3, ratatui::layout::Rect::new(30, 0, 10, 5)),
+        ];
+
+        // Kursor w środku recta workera 2
+        let mouse = make_mouse_move(15, 10);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.focused_worker, Some(2));
+    }
+
+    #[test]
+    fn mouse_moved_over_first_worker_sets_focus() {
+        let mut app = make_app(3);
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 10, 10)),
+            (2, ratatui::layout::Rect::new(10, 0, 10, 10)),
+        ];
+
+        let mouse = make_mouse_move(5, 5);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.focused_worker, Some(1));
+    }
+
+    #[test]
+    fn mouse_moved_outside_all_rects_does_not_change_focus() {
+        let mut app = make_app(3);
+        app.focused_worker = Some(1);
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 10, 5)),
+            (2, ratatui::layout::Rect::new(10, 0, 10, 5)),
+        ];
+
+        // Kursor poza wszystkimi rectami
+        let mouse = make_mouse_move(50, 50);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored);
+        // Focus nie zmieniony
+        assert_eq!(app.focused_worker, Some(1));
+    }
+
+    #[test]
+    fn mouse_moved_empty_grid_rects_returns_ignored() {
+        let mut app = make_app(1);
+        app.focused_worker = Some(1);
+        // grid_rects puste (np. gdy aktywny preview)
+        app.grid_rects = vec![];
+
+        let mouse = make_mouse_move(10, 10);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.focused_worker, Some(1));
+    }
+
+    #[test]
+    fn mouse_click_does_not_change_focus() {
+        let mut app = make_app(2);
+        app.focused_worker = Some(1);
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 20, 20)),
+            (2, ratatui::layout::Rect::new(20, 0, 20, 20)),
+        ];
+
+        // Klik w obszarze workera 2 — nie powinien zmieniać focusu (tylko MouseMoved)
+        let mouse = make_mouse_click(25, 5);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.focused_worker, Some(1));
+    }
+
+    #[test]
+    fn mouse_moved_on_rect_boundary_hits_correct_worker() {
+        let mut app = make_app(2);
+        // Worker 1: x=0..9, y=0..9
+        // Worker 2: x=10..19, y=0..9
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 10, 10)),
+            (2, ratatui::layout::Rect::new(10, 0, 10, 10)),
+        ];
+
+        // Punkt dokładnie na lewej krawędzi workera 2
+        let mouse = make_mouse_move(10, 5);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.focused_worker, Some(2));
+    }
+
+    #[test]
+    fn mouse_hover_ignored_when_palette_open() {
+        let mut app = make_app(2);
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 20, 20)),
+            (2, ratatui::layout::Rect::new(20, 0, 20, 20)),
+        ];
+        app.open_command_palette();
+        assert!(app.is_palette_open());
+
+        // Hover nad workerem 1 — powinien zostać zignorowany gdy palette otwarta
+        let mouse = make_mouse_move(5, 5);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored);
+        // Focus nie zmieniony
+        assert_eq!(app.focused_worker, None);
+    }
+
+    #[test]
+    fn mouse_hover_ignored_when_overlay_active() {
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+        let mut app = OrchestrateApp::new(2, overlay);
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 20, 20)),
+            (2, ratatui::layout::Rect::new(20, 0, 20, 20)),
+        ];
+        assert!(app.is_overlay_active());
+
+        // Hover nad workerem 2 — powinien zostać zignorowany gdy overlay aktywny
+        let mouse = make_mouse_move(25, 5);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.focused_worker, None);
+    }
+
+    #[test]
+    fn handle_event_mouse_moved_delegates_to_handle_mouse() {
+        use crate::tui::app::AppState;
+        use crate::tui::keybindings::KeybindingResolver;
+
+        let mut app = make_app(2);
+        app.grid_rects = vec![(1, ratatui::layout::Rect::new(0, 0, 40, 20))];
+
+        let mouse = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.focused_worker, Some(1));
     }
 }
