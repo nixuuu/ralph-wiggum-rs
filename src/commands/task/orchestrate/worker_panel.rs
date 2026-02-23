@@ -27,16 +27,31 @@ pub struct WorkerPanelWidget<'a> {
     pub panel: &'a WorkerPanel,
     /// Is this panel focused?
     pub is_focused: bool,
+    /// Is this panel hovered (kursor myszy nad panelem, bez focusa)?
+    /// Gdy hovered && !focused → subtelna zmiana koloru obramowania.
+    pub is_hovered: bool,
     /// Theme for colors
     pub theme: &'a Theme,
 }
 
 impl<'a> WorkerPanelWidget<'a> {
-    /// Create a new WorkerPanelWidget with the default theme.
+    /// Create a new WorkerPanelWidget with the default theme (no hover).
+    #[allow(dead_code)] // Public API — convenience constructor bez hover state
     pub fn new(panel: &'a WorkerPanel, is_focused: bool) -> Self {
         Self {
             panel,
             is_focused,
+            is_hovered: false,
+            theme: &DEFAULT_THEME,
+        }
+    }
+
+    /// Create a new WorkerPanelWidget with hover state.
+    pub fn with_hover(panel: &'a WorkerPanel, is_focused: bool, is_hovered: bool) -> Self {
+        Self {
+            panel,
+            is_focused,
+            is_hovered,
             theme: &DEFAULT_THEME,
         }
     }
@@ -47,6 +62,7 @@ impl<'a> WorkerPanelWidget<'a> {
         Self {
             panel,
             is_focused,
+            is_hovered: false,
             theme,
         }
     }
@@ -113,14 +129,23 @@ impl<'a> WorkerPanelWidget<'a> {
         Style::default().bg(self.theme.panel_bg)
     }
 
-    /// Build the left border style based on worker state and focus.
+    /// Build the left border style based on worker state, focus and hover.
+    ///
+    /// Priorytety:
+    /// - focused: BOLD + kolor stanu workera (dominuje)
+    /// - hovered (nie focused): border_hover z theme (subtelna zmiana)
+    /// - normalny: kolor stanu workera bez modyfikatorów
     fn build_border_style(&self) -> Style {
         let state_color = self.panel.status.state.color();
-        let mut style = Style::default().fg(state_color);
         if self.is_focused {
-            style = style.add_modifier(Modifier::BOLD);
+            Style::default()
+                .fg(state_color)
+                .add_modifier(Modifier::BOLD)
+        } else if self.is_hovered {
+            Style::default().fg(self.theme.border_hover)
+        } else {
+            Style::default().fg(state_color)
         }
-        style
     }
 
     /// Build the content lines for the panel (status + output).
@@ -253,6 +278,29 @@ mod tests {
             status,
             worker_id,
             is_focused,
+            false,
+            idle_since,
+            &[],
+            width,
+            height,
+        )
+    }
+
+    /// Helper: builds a WorkerPanel with hover/focus state and renders it.
+    fn render_panel_with_hover(
+        status: WorkerStatus,
+        worker_id: u32,
+        is_focused: bool,
+        is_hovered: bool,
+        idle_since: Option<std::time::Instant>,
+        width: u16,
+        height: u16,
+    ) -> String {
+        render_panel_with_output(
+            status,
+            worker_id,
+            is_focused,
+            is_hovered,
             idle_since,
             &[],
             width,
@@ -261,10 +309,12 @@ mod tests {
     }
 
     /// Helper: builds a WorkerPanel with output lines and renders it.
+    #[allow(clippy::too_many_arguments)] // test helper — args: status, id, focused, hovered, idle, output, w, h
     fn render_panel_with_output(
         status: WorkerStatus,
         worker_id: u32,
         is_focused: bool,
+        is_hovered: bool,
         idle_since: Option<std::time::Instant>,
         output_lines: &[&str],
         width: u16,
@@ -288,7 +338,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
             .draw(|frame| {
-                let widget = WorkerPanelWidget::new(&panel, is_focused);
+                let widget = WorkerPanelWidget::with_hover(&panel, is_focused, is_hovered);
                 frame.render_widget(widget, area);
             })
             .expect("draw");
@@ -336,6 +386,34 @@ mod tests {
         status.output_tokens = 2300;
 
         let snapshot = render_panel_snapshot(status, 1, false, None, 50, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_panel_hovered_border() {
+        // Hovered panel: border_hover kolor (Overlay1), bez BOLD
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("2.1".into());
+        status.component = Some("api".into());
+        status.cost_usd = 0.042;
+        status.input_tokens = 1500;
+        status.output_tokens = 2300;
+
+        let snapshot = render_panel_with_hover(status, 1, false, true, None, 50, 6);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_panel_focused_dominates_hover() {
+        // Focused + hovered: focused style dominuje (BOLD + kolor stanu)
+        let mut status = make_status(WorkerState::Implementing);
+        status.task_id = Some("2.1".into());
+        status.component = Some("api".into());
+        status.cost_usd = 0.042;
+        status.input_tokens = 1500;
+        status.output_tokens = 2300;
+
+        let snapshot = render_panel_with_hover(status, 1, true, true, None, 50, 6);
         insta::assert_snapshot!(snapshot);
     }
 
@@ -466,7 +544,8 @@ mod tests {
             "Build completed successfully",
         ];
 
-        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 55, 10);
+        let snapshot =
+            render_panel_with_output(status, 1, false, false, None, output_lines, 55, 10);
         insta::assert_snapshot!(snapshot);
     }
 
@@ -536,7 +615,7 @@ mod tests {
             "OK",
         ];
 
-        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 20, 8);
+        let snapshot = render_panel_with_output(status, 1, false, false, None, output_lines, 20, 8);
         insta::assert_snapshot!(snapshot);
     }
 
@@ -559,7 +638,8 @@ mod tests {
             "Profile: test — in progress",
         ];
 
-        let snapshot = render_panel_with_output(status, 2, false, None, output_lines, 30, 10);
+        let snapshot =
+            render_panel_with_output(status, 2, false, false, None, output_lines, 30, 10);
         insta::assert_snapshot!(snapshot);
     }
 
@@ -604,7 +684,8 @@ mod tests {
             "Another long line with many words that should cause wrapping behavior",
         ];
 
-        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 30, 12);
+        let snapshot =
+            render_panel_with_output(status, 1, false, false, None, output_lines, 30, 12);
         insta::assert_snapshot!(snapshot);
     }
 
@@ -617,7 +698,7 @@ mod tests {
 
         let output_lines = &["First output line", "Second line (hidden)"];
 
-        let snapshot = render_panel_with_output(status, 2, false, None, output_lines, 50, 4);
+        let snapshot = render_panel_with_output(status, 2, false, false, None, output_lines, 50, 4);
         insta::assert_snapshot!(snapshot);
     }
 
@@ -652,7 +733,8 @@ mod tests {
             "⚠️  Warning: deprecated API",
         ];
 
-        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 60, 10);
+        let snapshot =
+            render_panel_with_output(status, 1, false, false, None, output_lines, 60, 10);
         insta::assert_snapshot!(snapshot);
     }
 
@@ -670,7 +752,8 @@ mod tests {
             "Mixed: 中文 and English",
         ];
 
-        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 60, 10);
+        let snapshot =
+            render_panel_with_output(status, 1, false, false, None, output_lines, 60, 10);
         insta::assert_snapshot!(snapshot);
     }
 
@@ -689,7 +772,8 @@ mod tests {
             "❌ Błąd: nie znaleziono pliku",
         ];
 
-        let snapshot = render_panel_with_output(status, 1, false, None, output_lines, 70, 10);
+        let snapshot =
+            render_panel_with_output(status, 1, false, false, None, output_lines, 70, 10);
         insta::assert_snapshot!(snapshot);
     }
 

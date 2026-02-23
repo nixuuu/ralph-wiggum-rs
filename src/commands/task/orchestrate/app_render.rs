@@ -159,6 +159,8 @@ pub(super) fn compute_active_worker_rects(
 pub(super) struct WorkerGridConfig<'a> {
     pub worker_count: u32,
     pub focused: Option<u32>,
+    /// Worker ID pod kursorem myszy (hover). None gdy kursor poza siatką.
+    pub hovered: Option<u32>,
     pub panels: &'a HashMap<u32, WorkerPanel>,
     pub show_preview: bool,
     pub preview_scroll: usize,
@@ -191,8 +193,8 @@ pub(super) fn render_worker_grid(frame: &mut Frame, area: Rect, config: &WorkerG
                 && let Some(panel) = config.panels.get(&worker_id)
             {
                 let is_focused = config.focused == Some(worker_id);
-                // TODO(13.8.x): użyć config.hovered do podświetlenia panelu pod kursorem myszy
-                let widget = WorkerPanelWidget::new(panel, is_focused);
+                let is_hovered = config.hovered == Some(worker_id);
+                let widget = WorkerPanelWidget::with_hover(panel, is_focused, is_hovered);
                 frame.render_widget(widget, rect);
             }
         }
@@ -452,6 +454,7 @@ mod tests {
         let config = WorkerGridConfig {
             worker_count: panels.len() as u32,
             focused,
+            hovered: None,
             panels,
             show_preview: false,
             preview_scroll: 0,

@@ -602,6 +602,7 @@ impl AppState for OrchestrateApp {
             &WorkerGridConfig {
                 worker_count: self.worker_count,
                 focused: self.focused_worker,
+                hovered: self.hovered_worker,
                 panels: &self.panels,
                 show_preview: self.show_task_preview,
                 preview_scroll: self.preview_scroll_offset,

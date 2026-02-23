@@ -50,6 +50,10 @@ pub struct Theme {
 
     /// Kolor tekstu głównego — Catppuccin Text #cdd6f4 (na ciemnym tle)
     pub text: Color,
+
+    /// Kolor obramowania panelu hovered (kursor myszy, bez focusa)
+    /// Subtelny — wyraźniejszy niż border_normal, ale ciemniejszy niż border_focused
+    pub border_hover: Color,
 }
 
 /// Domyślny motyw — Catppuccin Mocha
@@ -85,6 +89,8 @@ pub const DEFAULT_THEME: Theme = Theme {
     panel_bg_focused: Color::Rgb(49, 50, 68),
     // Text #cdd6f4 — main text color
     text: Color::Rgb(205, 214, 244),
+    // Overlay1 #7f849c — hover border (between border_normal and border_focused)
+    border_hover: Color::Rgb(127, 132, 156),
 };
 
 #[allow(dead_code)] // Public API — paleta kolorów dla TUI widoków
@@ -101,6 +107,28 @@ impl Theme {
             Style::default()
                 .fg(self.border_focused)
                 .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(self.border_normal)
+        }
+    }
+
+    /// Style obramowania z uwzględnieniem hover i focus.
+    ///
+    /// Priorytety: focused > hovered > normalny.
+    /// - focused: bold + border_focused
+    /// - hovered (nie focused): border_hover (subtelna zmiana)
+    /// - normalny: border_normal
+    ///
+    /// Generyczna wersja dla widgetów używających `border_focused` jako kolor focusa.
+    /// Uwaga: WorkerPanelWidget używa własnej logiki (border = `state_color` workera),
+    /// dlatego nie deleguje do tej metody.
+    pub fn border_style_hover(&self, focused: bool, hovered: bool) -> Style {
+        if focused {
+            Style::default()
+                .fg(self.border_focused)
+                .add_modifier(Modifier::BOLD)
+        } else if hovered {
+            Style::default().fg(self.border_hover)
         } else {
             Style::default().fg(self.border_normal)
         }
@@ -265,5 +293,42 @@ mod tests {
         let mut custom = DEFAULT_THEME;
         custom.primary = Color::Magenta;
         assert_ne!(custom, DEFAULT_THEME);
+    }
+
+    #[test]
+    fn border_hover_is_overlay1_catppuccin_mocha() {
+        assert_eq!(DEFAULT_THEME.border_hover, Color::Rgb(127, 132, 156)); // Overlay1
+    }
+
+    #[test]
+    fn border_style_hover_focused_dominates_over_hover() {
+        // focused=true, hovered=true → focused style (BOLD + border_focused)
+        let style = DEFAULT_THEME.border_style_hover(true, true);
+        assert_eq!(style.fg, Some(Color::Rgb(137, 180, 250)));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn border_style_hover_hovered_only_uses_hover_color() {
+        // focused=false, hovered=true → hover color (no BOLD)
+        let style = DEFAULT_THEME.border_style_hover(false, true);
+        assert_eq!(style.fg, Some(Color::Rgb(127, 132, 156))); // Overlay1
+        assert!(!style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn border_style_hover_neither_uses_normal_color() {
+        // focused=false, hovered=false → normal color
+        let style = DEFAULT_THEME.border_style_hover(false, false);
+        assert_eq!(style.fg, Some(Color::Rgb(69, 71, 90))); // Surface1
+        assert!(!style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn border_style_hover_focused_only_is_bold() {
+        // focused=true, hovered=false → focused style
+        let style = DEFAULT_THEME.border_style_hover(true, false);
+        assert_eq!(style.fg, Some(Color::Rgb(137, 180, 250)));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
     }
 }
