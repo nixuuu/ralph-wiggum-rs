@@ -10,6 +10,11 @@
 //! quit = "q"
 //! toggle_sidebar = "t"
 //! command_palette = "Ctrl+p"
+//!
+//! [keybindings.orchestrate]
+//! # View-specific bindings. Wygrywa nad global gdy oba pasują.
+//! command_palette = "Ctrl+k"
+//! toggle_preview = "p"
 //! ```
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -301,6 +306,7 @@ pub struct OrchestrateBindings {
     pub confirm_restart: KeyCombo,
     pub cancel_restart: KeyCombo,
     pub toggle_idle_workers: KeyCombo,
+    pub command_palette: KeyCombo,
 }
 
 impl Default for OrchestrateBindings {
@@ -315,6 +321,7 @@ impl Default for OrchestrateBindings {
             confirm_restart: KeyCombo::new(KeyCode::Char('y'), KeyModifiers::NONE),
             cancel_restart: KeyCombo::new(KeyCode::Char('n'), KeyModifiers::NONE),
             toggle_idle_workers: KeyCombo::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            command_palette: KeyCombo::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
         }
     }
 }
@@ -424,7 +431,7 @@ impl OrchestrateBindings {
             focus_next, focus_prev, toggle_preview,
             send_message, reload, restart,
             confirm_restart, cancel_restart,
-            toggle_idle_workers,
+            toggle_idle_workers, command_palette,
         )
     }
 }
@@ -522,6 +529,7 @@ impl OrchestrateBindings {
             confirm_restart => KeyAction::ConfirmRestart,
             cancel_restart => KeyAction::CancelRestart,
             toggle_idle_workers => KeyAction::ToggleIdleWorkers,
+            command_palette => KeyAction::CommandPalette,
         )
     }
 }
@@ -585,6 +593,7 @@ impl_pairs!(OrchestrateBindings;
     confirm_restart => KeyAction::ConfirmRestart,
     cancel_restart => KeyAction::CancelRestart,
     toggle_idle_workers => KeyAction::ToggleIdleWorkers,
+    command_palette => KeyAction::CommandPalette,
 );
 
 impl_pairs!(RunBindings;
@@ -1280,6 +1289,27 @@ toggle_preview = "v"
         assert_eq!(config.orchestrate.toggle_preview.key, KeyCode::Char('v'));
         // Defaults preserved
         assert_eq!(config.orchestrate.reload.key, KeyCode::Char('r'));
+        // Default command_palette
+        assert_eq!(config.orchestrate.command_palette.key, KeyCode::Char('p'));
+        assert_eq!(
+            config.orchestrate.command_palette.modifiers,
+            KeyModifiers::CONTROL
+        );
+    }
+
+    #[test]
+    fn toml_deserialize_orchestrate_custom_command_palette() {
+        // Test custom command_palette binding (e.g., Ctrl+K instead of Ctrl+P)
+        let toml_content = r#"
+[orchestrate]
+command_palette = "Ctrl+k"
+"#;
+        let config: KeybindingsConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.orchestrate.command_palette.key, KeyCode::Char('k'));
+        assert_eq!(
+            config.orchestrate.command_palette.modifiers,
+            KeyModifiers::CONTROL
+        );
     }
 
     #[test]
@@ -1656,6 +1686,42 @@ restart = "F5"
         let q = make_event(KeyCode::Char('q'), KeyModifiers::NONE);
         // 'q' nie jest już quit (zmienione), a nie jest też inną akcją globalną
         assert_eq!(resolver.resolve(&q, View::Global), None);
+    }
+
+    #[test]
+    fn resolver_orchestrate_command_palette_default() {
+        // Test default: Ctrl+P w orchestrate view powinno otwierać command palette
+        let resolver = KeybindingResolver::with_defaults();
+        let ctrl_p = make_event(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(
+            resolver.resolve(&ctrl_p, View::Orchestrate),
+            Some(KeyAction::CommandPalette)
+        );
+    }
+
+    #[test]
+    fn resolver_orchestrate_command_palette_custom() {
+        // Test custom: zmiana na Ctrl+K w orchestrate section
+        // Ctrl+K w orchestrate view powinno otwierać command palette
+        let mut user_config = KeybindingsConfig::default();
+        user_config.orchestrate.command_palette =
+            KeyCombo::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
+        let resolver = KeybindingResolver::from_user_config(user_config);
+
+        // Ctrl+K → CommandPalette (custom binding w orchestrate view)
+        let ctrl_k = make_event(KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(
+            resolver.resolve(&ctrl_k, View::Orchestrate),
+            Some(KeyAction::CommandPalette)
+        );
+
+        // Ctrl+P w orchestrate nadal działa (fallback do global::command_palette)
+        let ctrl_p = make_event(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        // Lookup chain: View::Orchestrate → nie ma Ctrl+P w orchestrate → fallback do global
+        assert_eq!(
+            resolver.resolve(&ctrl_p, View::Orchestrate),
+            Some(KeyAction::CommandPalette)
+        );
     }
 
     #[test]
