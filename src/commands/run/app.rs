@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
@@ -22,8 +22,8 @@ use crate::tui::responsive::LayoutAreas;
 use crate::tui::ring_buffer::OutputRingBuffer;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::{
-    Header, HeaderData, OutputView, OutputViewState, ProgressData, SplashScreen, StatusBar,
-    StatusBarData, TaskSidebar, TaskSidebarState,
+    Header, HeaderData, OutputView, OutputViewState, ProgressData, SIDEBAR_PADDING_TOP,
+    SplashScreen, StatusBar, StatusBarData, TaskSidebar, TaskSidebarState,
 };
 
 use super::output::OutputFormatter;
@@ -406,6 +406,52 @@ impl RunApp {
         }
     }
 
+    /// Obsługa zdarzeń myszy w run mode.
+    ///
+    /// Routing lewego kliknięcia:
+    /// - Klik w `sidebar_rect` → focus Sidebar + oblicz index tasku z row offset → select
+    /// - Klik poza sidebar → bez zmian focusu
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> EventResult {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_mouse_left_click(mouse.column, mouse.row)
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Obsługa lewego kliknięcia myszy.
+    ///
+    /// Klik w sidebar_rect → focus Sidebar + zaznaczenie tasku pod kursorem.
+    fn handle_mouse_left_click(&mut self, col: u16, row: u16) -> EventResult {
+        // Hit-test na sidebar (wymaga sidebar_rect z ostatniego draw())
+        let Some(sidebar_rect) = self.sidebar_rect else {
+            return EventResult::Ignored;
+        };
+
+        let pos = Position::new(col, row);
+        if !sidebar_rect.contains(pos) {
+            // Klik poza sidebar — nie zmieniaj focusu
+            return EventResult::Ignored;
+        }
+
+        // Focus sidebar
+        self.focus = FocusArea::Sidebar;
+
+        // Oblicz task index z row pozycji.
+        // inner_y = sidebar_rect.y + SIDEBAR_PADDING_TOP (z task_sidebar.rs).
+        // Task i jest renderowany w wierszu inner_y + i (uwzględniając scroll_offset).
+        let inner_y = sidebar_rect.y.saturating_add(SIDEBAR_PADDING_TOP);
+
+        if row >= inner_y {
+            let row_within_inner = (row - inner_y) as usize;
+            let task_index = self.sidebar.scroll_offset + row_within_inner;
+            self.sidebar.select_index(task_index);
+        }
+
+        EventResult::Consumed
+    }
+
     /// Anuluj stan quit_pending (wywołuj przy innych akcjach).
     fn cancel_quit_pending(&mut self) {
         self.quit_pending = false;
@@ -599,7 +645,7 @@ impl AppState for RunApp {
                 // Sidebar jest teraz dostępny jako overlay w Small mode — focus zachowany
                 EventResult::Consumed
             }
-            AppEvent::Mouse(_) => EventResult::Ignored,
+            AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
             AppEvent::Tick => {
                 // Jeśli splash screen jest aktywny — sprawdź timer (1.5s)
                 if self.phase == RunPhase::Splash {
@@ -629,6 +675,7 @@ mod tests {
     use super::*;
     use crate::tui::KeybindingResolver;
     use crate::tui::events::AppEvent;
+    use crate::tui::widgets::SIDEBAR_PADDING_TOP;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use ratatui::backend::TestBackend;
 
@@ -2655,5 +2702,212 @@ tasks:
             43,
             "Width should be 43 after final grow"
         );
+    }
+
+    // ── handle_mouse tests ──────────────────────────────────────────
+
+    /// Helper: tworzy MouseEvent dla testów.
+    fn make_mouse(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    /// Klik w sidebar_rect → focus = Sidebar.
+    #[test]
+    fn mouse_left_click_in_sidebar_changes_focus() {
+        let mut app = default_run_app();
+        // Ustaw ręcznie sidebar_rect (symuluje wynik draw())
+        let sidebar_rect = Rect::new(0, 0, 40, 20);
+        app.sidebar_rect = Some(sidebar_rect);
+        assert_eq!(app.focus, FocusArea::Output);
+
+        let click = make_mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            5, // col w obrębie sidebar
+            5, // row w obrębie sidebar
+        );
+        let result = app.handle_mouse(click);
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.focus, FocusArea::Sidebar);
+    }
+
+    /// Klik poza sidebar_rect → focus bez zmian.
+    #[test]
+    fn mouse_left_click_outside_sidebar_no_focus_change() {
+        let mut app = default_run_app();
+        let sidebar_rect = Rect::new(0, 0, 40, 20);
+        app.sidebar_rect = Some(sidebar_rect);
+        app.focus = FocusArea::Output;
+
+        // Klik poza sidebar (col = 50, poza obszarem 0..40)
+        let click = make_mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            50,
+            5,
+        );
+        let result = app.handle_mouse(click);
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.focus, FocusArea::Output);
+    }
+
+    /// Klik gdy brak sidebar_rect (sidebar ukryty) → Ignored.
+    #[test]
+    fn mouse_left_click_no_sidebar_rect_returns_ignored() {
+        let mut app = default_run_app();
+        assert!(app.sidebar_rect.is_none());
+
+        let click = make_mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            5,
+            5,
+        );
+        let result = app.handle_mouse(click);
+        assert_eq!(result, EventResult::Ignored);
+    }
+
+    /// Klik na konkretny task w sidebar zaznacza ten task.
+    #[test]
+    fn mouse_left_click_selects_task_by_row() {
+        let mut app = default_run_app();
+
+        // Załaduj 3 taski do sidebara
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(
+            r#"
+tasks:
+  - id: "1"
+    name: "Task A"
+    status: todo
+  - id: "2"
+    name: "Task B"
+    status: in_progress
+  - id: "3"
+    name: "Task C"
+    status: done
+"#,
+        )
+        .unwrap();
+        app.sidebar.refresh(&tf);
+
+        // Sidebar rect z offsetem y=0, padding top = SIDEBAR_PADDING_TOP (2)
+        let sidebar_rect = Rect::new(0, 0, 40, 20);
+        app.sidebar_rect = Some(sidebar_rect);
+
+        // Klik na wiersz inner_y + 1 → task index = scroll_offset + 1 = 0 + 1 = 1
+        let inner_y = SIDEBAR_PADDING_TOP;
+        let click = make_mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            5,
+            inner_y + 1, // row wiersza drugiego tasku (index 1)
+        );
+        let result = app.handle_mouse(click);
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.sidebar.selected_index, 1);
+    }
+
+    /// Klik na pierwszy task w sidebar zaznacza index 0.
+    #[test]
+    fn mouse_left_click_selects_first_task() {
+        let mut app = default_run_app();
+
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(
+            r#"
+tasks:
+  - id: "1"
+    name: "Task A"
+    status: todo
+  - id: "2"
+    name: "Task B"
+    status: done
+"#,
+        )
+        .unwrap();
+        app.sidebar.refresh(&tf);
+        app.sidebar.selected_index = 1; // ustaw na 2. task
+
+        let sidebar_rect = Rect::new(0, 0, 40, 20);
+        app.sidebar_rect = Some(sidebar_rect);
+
+        // Klik na row = inner_y + 0 → index = 0
+        let inner_y = SIDEBAR_PADDING_TOP;
+        let click = make_mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            5,
+            inner_y,
+        );
+        let result = app.handle_mouse(click);
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.sidebar.selected_index, 0);
+    }
+
+    /// Klik na row powyżej inner_y (w padding) → nie zmienia selected_index.
+    #[test]
+    fn mouse_left_click_in_sidebar_padding_no_task_select() {
+        let mut app = default_run_app();
+
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(
+            r#"
+tasks:
+  - id: "1"
+    name: "Task A"
+    status: todo
+"#,
+        )
+        .unwrap();
+        app.sidebar.refresh(&tf);
+        app.sidebar.selected_index = 0;
+
+        let sidebar_rect = Rect::new(0, 0, 40, 20);
+        app.sidebar_rect = Some(sidebar_rect);
+
+        // Klik na row = inner_y - 1 (w obszarze paddingu, przed listą tasków)
+        let inner_y = SIDEBAR_PADDING_TOP;
+        if inner_y > 0 {
+            let click = make_mouse(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                5,
+                inner_y - 1, // w obszarze paddingu
+            );
+            let result = app.handle_mouse(click);
+            // Klik jest w sidebar_rect → focus zmienia się, ale selected_index NIE
+            assert_eq!(result, EventResult::Consumed);
+            assert_eq!(app.focus, FocusArea::Sidebar);
+            // selected_index nie zmienia się (row < inner_y)
+            assert_eq!(app.sidebar.selected_index, 0);
+        }
+    }
+
+    /// Scroll myszy poza sidebar → Ignored.
+    #[test]
+    fn mouse_scroll_returns_ignored() {
+        let mut app = default_run_app();
+        let sidebar_rect = Rect::new(0, 0, 40, 20);
+        app.sidebar_rect = Some(sidebar_rect);
+
+        let scroll = make_mouse(crossterm::event::MouseEventKind::ScrollUp, 5, 5);
+        let result = app.handle_mouse(scroll);
+        assert_eq!(result, EventResult::Ignored);
+    }
+
+    /// handle_event deleguje AppEvent::Mouse do handle_mouse.
+    #[test]
+    fn handle_event_mouse_delegates_to_handle_mouse() {
+        let mut app = default_run_app();
+        let sidebar_rect = Rect::new(0, 0, 40, 20);
+        app.sidebar_rect = Some(sidebar_rect);
+        assert_eq!(app.focus, FocusArea::Output);
+
+        let resolver = KeybindingResolver::with_defaults();
+        let click = make_mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            5,
+            5,
+        );
+        let result = app.handle_event(AppEvent::Mouse(click), &resolver);
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.focus, FocusArea::Sidebar);
     }
 }
