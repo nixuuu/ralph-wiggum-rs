@@ -357,11 +357,8 @@ mod tests {
             prompt_prefix: None,
             prompt_suffix: None,
             profiles: Vec::new(),
-<<<<<<< HEAD
             keybindings_config: KeybindingsConfig::default(),
-=======
             scroll_step: 3,
->>>>>>> ralph/task/13.2.2
         };
 
         assert_eq!(
@@ -428,11 +425,8 @@ mod tests {
             prompt_prefix: None,
             prompt_suffix: None,
             profiles: Vec::new(),
-<<<<<<< HEAD
             keybindings_config: KeybindingsConfig::default(),
-=======
             scroll_step: 3,
->>>>>>> ralph/task/13.2.2
         };
 
         assert_eq!(

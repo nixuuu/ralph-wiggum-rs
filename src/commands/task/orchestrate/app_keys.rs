@@ -4,6 +4,7 @@
 //! quit flow, focus navigation, restart, preview, scroll, overlay.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::layout::Position;
 
 use crate::commands::task::orchestrate::app::{OrchestrateApp, QuitState, RestartState};
 use crate::commands::task::orchestrate::command_registry::{
@@ -345,28 +346,25 @@ impl OrchestrateApp {
 
     /// Obsługa zdarzeń myszy.
     ///
-    /// `MouseMoved` wykonuje hit-test na `grid_rects` (cache z ostatniego draw()).
-    /// Jeśli kursor jest nad worker panelem → `set_focus(Some(worker_id))`.
-    /// Jeśli kursor poza wszystkimi panelami → focus pozostaje bez zmian.
+    /// Routing:
+    /// - `MouseMoved` → hit-test na `grid_rects` → focus na worker panel pod kursorem
+    /// - `ScrollUp`/`ScrollDown` → hit-test na grid_rects → scroll panelu pod kursorem
+    /// - Pozostałe zdarzenia → ignorowane
     ///
-    /// Guard: gdy command palette lub text input overlay jest aktywny, hover jest ignorowany.
-    /// Spójna blokada z `handle_key()` (palette → priorytet 1, overlay → priorytet 2).
+    /// Guard (hover): gdy command palette lub text input overlay jest aktywny, hover jest ignorowany.
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> EventResult {
-        // Guard: overlay lub palette aktywne — ignoruj hover myszy.
-        // Zapobiega zmianie focusu workera gdy użytkownik pisze w overlay lub nawiguje paletą.
-        if self.is_palette_open() || self.is_overlay_active() {
-            return EventResult::Ignored;
-        }
-
         match mouse.kind {
             MouseEventKind::Moved => {
-                use ratatui::layout::Position;
+                // Guard: overlay lub palette aktywne — ignoruj hover myszy.
+                if self.is_palette_open() || self.is_overlay_active() {
+                    return EventResult::Ignored;
+                }
+
                 let pos = Position::new(mouse.column, mouse.row);
 
                 // Iteruj po cache'owanych rectach workerów z ostatniego draw()
                 for &(worker_id, rect) in &self.grid_rects {
                     if rect.contains(pos) {
-                        // Kursor nad worker panelem — ustaw focus natychmiast
                         self.set_focus(Some(worker_id));
                         return EventResult::Consumed;
                     }
@@ -374,6 +372,10 @@ impl OrchestrateApp {
 
                 // Kursor poza wszystkimi panelami — brak zmiany focusu
                 EventResult::Ignored
+            }
+            MouseEventKind::ScrollUp => self.handle_mouse_scroll(mouse.column, mouse.row, true),
+            MouseEventKind::ScrollDown => {
+                self.handle_mouse_scroll(mouse.column, mouse.row, false)
             }
             _ => EventResult::Ignored,
         }
@@ -413,6 +415,62 @@ impl OrchestrateApp {
         } else {
             EventResult::Consumed
         }
+    }
+
+    /// Obsługa scroll myszy na pozycji (col, row).
+    ///
+    /// Priorytet:
+    /// 1. Gdy overlay aktywny — ignoruj (overlay obsługuje własny input)
+    /// 2. Gdy task preview aktywny — scrolluj preview
+    /// 3. Hit-test na grid_rects → scroll panelu pod kursorem
+    /// 4. Kursor poza panelami → ignoruj
+    ///
+    /// `scroll_up=true` → w górę (ku starszym liniom, offset rośnie).
+    /// `scroll_up=false` → w dół (ku nowszym liniom, offset maleje).
+    fn handle_mouse_scroll(&mut self, col: u16, row: u16, scroll_up: bool) -> EventResult {
+        // Overlay aktywny — nie obsługuj scrollu myszy (overlay ma własny input)
+        if self.is_overlay_active() {
+            return EventResult::Ignored;
+        }
+
+        let pos = Position { x: col, y: row };
+        let step = self.scroll_step as i32;
+        // delta < 0 = w górę (ku starszym), delta > 0 = w dół (ku nowszym)
+        let delta = if scroll_up { -step } else { step };
+
+        // Gdy task preview aktywny — scrolluj preview niezależnie od pozycji kursora
+        if self.show_task_preview {
+            match delta {
+                d if d < 0 => {
+                    let up = (-d) as usize;
+                    self.preview_scroll_offset = self.preview_scroll_offset.saturating_sub(up);
+                }
+                d if d > 0 => {
+                    let down = d as usize;
+                    self.preview_scroll_offset = self.preview_scroll_offset.saturating_add(down);
+                }
+                _ => {}
+            }
+            return EventResult::Consumed;
+        }
+
+        // Hit-test: znajdź worker panel pod kursorem.
+        // Pobieramy worker_id przed modyfikacją panels — kończy borrow grid_rects.
+        let worker_id = self
+            .grid_rects
+            .iter()
+            .find(|(_, rect)| rect.contains(pos))
+            .map(|(id, _)| *id);
+
+        if let Some(wid) = worker_id {
+            if let Some(panel) = self.panels.get_mut(&wid) {
+                panel.scroll_output(delta);
+            }
+            return EventResult::Consumed;
+        }
+
+        // Kursor poza jakimkolwiek panelem — ignoruj
+        EventResult::Ignored
     }
 
     fn handle_input_overlay_key(&mut self) -> EventResult {
@@ -461,7 +519,9 @@ impl OrchestrateApp {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+    };
 
     use crate::commands::task::orchestrate::app::OrchestrateApp;
     use crate::commands::task::orchestrate::app::{QuitState, RestartState};
@@ -1519,5 +1579,233 @@ mod tests {
 
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.focused_worker, Some(1));
+    }
+
+    // ── Mouse scroll tests ──────────────────────────────────────────
+
+    fn make_scroll(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Pomocnik: ustaw grid_rects symulując panel workera w danym obszarze.
+    fn set_worker_rect(app: &mut OrchestrateApp, worker_id: u32, rect: ratatui::layout::Rect) {
+        app.grid_rects.retain(|(id, _)| *id != worker_id);
+        app.grid_rects.push((worker_id, rect));
+    }
+
+    #[test]
+    fn mouse_scroll_up_over_panel_scrolls_that_panel() {
+        let mut app = make_app(2);
+        // Worker 1 zajmuje kolumny 0-49, wiersze 0-19
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+        // Worker 2 zajmuje kolumny 50-99, wiersze 0-19
+        set_worker_rect(&mut app, 2, ratatui::layout::Rect::new(50, 0, 50, 20));
+
+        // Scroll up nad worker 1 (kursor: 10, 5)
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 10, 5);
+        let result = app.handle_mouse(scroll_up);
+
+        assert_eq!(result, EventResult::Consumed);
+        // Worker 1 powinien być przewinięty w górę (scroll_step=3)
+        assert_eq!(app.panels[&1].scroll_offset, 3);
+        // Worker 2 bez zmian
+        assert_eq!(app.panels[&2].scroll_offset, 0);
+    }
+
+    #[test]
+    fn mouse_scroll_down_over_panel_scrolls_that_panel() {
+        let mut app = make_app(2);
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+
+        // Ustaw offset > 0 żeby było co zmniejszać
+        app.panels.get_mut(&1).unwrap().scroll_offset = 10;
+
+        // Scroll down nad worker 1 (kursor: 10, 5)
+        let scroll_down = make_scroll(MouseEventKind::ScrollDown, 10, 5);
+        let result = app.handle_mouse(scroll_down);
+
+        assert_eq!(result, EventResult::Consumed);
+        // offset powinien spaść o scroll_step (3)
+        assert_eq!(app.panels[&1].scroll_offset, 7);
+    }
+
+    #[test]
+    fn mouse_scroll_over_second_panel_only_scrolls_that_panel() {
+        let mut app = make_app(2);
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+        set_worker_rect(&mut app, 2, ratatui::layout::Rect::new(50, 0, 50, 20));
+
+        // Scroll up nad worker 2 (kursor: 60, 5)
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 60, 5);
+        let result = app.handle_mouse(scroll_up);
+
+        assert_eq!(result, EventResult::Consumed);
+        // Tylko worker 2 powinien być przewinięty
+        assert_eq!(app.panels[&1].scroll_offset, 0);
+        assert_eq!(app.panels[&2].scroll_offset, 3);
+    }
+
+    #[test]
+    fn mouse_scroll_outside_panels_ignored() {
+        let mut app = make_app(1);
+        // Panel w obszarze 0-49, 0-19
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+
+        // Kursor poza panelem (kursor: 60, 25)
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 60, 25);
+        let result = app.handle_mouse(scroll_up);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.panels[&1].scroll_offset, 0);
+    }
+
+    #[test]
+    fn mouse_scroll_with_no_panels_ignored() {
+        let mut app = make_app(1);
+        // grid_rects jest pusty (brak paneli)
+        assert!(app.grid_rects.is_empty());
+
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 10, 5);
+        let result = app.handle_mouse(scroll_up);
+
+        assert_eq!(result, EventResult::Ignored);
+    }
+
+    #[test]
+    fn mouse_scroll_over_panel_without_focus_works() {
+        let mut app = make_app(2);
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+
+        // Brak focusu — focused_worker = None
+        app.focused_worker = None;
+
+        // Scroll nad worker 1 powinien działać niezależnie od focusu
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 10, 5);
+        let result = app.handle_mouse(scroll_up);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.panels[&1].scroll_offset, 3);
+    }
+
+    #[test]
+    fn mouse_scroll_uses_scroll_step_from_config() {
+        let mut app = make_app(1).with_scroll_step(5); // niedomyślny scroll_step
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 10, 5);
+        app.handle_mouse(scroll_up);
+
+        // offset powinien wzrosnąć o scroll_step=5
+        assert_eq!(app.panels[&1].scroll_offset, 5);
+    }
+
+    #[test]
+    fn mouse_scroll_when_preview_active_scrolls_preview() {
+        let mut app = make_app(1);
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+        app.show_task_preview = true;
+        app.preview_scroll_offset = 5;
+
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 10, 5);
+        let result = app.handle_mouse(scroll_up);
+
+        assert_eq!(result, EventResult::Consumed);
+        // Preview powinno być przewinięte w górę (offset zmniejszony)
+        assert_eq!(app.preview_scroll_offset, 2); // 5 - 3
+        // Panel workera bez zmian
+        assert_eq!(app.panels[&1].scroll_offset, 0);
+    }
+
+    #[test]
+    fn mouse_scroll_preview_clamps_to_zero() {
+        let mut app = make_app(1);
+        app.show_task_preview = true;
+        app.preview_scroll_offset = 1;
+
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 10, 5);
+        app.handle_mouse(scroll_up);
+
+        // Nie powinno zejść poniżej 0
+        assert_eq!(app.preview_scroll_offset, 0);
+    }
+
+    #[test]
+    fn mouse_scroll_down_from_tail_no_change() {
+        let mut app = make_app(1);
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+        app.panels.get_mut(&1).unwrap().scroll_offset = 0; // na ogonie
+
+        let scroll_down = make_scroll(MouseEventKind::ScrollDown, 10, 5);
+        app.handle_mouse(scroll_down);
+
+        // offset=0 (tail) — scroll down nie zmienia
+        assert_eq!(app.panels[&1].scroll_offset, 0);
+    }
+
+    #[test]
+    fn mouse_scroll_up_from_tail_sets_offset() {
+        let mut app = make_app(1);
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+        app.panels.get_mut(&1).unwrap().scroll_offset = 0;
+
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 10, 5);
+        app.handle_mouse(scroll_up);
+
+        // Przejście z 0 → scroll_step
+        assert_eq!(app.panels[&1].scroll_offset, 3);
+    }
+
+    #[test]
+    fn mouse_non_scroll_event_ignored() {
+        let mut app = make_app(1);
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+
+        use crossterm::event::MouseButton;
+        let click = make_scroll(MouseEventKind::Down(MouseButton::Left), 10, 5);
+        let result = app.handle_mouse(click);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.panels[&1].scroll_offset, 0);
+    }
+
+    #[test]
+    fn mouse_scroll_when_overlay_active_ignored() {
+        use crate::tui::widgets::TextInputOverlay;
+        let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
+        let mut app = OrchestrateApp::new(1, overlay);
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+
+        let scroll_up = make_scroll(MouseEventKind::ScrollUp, 10, 5);
+        let result = app.handle_mouse(scroll_up);
+
+        // Overlay aktywny — scroll ignorowany
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.panels[&1].scroll_offset, 0);
+    }
+
+    #[test]
+    fn handle_event_mouse_scroll_routes_to_handle_mouse() {
+        use crate::tui::app::AppState;
+        use crate::tui::keybindings::KeybindingResolver;
+
+        let mut app = make_app(1);
+        set_worker_rect(&mut app, 1, ratatui::layout::Rect::new(0, 0, 50, 20));
+
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.panels[&1].scroll_offset, 3);
     }
 }

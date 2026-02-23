@@ -54,6 +54,35 @@ impl WorkerPanel {
             idle_since: None,
         }
     }
+
+    /// Zastosuj scroll delta do offsetu wyjścia workera.
+    ///
+    /// Offset 0 = follow tail (najnowsze linie), offset > 0 = przewiń ku starszym.
+    /// - `i32::MIN` → skocz na sam górę (najstarsze linie, offset = usize::MAX)
+    /// - `i32::MAX` → skocz na dół (follow tail, offset = 0)
+    /// - delta < 0 → ku starszym (offset rośnie)
+    /// - delta > 0 → ku nowszym (offset maleje, min 0)
+    pub(crate) fn scroll_output(&mut self, delta: i32) {
+        match delta {
+            i32::MIN => self.scroll_offset = usize::MAX,
+            i32::MAX => self.scroll_offset = 0,
+            d if d < 0 => {
+                let up = (-d) as usize;
+                if self.scroll_offset == 0 {
+                    self.scroll_offset = up;
+                } else {
+                    self.scroll_offset = self.scroll_offset.saturating_add(up);
+                }
+            }
+            d if d > 0 => {
+                let down = d as usize;
+                if self.scroll_offset > 0 {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(down);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 // ── Quit confirmation flow ──────────────────────────────────────────
@@ -469,29 +498,7 @@ impl OrchestrateApp {
                 return;
             };
 
-            match delta {
-                // Left = jump to top (oldest) = max offset
-                i32::MIN => panel.scroll_offset = usize::MAX,
-                // Right = jump to bottom (newest/tail) = offset 0
-                i32::MAX => panel.scroll_offset = 0,
-                // Up = scroll toward older content = increase offset
-                d if d < 0 => {
-                    let up = (-d) as usize;
-                    if panel.scroll_offset == 0 {
-                        panel.scroll_offset = up;
-                    } else {
-                        panel.scroll_offset = panel.scroll_offset.saturating_add(up);
-                    }
-                }
-                // Down = scroll toward newer content = decrease offset
-                d if d > 0 => {
-                    let down = d as usize;
-                    if panel.scroll_offset > 0 {
-                        panel.scroll_offset = panel.scroll_offset.saturating_sub(down);
-                    }
-                }
-                _ => {}
-            }
+            panel.scroll_output(delta);
         }
     }
 
