@@ -232,6 +232,9 @@ pub struct TuiConfig {
     /// Theme name (default: "default")
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Scroll step in lines (default: 3)
+    #[serde(default = "default_scroll_step")]
+    pub scroll_step: u16,
 }
 
 impl Default for TuiConfig {
@@ -241,6 +244,7 @@ impl Default for TuiConfig {
             sidebar_width: default_sidebar_width(),
             sidebar_visible: default_true(),
             theme: default_theme(),
+            scroll_step: default_scroll_step(),
         }
     }
 }
@@ -261,6 +265,7 @@ impl TuiConfig {
                 d.sidebar_visible,
             ),
             theme: merge_scalar(base.theme, overlay.theme, d.theme),
+            scroll_step: merge_scalar(base.scroll_step, overlay.scroll_step, d.scroll_step),
         }
     }
 }
@@ -279,6 +284,10 @@ fn default_sidebar_width() -> u16 {
 
 fn default_theme() -> String {
     "default".to_string()
+}
+
+fn default_scroll_step() -> u16 {
+    3
 }
 
 /// Prompt configuration with optional prefix and suffix
@@ -2819,6 +2828,36 @@ nerd_font = false
         assert_eq!(config.tui.output_buffer_size, 7500);
         assert_eq!(config.tui.theme, "solarized");
         assert!(!config.ui.nerd_font);
+    }
+
+    #[test]
+    fn test_tui_scroll_step_default() {
+        let config = FileConfig::default();
+        assert_eq!(config.tui.scroll_step, 3);
+    }
+
+    #[test]
+    fn test_tui_scroll_step_from_toml() {
+        let toml_content = r#"
+[tui]
+scroll_step = 5
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.tui.scroll_step, 5);
+    }
+
+    #[test]
+    fn test_tui_scroll_step_backward_compatibility() {
+        // .ralph.toml without scroll_step field should use default
+        let toml_content = r#"
+[tui]
+output_buffer_size = 8000
+theme = "light"
+"#;
+        let config: FileConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.tui.scroll_step, 3); // default value
+        assert_eq!(config.tui.output_buffer_size, 8000);
+        assert_eq!(config.tui.theme, "light");
     }
 
     // ── Task 10.2: Cascading config merge tests ─────────────────────────

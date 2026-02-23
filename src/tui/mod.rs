@@ -26,9 +26,9 @@ pub mod test_helpers;
 pub use app::{App, AppState};
 #[allow(unused_imports)] // Re-exporty — będą używane przez per-command widoki TUI
 pub use events::{
-    AppEvent, EventDispatcher, EventResult, KeyHandler, dispatch_key, is_ctrl_c, is_quit_key,
-    is_scroll_down, is_scroll_up, is_left_click, is_right_click, is_mouse_scroll_up,
-    is_mouse_scroll_down, is_mouse_move, mouse_position,
+    AppEvent, EventDispatcher, EventResult, KeyHandler, dispatch_key, is_ctrl_c, is_left_click,
+    is_mouse_move, is_mouse_scroll_down, is_mouse_scroll_up, is_quit_key, is_right_click,
+    is_scroll_down, is_scroll_up, mouse_position,
 };
 #[allow(unused_imports)] // Re-exporty — będą używane przez per-command widoki TUI
 pub use formatting::{

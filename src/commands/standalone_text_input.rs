@@ -517,10 +517,7 @@ pub fn text_input(
                                 Span::raw(frag),
                             ]));
                         } else {
-                            lines_vec.push(Line::from(vec![
-                                Span::raw("  "),
-                                Span::raw(frag),
-                            ]));
+                            lines_vec.push(Line::from(vec![Span::raw("  "), Span::raw(frag)]));
                         }
                     }
                     Text::from(lines_vec)
@@ -1174,6 +1171,9 @@ mod tests {
         // Kursor na col=7 w logicznej linii, fragment zaczyna się od 5
         // col_in_frag = 7-5 = 2, display: "wo" (2 kolumny) + 2 (indent "  ") = 4
         let col = cursor_display_col("hello world", 5, 7, false);
-        assert_eq!(col, 4, "2 znaki 'wo' od offset=5 do cursor=7, +2 indent = 4");
+        assert_eq!(
+            col, 4,
+            "2 znaki 'wo' od offset=5 do cursor=7, +2 indent = 4"
+        );
     }
 }

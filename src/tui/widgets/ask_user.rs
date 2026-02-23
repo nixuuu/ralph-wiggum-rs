@@ -472,13 +472,7 @@ impl Widget for AskUserWidget {
             height: full_height,
         };
         let mut virt_buf = Buffer::empty(virt_rect);
-        render_widget_inner(
-            &question,
-            &mut state,
-            &title,
-            virt_rect,
-            &mut virt_buf,
-        );
+        render_widget_inner(&question, &mut state, &title, virt_rect, &mut virt_buf);
 
         // Kopiuj slice [scroll_offset .. scroll_offset + area.height] do realnego buf
         let copy_rows = area.height.min(full_height.saturating_sub(scroll_offset));
