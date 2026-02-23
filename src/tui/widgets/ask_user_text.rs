@@ -678,4 +678,32 @@ mod tests {
         state.set_cursor_from_click(5, 80); // pusta → cursor_pos = 0
         assert_eq!(state.cursor_pos, 0);
     }
+
+    #[test]
+    fn test_set_cursor_from_click_mixed_ascii_cjk() {
+        // "ab中文cd": a(col0), b(col1), 中(col2-3), 文(col4-5), c(col6), d(col7)
+        let mut state = TextInputState::new(None);
+        "ab中文cd".chars().for_each(|c| state.insert_char(c));
+
+        state.set_cursor_from_click(0, 80);
+        assert_eq!(state.cursor_pos, 0, "col 0 → 'a'");
+
+        state.set_cursor_from_click(1, 80);
+        assert_eq!(state.cursor_pos, 1, "col 1 → 'b'");
+
+        // Kolumna 2 = start '中' (CJK, szer. 2)
+        state.set_cursor_from_click(2, 80);
+        assert_eq!(state.cursor_pos, 2, "col 2 → '中'");
+
+        // Kolumna 3 = prawa połowa '中' → cursor za '中' (char 3 = '文')
+        state.set_cursor_from_click(3, 80);
+        assert_eq!(state.cursor_pos, 3, "col 3 → za '中'");
+
+        // Kolumna 4 = start '文' (CJK, szer. 2)
+        state.set_cursor_from_click(4, 80);
+        assert_eq!(state.cursor_pos, 3, "col 4 → '文'");
+
+        state.set_cursor_from_click(6, 80);
+        assert_eq!(state.cursor_pos, 4, "col 6 → 'c'");
+    }
 }
