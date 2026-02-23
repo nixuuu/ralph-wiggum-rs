@@ -101,6 +101,9 @@ pub struct RunApp {
     pub(crate) sidebar_rect: Option<Rect>,
     /// Cache'owany rect panelu output — aktualizowany w każdym draw() (do hit-testingu).
     pub(crate) output_rect: Option<Rect>,
+    /// Obszar pod kursorem myszy (hover, niezależny od focus).
+    /// Aktualizowany na MouseMoved via hit-test; None gdy kursor poza panelami.
+    pub(crate) hovered_area: Option<FocusArea>,
 }
 
 impl RunApp {
@@ -158,6 +161,7 @@ impl RunApp {
             scroll_step: 3,
             sidebar_rect: None,
             output_rect: None,
+            hovered_area: None,
         }
     }
 
@@ -192,6 +196,12 @@ impl RunApp {
     #[allow(dead_code)]
     pub fn current_breakpoint(&self) -> Breakpoint {
         self.current_breakpoint
+    }
+
+    /// Read-only access to hovered area (obszar pod kursorem myszy).
+    #[allow(dead_code)]
+    pub fn hovered_area(&self) -> Option<FocusArea> {
+        self.hovered_area
     }
 
     /// Formatuj ClaudeEvent → Vec<Line> i wrzuć do ring buffera.
@@ -409,18 +419,46 @@ impl RunApp {
     /// Obsługa zdarzeń myszy w run mode.
     ///
     /// Routing:
+    /// - MouseMoved → aktualizuj `hovered_area` (niezależnie od `focus`)
     /// - Lewy klik w `sidebar_rect` → focus Sidebar + zaznaczenie tasku pod kursorem
     /// - Lewy klik w `output_rect` → focus Output
     /// - ScrollUp/ScrollDown nad sidebar → nawigacja po task tree (krok=1)
     /// - ScrollUp/ScrollDown nad output → scroll output buffera (krok=`scroll_step` z config)
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> EventResult {
         match mouse.kind {
+            MouseEventKind::Moved => self.handle_mouse_moved(mouse.column, mouse.row),
             MouseEventKind::Down(MouseButton::Left) => {
                 self.handle_mouse_left_click(mouse.column, mouse.row)
             }
             MouseEventKind::ScrollUp => self.handle_mouse_scroll(mouse.column, mouse.row, true),
             MouseEventKind::ScrollDown => self.handle_mouse_scroll(mouse.column, mouse.row, false),
             _ => EventResult::Ignored,
+        }
+    }
+
+    /// Aktualizuj `hovered_area` na podstawie pozycji kursora (hit-test).
+    ///
+    /// Hover jest niezależny od focus — przesunięcie myszy nie zmienia `self.focus`.
+    fn handle_mouse_moved(&mut self, col: u16, row: u16) -> EventResult {
+        let pos = Position::new(col, row);
+
+        let new_hover = if let Some(sidebar_rect) = self.sidebar_rect
+            && sidebar_rect.contains(pos)
+        {
+            Some(FocusArea::Sidebar)
+        } else if let Some(output_rect) = self.output_rect
+            && output_rect.contains(pos)
+        {
+            Some(FocusArea::Output)
+        } else {
+            None
+        };
+
+        if self.hovered_area != new_hover {
+            self.hovered_area = new_hover;
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
         }
     }
 
@@ -649,6 +687,8 @@ impl AppState for RunApp {
                 );
             }
         }
+
+        // TODO(13.8.x): użyć self.hovered_area w draw() do podświetlenia panelu pod kursorem
 
         // Status bar
         let status_bar =
@@ -2048,6 +2088,104 @@ tasks:
             FocusArea::Sidebar,
             "Sidebar ma priorytet przy nakładaniu rectów"
         );
+    }
+
+    // ── Mouse moved / hover tests (task 13.8.1) ─────────────────────
+
+    /// Helper: tworzy MouseMoved event dla testów hover.
+    fn make_mouse_move(col: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    /// MouseMoved nad sidebar_rect → hovered_area = Some(Sidebar).
+    #[test]
+    fn mouse_moved_in_sidebar_rect_sets_hover_to_sidebar() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        app.sidebar_rect = Some(Rect::new(80, 2, 30, 20));
+        assert_eq!(app.hovered_area, None);
+
+        let mouse = make_mouse_move(85, 5);
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.hovered_area, Some(FocusArea::Sidebar));
+    }
+
+    /// MouseMoved nad output_rect → hovered_area = Some(Output).
+    #[test]
+    fn mouse_moved_in_output_rect_sets_hover_to_output() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        app.output_rect = Some(Rect::new(0, 2, 80, 20));
+        assert_eq!(app.hovered_area, None);
+
+        let mouse = make_mouse_move(40, 10);
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.hovered_area, Some(FocusArea::Output));
+    }
+
+    /// MouseMoved poza panelami → hovered_area = None, wynik Ignored (brak zmiany).
+    #[test]
+    fn mouse_moved_outside_panels_sets_hover_to_none_and_ignored() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        app.sidebar_rect = Some(Rect::new(80, 2, 30, 20));
+        app.output_rect = Some(Rect::new(0, 2, 80, 20));
+        // hovered_area już None — ruch poza panelami nie zmienia stanu
+        assert_eq!(app.hovered_area, None);
+
+        let mouse = make_mouse_move(0, 0); // row=0 poza obu rectów (y=2..22)
+        let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.hovered_area, None);
+    }
+
+    /// MouseMoved gdy hover się zmienia → Consumed; gdy bez zmian → Ignored.
+    #[test]
+    fn mouse_moved_returns_consumed_only_when_hover_changes() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        app.output_rect = Some(Rect::new(0, 2, 80, 20));
+
+        // Pierwsze wejście na output → zmiana None→Some(Output) = Consumed
+        let result1 = app.handle_event(AppEvent::Mouse(make_mouse_move(40, 10)), &resolver);
+        assert_eq!(result1, EventResult::Consumed);
+        assert_eq!(app.hovered_area, Some(FocusArea::Output));
+
+        // Ruch w tym samym obszarze → brak zmiany = Ignored
+        let result2 = app.handle_event(AppEvent::Mouse(make_mouse_move(50, 12)), &resolver);
+        assert_eq!(result2, EventResult::Ignored);
+        assert_eq!(app.hovered_area, Some(FocusArea::Output));
+    }
+
+    /// MouseMoved NIE zmienia self.focus — hover i focus są niezależne.
+    #[test]
+    fn mouse_moved_does_not_change_focus() {
+        let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        app.focus = FocusArea::Sidebar;
+        app.output_rect = Some(Rect::new(0, 2, 80, 20));
+
+        let mouse = make_mouse_move(40, 10);
+        app.handle_event(AppEvent::Mouse(mouse), &resolver);
+
+        // hover ustawiony na Output, ale focus pozostaje Sidebar
+        assert_eq!(app.hovered_area, Some(FocusArea::Output));
+        assert_eq!(app.focus, FocusArea::Sidebar);
     }
 
     // ── Snapshot tests: run layout w różnych breakpointach ──────────

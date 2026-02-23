@@ -109,6 +109,9 @@ pub struct TaskExplorerApp {
     /// Cache prostokątów wierszy drzewa: (visible_index, Rect).
     /// Aktualizowany w każdym draw() — używany do wykrywania kliknięć myszy.
     pub(crate) task_row_rects: Vec<(usize, Rect)>,
+    /// Indeks wiersza pod kursorem myszy (hover, niezależny od tree_state.selected).
+    /// Aktualizowany na MouseMoved via hit-test; None gdy kursor poza drzewem.
+    pub(crate) hovered_row: Option<usize>,
 }
 
 impl TaskExplorerApp {
@@ -144,6 +147,7 @@ impl TaskExplorerApp {
             detail_scroll: 0,
             scroll_step: 3,
             task_row_rects: Vec::new(),
+            hovered_row: None,
         })
     }
 
@@ -151,6 +155,12 @@ impl TaskExplorerApp {
     pub fn with_scroll_step(mut self, step: u16) -> Self {
         self.scroll_step = step.max(1) as usize;
         self
+    }
+
+    /// Read-only access to hovered row (wiersz pod kursorem myszy).
+    #[allow(dead_code)]
+    pub fn hovered_row(&self) -> Option<usize> {
+        self.hovered_row
     }
 
     /// Odśwież drzewo zadań z dysku.
@@ -396,6 +406,7 @@ tasks:
             detail_scroll: 0,
             scroll_step: 3,
             task_row_rects: Vec::new(),
+            hovered_row: None,
         }
     }
 
@@ -660,6 +671,7 @@ tasks:
             detail_scroll: 0,
             scroll_step: 3,
             task_row_rects: Vec::new(),
+            hovered_row: None,
         };
 
         let rows = app.visible_rows();
@@ -782,6 +794,7 @@ tasks:
             detail_scroll: 0,
             scroll_step: 3,
             task_row_rects: Vec::new(),
+            hovered_row: None,
         };
         assert!(app.selected_node().is_none());
     }
@@ -1124,10 +1137,42 @@ tasks:
         setup_row_rects(&mut app, 6);
         assert_eq!(app.tree_state.selected, 0);
 
-        // MouseMove (nie Down) → Ignored
+        // MouseMove → selekcja nie zmieniona, ale hovered_row aktualizowany
         let result = app.handle_event(make_mouse_move(5, 2), &resolver);
-        assert_eq!(result, EventResult::Ignored);
+        // Hover zmienił się z None → Some(2), więc Consumed
+        assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.tree_state.selected, 0);
+        // Hover wskazuje wiersz 2
+        assert_eq!(app.hovered_row, Some(2));
+    }
+
+    #[test]
+    fn mouse_move_outside_rows_returns_ignored_when_no_hover() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        setup_row_rects(&mut app, 6);
+        // hovered_row jest None, kursor poza rowami
+        let result = app.handle_event(make_mouse_move(5, 20), &resolver);
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.hovered_row, None);
+    }
+
+    #[test]
+    fn mouse_move_updates_hovered_row_independently_of_selection() {
+        let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Selekcja na wierszu 0 ("1")
+        assert_eq!(app.tree_state.selected, 0);
+        setup_row_rects(&mut app, 6);
+
+        // Hover nad wierszem 4 ("2.1")
+        let result = app.handle_event(make_mouse_move(5, 4), &resolver);
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.hovered_row, Some(4)); // hover = wiersz 4
+        assert_eq!(app.tree_state.selected, 0); // selekcja bez zmian
+        assert_eq!(app.selected_id, Some("1".to_string()));
     }
 
     #[test]

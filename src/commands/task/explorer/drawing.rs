@@ -68,6 +68,8 @@ pub(crate) fn draw_all(frame: &mut Frame, area: Rect, app: &mut TaskExplorerApp)
         InputMode::Filter => draw_filter_input(frame, bottom_area, app),
         InputMode::Normal => draw_progress_bar(frame, bottom_area, app),
     }
+
+    // TODO(13.8.x): użyć app.hovered_row w draw_tree_panel() do podświetlenia wiersza pod kursorem
 }
 
 // ── Tree panel ───────────────────────────────────────────────────────
@@ -349,6 +351,7 @@ mod tests {
             detail_scroll: 0,
             scroll_step: 3,
             task_row_rects: Vec::new(),
+            hovered_row: None,
         }
     }
 
@@ -510,6 +513,7 @@ mod tests {
             detail_scroll: 0,
             scroll_step: 3,
             task_row_rects: Vec::new(),
+            hovered_row: None,
         };
 
         let backend = TestBackend::new(80, 24);
@@ -638,6 +642,7 @@ tasks:
             detail_scroll: 0,
             scroll_step: 3,
             task_row_rects: Vec::new(),
+            hovered_row: None,
         };
 
         let backend = TestBackend::new(80, 24);
@@ -760,6 +765,7 @@ tasks:
             detail_scroll: 0,
             scroll_step: 3,
             task_row_rects: Vec::new(),
+            hovered_row: None,
         };
 
         // Progress: 2/4 done (50%)
@@ -860,6 +866,7 @@ tasks:
             detail_scroll: 0,
             scroll_step: 3,
             task_row_rects: Vec::new(),
+            hovered_row: None,
         };
 
         // Powinno być: alpha (3) → beta (2) → zebra (1)

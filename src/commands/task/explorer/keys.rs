@@ -203,6 +203,7 @@ impl TaskExplorerApp {
 
     /// Obsłuż zdarzenie myszy.
     ///
+    /// MouseMoved → aktualizuj `hovered_row` (niezależnie od `tree_state.selected`).
     /// Lewy klik na wiersz drzewa → zaznacz task (zmień selected_index).
     /// Kliknięcie na już zaznaczony task → toggle expand/collapse.
     /// Klik poza wierszami drzewa → bez zmian.
@@ -220,6 +221,27 @@ impl TaskExplorerApp {
                 self.tree_state.select_next(row_count);
                 self.sync_selected_id();
                 return EventResult::Consumed;
+            }
+            MouseEventKind::Moved => {
+                // Aktualizuj hovered_row — hover != selection.
+                let col = mouse.column;
+                let row = mouse.row;
+                let new_hover = self
+                    .task_row_rects
+                    .iter()
+                    .find(|(_, rect)| {
+                        row >= rect.y
+                            && row < rect.y + rect.height
+                            && col >= rect.x
+                            && col < rect.x + rect.width
+                    })
+                    .map(|&(abs_index, _)| abs_index);
+
+                if self.hovered_row != new_hover {
+                    self.hovered_row = new_hover;
+                    return EventResult::Consumed;
+                }
+                return EventResult::Ignored;
             }
             _ => {}
         }

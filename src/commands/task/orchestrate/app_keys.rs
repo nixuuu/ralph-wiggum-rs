@@ -409,11 +409,13 @@ impl OrchestrateApp {
 
         match mouse.kind {
             MouseEventKind::Moved => {
-                if let Some(worker_id) = self.hit_test_worker(mouse.column, mouse.row) {
-                    self.set_focus(Some(worker_id));
+                // Aktualizuj hover niezależnie od focus — hover != focus.
+                // MouseMoved → hovered_worker (hit-test), nie set_focus().
+                let new_hover = self.hit_test_worker(mouse.column, mouse.row);
+                if self.hovered_worker != new_hover {
+                    self.hovered_worker = new_hover;
                     EventResult::Consumed
                 } else {
-                    // Kursor poza wszystkimi panelami — brak zmiany focusu
                     EventResult::Ignored
                 }
             }
@@ -1517,7 +1519,8 @@ mod tests {
         assert_eq!(result, EventResult::Consumed);
     }
 
-    // ── Mouse hover → focus tests ───────────────────────────────────
+    // ── Mouse hover → hovered_worker tests ─────────────────────────
+    // hover != focus: MouseMoved aktualizuje hovered_worker, nie focused_worker.
 
     fn make_mouse_move(column: u16, row: u16) -> crossterm::event::MouseEvent {
         crossterm::event::MouseEvent {
@@ -1538,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_moved_over_worker_rect_sets_focus() {
+    fn mouse_moved_over_worker_rect_sets_hovered_worker() {
         let mut app = make_app(3);
         // Symuluj cache grid_rects: worker 2 w obszarze (10,5)-(29,24)
         app.grid_rects = vec![
@@ -1552,11 +1555,13 @@ mod tests {
         let result = app.handle_mouse(mouse);
 
         assert_eq!(result, EventResult::Consumed);
-        assert_eq!(app.focused_worker, Some(2));
+        // hover ustawiony, focus niezamieniony
+        assert_eq!(app.hovered_worker, Some(2));
+        assert_eq!(app.focused_worker, None);
     }
 
     #[test]
-    fn mouse_moved_over_first_worker_sets_focus() {
+    fn mouse_moved_over_first_worker_sets_hovered_worker() {
         let mut app = make_app(3);
         app.grid_rects = vec![
             (1, ratatui::layout::Rect::new(0, 0, 10, 10)),
@@ -1567,13 +1572,16 @@ mod tests {
         let result = app.handle_mouse(mouse);
 
         assert_eq!(result, EventResult::Consumed);
-        assert_eq!(app.focused_worker, Some(1));
+        assert_eq!(app.hovered_worker, Some(1));
+        assert_eq!(app.focused_worker, None);
     }
 
     #[test]
-    fn mouse_moved_outside_all_rects_does_not_change_focus() {
+    fn mouse_moved_outside_all_rects_clears_hover_and_does_not_change_focus() {
         let mut app = make_app(3);
         app.focused_worker = Some(1);
+        // Ustaw hovered_worker zanim kursor wyjdzie poza recty
+        app.hovered_worker = Some(1);
         app.grid_rects = vec![
             (1, ratatui::layout::Rect::new(0, 0, 10, 5)),
             (2, ratatui::layout::Rect::new(10, 0, 10, 5)),
@@ -1583,9 +1591,30 @@ mod tests {
         let mouse = make_mouse_move(50, 50);
         let result = app.handle_mouse(mouse);
 
-        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(result, EventResult::Consumed); // hover zmieniony z Some(1) → None
         // Focus nie zmieniony
         assert_eq!(app.focused_worker, Some(1));
+        // Hover wyczyszczony
+        assert_eq!(app.hovered_worker, None);
+    }
+
+    #[test]
+    fn mouse_moved_outside_returns_ignored_when_already_no_hover() {
+        let mut app = make_app(3);
+        app.focused_worker = Some(1);
+        // hovered_worker domyślnie None
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 10, 5)),
+            (2, ratatui::layout::Rect::new(10, 0, 10, 5)),
+        ];
+
+        // Kursor poza wszystkimi rectami, hover już był None
+        let mouse = make_mouse_move(50, 50);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Ignored); // brak zmiany hover (None → None)
+        assert_eq!(app.focused_worker, Some(1));
+        assert_eq!(app.hovered_worker, None);
     }
 
     #[test]
@@ -1600,6 +1629,27 @@ mod tests {
 
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(app.focused_worker, Some(1));
+        assert_eq!(app.hovered_worker, None);
+    }
+
+    #[test]
+    fn hover_is_independent_of_focus() {
+        // Hover i focus to oddzielne pola — można mieć różne wartości
+        let mut app = make_app(3);
+        app.focused_worker = Some(2); // focus na workerze 2
+        app.grid_rects = vec![
+            (1, ratatui::layout::Rect::new(0, 0, 20, 20)),
+            (2, ratatui::layout::Rect::new(20, 0, 20, 20)),
+            (3, ratatui::layout::Rect::new(40, 0, 20, 20)),
+        ];
+
+        // Hover nad workerem 3 (nie focused_worker)
+        let mouse = make_mouse_move(45, 5);
+        let result = app.handle_mouse(mouse);
+
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.hovered_worker, Some(3)); // hover = 3
+        assert_eq!(app.focused_worker, Some(2)); // focus niezmieniony = 2
     }
 
     #[test]
@@ -1731,7 +1781,8 @@ mod tests {
         let result = app.handle_mouse(mouse);
 
         assert_eq!(result, EventResult::Consumed);
-        assert_eq!(app.focused_worker, Some(2));
+        assert_eq!(app.hovered_worker, Some(2));
+        assert_eq!(app.focused_worker, None);
     }
 
     #[test]
@@ -1749,8 +1800,9 @@ mod tests {
         let result = app.handle_mouse(mouse);
 
         assert_eq!(result, EventResult::Ignored);
-        // Focus nie zmieniony
+        // Ani focus, ani hover nie zmieniony
         assert_eq!(app.focused_worker, None);
+        assert_eq!(app.hovered_worker, None);
     }
 
     #[test]
@@ -1769,6 +1821,7 @@ mod tests {
 
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(app.focused_worker, None);
+        assert_eq!(app.hovered_worker, None);
     }
 
     #[test]
@@ -1789,7 +1842,8 @@ mod tests {
         let result = app.handle_event(AppEvent::Mouse(mouse), &resolver);
 
         assert_eq!(result, EventResult::Consumed);
-        assert_eq!(app.focused_worker, Some(1));
+        assert_eq!(app.hovered_worker, Some(1));
+        assert_eq!(app.focused_worker, None);
     }
 
     // ── Mouse scroll tests ──────────────────────────────────────────

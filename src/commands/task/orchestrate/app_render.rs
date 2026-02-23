@@ -191,6 +191,7 @@ pub(super) fn render_worker_grid(frame: &mut Frame, area: Rect, config: &WorkerG
                 && let Some(panel) = config.panels.get(&worker_id)
             {
                 let is_focused = config.focused == Some(worker_id);
+                // TODO(13.8.x): użyć config.hovered do podświetlenia panelu pod kursorem myszy
                 let widget = WorkerPanelWidget::new(panel, is_focused);
                 frame.render_widget(widget, rect);
             }

@@ -130,6 +130,9 @@ pub struct OrchestrateApp {
 
     // ── Focus ──
     pub(crate) focused_worker: Option<u32>,
+    /// Worker ID pod kursorem myszy (hover, niezależny od focused_worker).
+    /// Aktualizowany na MouseMoved via hit-test; None gdy kursor poza panelami.
+    pub(crate) hovered_worker: Option<u32>,
     /// Sorted list of currently active (non-idle) worker IDs.
     /// Updated each tick for focus navigation.
     pub(crate) active_worker_ids: Vec<u32>,
@@ -209,6 +212,7 @@ impl OrchestrateApp {
             panels,
             worker_count,
             focused_worker: None,
+            hovered_worker: None,
             active_worker_ids: (1..=worker_count).collect(),
             show_task_preview: false,
             preview_scroll_offset: 0,
@@ -379,6 +383,11 @@ impl OrchestrateApp {
     /// Read-only access to focused worker.
     pub fn focused_worker(&self) -> Option<u32> {
         self.focused_worker
+    }
+
+    /// Read-only access to hovered worker (worker pod kursorem myszy).
+    pub fn hovered_worker(&self) -> Option<u32> {
+        self.hovered_worker
     }
 
     /// Read-only access to tasks_file (used by command registry).
