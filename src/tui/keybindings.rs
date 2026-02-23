@@ -36,7 +36,7 @@ impl KeyCombo {
     /// Sprawdza czy KeyEvent dokładnie pasuje do tego combo.
     ///
     /// Porównanie jest ścisłe: zarówno key code jak i modyfikatory muszą się zgadzać.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Public API — będzie używane przez per-command widoki TUI
     pub fn matches(&self, event: &KeyEvent) -> bool {
         event.code == self.key && event.modifiers == self.modifiers
     }
@@ -192,8 +192,8 @@ impl<'de> Deserialize<'de> for KeyCombo {
 /// Wszystkie możliwe akcje klawiszowe w aplikacji.
 ///
 /// Warianty pogrupowane semantycznie: globalne, orchestrate, run, explorer.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)] // Public API — będzie używane przez per-command widoki TUI
 pub enum KeyAction {
     // ── Global (wspólne dla wszystkich widoków) ──
     Quit,
@@ -476,6 +476,7 @@ macro_rules! impl_pairs {
     ($t:ty; $($field:ident => $action:expr),+ $(,)?) => {
         impl $t {
             /// Zwraca wszystkie pary (KeyCombo, KeyAction) dla tej sekcji bindingów.
+            #[allow(dead_code)] // Public API — używane przez KeybindingResolver::key_for_action
             pub fn pairs(&self) -> Vec<(KeyCombo, KeyAction)> {
                 vec![$( (self.$field.clone(), $action) ),+]
             }
@@ -485,7 +486,7 @@ macro_rules! impl_pairs {
 
 impl GlobalBindings {
     /// Rozwiąż KeyEvent na globalną KeyAction, jeśli pasuje do któregoś bindingu.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Public API — używane przez KeybindingResolver
     pub fn resolve(&self, event: &KeyEvent) -> Option<KeyAction> {
         resolve_bindings!(self, event;
             quit => KeyAction::Quit,
@@ -509,7 +510,7 @@ impl GlobalBindings {
 
 impl OrchestrateBindings {
     /// Rozwiąż KeyEvent na orchestrate-specific KeyAction.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Public API — używane przez KeybindingResolver
     pub fn resolve(&self, event: &KeyEvent) -> Option<KeyAction> {
         resolve_bindings!(self, event;
             focus_next => KeyAction::FocusNext,
@@ -527,7 +528,7 @@ impl OrchestrateBindings {
 
 impl RunBindings {
     /// Rozwiąż KeyEvent na run-specific KeyAction.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Public API — używane przez KeybindingResolver
     pub fn resolve(&self, event: &KeyEvent) -> Option<KeyAction> {
         resolve_bindings!(self, event;
             toggle_expand => KeyAction::ToggleExpand,
@@ -537,7 +538,7 @@ impl RunBindings {
 
 impl ExplorerBindings {
     /// Rozwiąż KeyEvent na explorer-specific KeyAction.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Public API — używane przez KeybindingResolver
     pub fn resolve(&self, event: &KeyEvent) -> Option<KeyAction> {
         resolve_bindings!(self, event;
             cycle_sort => KeyAction::CycleSort,
@@ -610,6 +611,7 @@ impl_pairs!(ExplorerBindings;
 /// Przekazywany do `KeybindingResolver::resolve()` żeby wybrać właściwe
 /// view-specific bindingi przed globalnym fallbackiem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)] // Public API — będzie używane przez per-command widoki TUI
 pub enum View {
     /// Brak specyficznego widoku — tylko globalne bindingi.
     Global,
@@ -669,6 +671,7 @@ impl KeybindingResolver {
     ///
     /// `user_config` to keybindings z FileConfig — nadpisują defaults tylko
     /// dla pól które użytkownik faktycznie zmienił (non-default values).
+    #[allow(dead_code)] // Public API — używane przez FileConfig loading i testy
     pub fn from_user_config(user_config: KeybindingsConfig) -> Self {
         // defaults jako base, user_config jako overlay
         let merged = KeybindingsConfig::merge(KeybindingsConfig::default(), user_config);
@@ -679,6 +682,7 @@ impl KeybindingResolver {
     ///
     /// Lookup chain: view-specific → global.
     /// View-specific binding wygrywa gdy istnieje dla danego klawisza.
+    #[allow(dead_code)] // Public API — będzie używane przez per-command widoki TUI
     pub fn resolve(&self, key: &KeyEvent, view: View) -> Option<KeyAction> {
         // 1. View-specific (ma priorytet nad globalnym)
         let view_action = match view {
@@ -700,6 +704,7 @@ impl KeybindingResolver {
     ///
     /// Przeszukuje wszystkie sekcje bindingów (global → orchestrate → run → explorer).
     /// Zwraca pierwsze znalezione combo — używane do wyświetlania hints w UI.
+    #[allow(dead_code)] // Public API — będzie używane przez status bar hints
     pub fn key_for_action(&self, action: KeyAction) -> Option<KeyCombo> {
         self.config
             .global
@@ -725,6 +730,7 @@ impl KeybindingResolver {
     /// - `Alt+Enter` → `"⌥+Enter"`
     /// - `Ctrl+Shift+a` → `"Ctrl+⇧+a"`
     /// - `Up` → `"↑"`
+    #[allow(dead_code)] // Public API — będzie używane przez status bar i hints
     pub fn format_key(combo: &KeyCombo) -> String {
         // Buduj prefiks modyfikatorów (Ctrl jako tekst, Shift/Alt jako symbole)
         let mut parts: Vec<&str> = Vec::new();
@@ -768,6 +774,7 @@ impl KeybindingResolver {
     }
 
     /// Zwraca referencję do wewnętrznej konfiguracji.
+    #[allow(dead_code)] // Public API — będzie używane przez przyszłe widoki TUI
     pub fn config(&self) -> &KeybindingsConfig {
         &self.config
     }

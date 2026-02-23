@@ -841,25 +841,31 @@ mod tests {
     #[test]
     fn handle_event_tick_returns_consumed() {
         use crate::tui::app::AppState;
+        use crate::tui::keybindings::KeybindingResolver;
         let mut app = make_app(1);
-        let result = app.handle_event(AppEvent::Tick);
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Tick, &resolver);
         assert_eq!(result, EventResult::Consumed);
     }
 
     #[test]
     fn handle_event_resize_returns_consumed() {
         use crate::tui::app::AppState;
+        use crate::tui::keybindings::KeybindingResolver;
         let mut app = make_app(1);
-        let result = app.handle_event(AppEvent::Resize(120, 40));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Resize(120, 40), &resolver);
         assert_eq!(result, EventResult::Consumed);
     }
 
     #[test]
     fn handle_event_unknown_key_returns_ignored() {
         use crate::tui::app::AppState;
+        use crate::tui::keybindings::KeybindingResolver;
         let mut app = make_app(1);
+        let resolver = KeybindingResolver::with_defaults();
         let key = make_key(KeyCode::F(12), KeyModifiers::NONE);
-        let result = app.handle_event(AppEvent::Key(key));
+        let result = app.handle_event(AppEvent::Key(key), &resolver);
         assert_eq!(result, EventResult::Ignored);
     }
 
@@ -1064,7 +1070,8 @@ mod tests {
         assert!(is_ctrl_c(&ctrl_c));
 
         // handle_event deleguje do handle_key, ale Ctrl+C nie pasuje do żadnego matcha
-        let result = app.handle_event(AppEvent::Key(ctrl_c));
+        let resolver = crate::tui::keybindings::KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Key(ctrl_c), &resolver);
         assert_eq!(result, EventResult::Ignored);
     }
 

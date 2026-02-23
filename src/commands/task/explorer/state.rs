@@ -309,6 +309,7 @@ fn split_into_groups(rows: &[FlatRow], target_depth: usize) -> Vec<Vec<FlatRow>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::KeybindingResolver;
     use crate::tui::app::AppState;
     use crate::tui::events::{AppEvent, EventResult};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
@@ -417,56 +418,62 @@ tasks:
     #[test]
     fn navigate_down_changes_selection() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         assert_eq!(app.selected_id, Some("1".to_string()));
 
-        app.handle_event(press(KeyCode::Down));
+        app.handle_event(press(KeyCode::Down), &resolver);
         assert_eq!(app.selected_id, Some("1.1".to_string()));
 
-        app.handle_event(press(KeyCode::Down));
+        app.handle_event(press(KeyCode::Down), &resolver);
         assert_eq!(app.selected_id, Some("1.2".to_string()));
     }
 
     #[test]
     fn navigate_up_changes_selection() {
         let mut app = make_app();
-        app.handle_event(press(KeyCode::Down));
-        app.handle_event(press(KeyCode::Down));
+        let resolver = KeybindingResolver::with_defaults();
+        app.handle_event(press(KeyCode::Down), &resolver);
+        app.handle_event(press(KeyCode::Down), &resolver);
         assert_eq!(app.selected_id, Some("1.2".to_string()));
 
-        app.handle_event(press(KeyCode::Up));
+        app.handle_event(press(KeyCode::Up), &resolver);
         assert_eq!(app.selected_id, Some("1.1".to_string()));
     }
 
     #[test]
     fn navigate_up_at_top_stays() {
         let mut app = make_app();
-        app.handle_event(press(KeyCode::Up));
+        let resolver = KeybindingResolver::with_defaults();
+        app.handle_event(press(KeyCode::Up), &resolver);
         assert_eq!(app.selected_id, Some("1".to_string()));
     }
 
     #[test]
     fn vim_keys_navigate() {
         let mut app = make_app();
-        app.handle_event(press(KeyCode::Char('j')));
+        let resolver = KeybindingResolver::with_defaults();
+        app.handle_event(press(KeyCode::Char('j')), &resolver);
         assert_eq!(app.selected_id, Some("1.1".to_string()));
 
-        app.handle_event(press(KeyCode::Char('k')));
+        app.handle_event(press(KeyCode::Char('k')), &resolver);
         assert_eq!(app.selected_id, Some("1".to_string()));
     }
 
     #[test]
     fn home_goes_to_first() {
         let mut app = make_app();
-        app.handle_event(press(KeyCode::Down));
-        app.handle_event(press(KeyCode::Down));
-        app.handle_event(press(KeyCode::Home));
+        let resolver = KeybindingResolver::with_defaults();
+        app.handle_event(press(KeyCode::Down), &resolver);
+        app.handle_event(press(KeyCode::Down), &resolver);
+        app.handle_event(press(KeyCode::Home), &resolver);
         assert_eq!(app.selected_id, Some("1".to_string()));
     }
 
     #[test]
     fn end_goes_to_last() {
         let mut app = make_app();
-        app.handle_event(press(KeyCode::End));
+        let resolver = KeybindingResolver::with_defaults();
+        app.handle_event(press(KeyCode::End), &resolver);
         // Root nodes expanded: 1, 1.1, 1.2, 2, 2.1, 2.2 — last is "2.2"
         assert_eq!(app.selected_id, Some("2.2".to_string()));
     }
@@ -476,31 +483,34 @@ tasks:
     #[test]
     fn tab_switches_focus() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         assert_eq!(app.focus, Panel::Tree);
 
-        app.handle_event(press(KeyCode::Tab));
+        app.handle_event(press(KeyCode::Tab), &resolver);
         assert_eq!(app.focus, Panel::Detail);
 
-        app.handle_event(press(KeyCode::Tab));
+        app.handle_event(press(KeyCode::Tab), &resolver);
         assert_eq!(app.focus, Panel::Tree);
     }
 
     #[test]
     fn enter_on_leaf_switches_to_detail() {
         let mut app = make_app();
-        app.handle_event(press(KeyCode::Down));
+        let resolver = KeybindingResolver::with_defaults();
+        app.handle_event(press(KeyCode::Down), &resolver);
         assert_eq!(app.selected_id, Some("1.1".to_string()));
 
-        app.handle_event(press(KeyCode::Enter));
+        app.handle_event(press(KeyCode::Enter), &resolver);
         assert_eq!(app.focus, Panel::Detail);
     }
 
     #[test]
     fn left_in_detail_goes_back_to_tree() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.focus = Panel::Detail;
 
-        app.handle_event(press(KeyCode::Left));
+        app.handle_event(press(KeyCode::Left), &resolver);
         assert_eq!(app.focus, Panel::Tree);
     }
 
@@ -509,14 +519,15 @@ tasks:
     #[test]
     fn collapse_all_then_expand_all() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         let initial_rows = app.visible_rows().len();
         assert!(initial_rows > 2);
 
-        app.handle_event(press(KeyCode::Char('c')));
+        app.handle_event(press(KeyCode::Char('c')), &resolver);
         let collapsed_rows = app.visible_rows().len();
         assert_eq!(collapsed_rows, 2);
 
-        app.handle_event(press(KeyCode::Char('e')));
+        app.handle_event(press(KeyCode::Char('e')), &resolver);
         let expanded_rows = app.visible_rows().len();
         assert!(expanded_rows >= initial_rows);
     }
@@ -524,11 +535,12 @@ tasks:
     #[test]
     fn enter_on_parent_toggles_expand() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.tree_state.expanded.clear();
         let rows_before = app.visible_rows().len();
         assert_eq!(rows_before, 2);
 
-        app.handle_event(press(KeyCode::Enter));
+        app.handle_event(press(KeyCode::Enter), &resolver);
         let rows_after = app.visible_rows().len();
         assert!(rows_after > rows_before);
     }
@@ -538,33 +550,35 @@ tasks:
     #[test]
     fn s_key_cycles_sort_mode() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         assert_eq!(app.sort_mode, SortMode::Id);
 
-        app.handle_event(press(KeyCode::Char('s')));
+        app.handle_event(press(KeyCode::Char('s')), &resolver);
         assert_eq!(app.sort_mode, SortMode::Status);
 
-        app.handle_event(press(KeyCode::Char('s')));
+        app.handle_event(press(KeyCode::Char('s')), &resolver);
         assert_eq!(app.sort_mode, SortMode::Component);
 
-        app.handle_event(press(KeyCode::Char('s')));
+        app.handle_event(press(KeyCode::Char('s')), &resolver);
         assert_eq!(app.sort_mode, SortMode::Id);
     }
 
     #[test]
     fn s_key_preserves_selection_after_sort_change() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         // Navigate to "1.2"
-        app.handle_event(press(KeyCode::Down)); // → 1.1
-        app.handle_event(press(KeyCode::Down)); // → 1.2
+        app.handle_event(press(KeyCode::Down), &resolver); // → 1.1
+        app.handle_event(press(KeyCode::Down), &resolver); // → 1.2
         assert_eq!(app.selected_id, Some("1.2".to_string()));
 
         // Change sort mode — selected_id should stay on "1.2"
-        app.handle_event(press(KeyCode::Char('s')));
+        app.handle_event(press(KeyCode::Char('s')), &resolver);
         assert_eq!(app.sort_mode, SortMode::Status);
         assert_eq!(app.selected_id, Some("1.2".to_string()));
 
         // Again
-        app.handle_event(press(KeyCode::Char('s')));
+        app.handle_event(press(KeyCode::Char('s')), &resolver);
         assert_eq!(app.sort_mode, SortMode::Component);
         assert_eq!(app.selected_id, Some("1.2".to_string()));
     }
@@ -687,31 +701,34 @@ tasks:
     #[test]
     fn detail_scroll_increments() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.focus = Panel::Detail;
 
         assert_eq!(app.detail_scroll, 0);
-        app.handle_event(press(KeyCode::Down));
+        app.handle_event(press(KeyCode::Down), &resolver);
         assert_eq!(app.detail_scroll, 1);
-        app.handle_event(press(KeyCode::Down));
+        app.handle_event(press(KeyCode::Down), &resolver);
         assert_eq!(app.detail_scroll, 2);
     }
 
     #[test]
     fn detail_scroll_does_not_go_below_zero() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.focus = Panel::Detail;
 
-        app.handle_event(press(KeyCode::Up));
+        app.handle_event(press(KeyCode::Up), &resolver);
         assert_eq!(app.detail_scroll, 0);
     }
 
     #[test]
     fn detail_home_resets_scroll() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.focus = Panel::Detail;
         app.detail_scroll = 5;
 
-        app.handle_event(press(KeyCode::Home));
+        app.handle_event(press(KeyCode::Home), &resolver);
         assert_eq!(app.detail_scroll, 0);
     }
 
@@ -720,7 +737,8 @@ tasks:
     #[test]
     fn selected_node_returns_correct_node() {
         let mut app = make_app();
-        app.handle_event(press(KeyCode::Down));
+        let resolver = KeybindingResolver::with_defaults();
+        app.handle_event(press(KeyCode::Down), &resolver);
         let node = app.selected_node().unwrap();
         assert_eq!(node.id, "1.1");
         assert_eq!(node.name, "Subtask A");
@@ -761,14 +779,19 @@ tasks:
     #[test]
     fn tick_returns_ignored() {
         let mut app = make_app();
-        assert_eq!(app.handle_event(AppEvent::Tick), EventResult::Ignored);
+        let resolver = KeybindingResolver::with_defaults();
+        assert_eq!(
+            app.handle_event(AppEvent::Tick, &resolver),
+            EventResult::Ignored
+        );
     }
 
     #[test]
     fn resize_returns_consumed() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         assert_eq!(
-            app.handle_event(AppEvent::Resize(80, 24)),
+            app.handle_event(AppEvent::Resize(80, 24), &resolver),
             EventResult::Consumed
         );
     }
@@ -776,23 +799,26 @@ tasks:
     #[test]
     fn unknown_key_returns_ignored() {
         let mut app = make_app();
-        let result = app.handle_event(press(KeyCode::F(12)));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(press(KeyCode::F(12)), &resolver);
         assert_eq!(result, EventResult::Ignored);
     }
 
     #[test]
     fn esc_in_tree_returns_quit() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.focus = Panel::Tree;
-        let result = app.handle_event(press(KeyCode::Esc));
+        let result = app.handle_event(press(KeyCode::Esc), &resolver);
         assert_eq!(result, EventResult::Quit);
     }
 
     #[test]
     fn esc_in_detail_returns_to_tree() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.focus = Panel::Detail;
-        let result = app.handle_event(press(KeyCode::Esc));
+        let result = app.handle_event(press(KeyCode::Esc), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.focus, Panel::Tree);
     }
@@ -800,15 +826,16 @@ tasks:
     #[test]
     fn double_esc_from_detail_quits() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.focus = Panel::Detail;
 
         // Pierwszy Esc: wraca do Tree
-        let result = app.handle_event(press(KeyCode::Esc));
+        let result = app.handle_event(press(KeyCode::Esc), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.focus, Panel::Tree);
 
         // Drugi Esc: quit
-        let result = app.handle_event(press(KeyCode::Esc));
+        let result = app.handle_event(press(KeyCode::Esc), &resolver);
         assert_eq!(result, EventResult::Quit);
     }
 
@@ -817,8 +844,9 @@ tasks:
     #[test]
     fn sync_resets_detail_scroll() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.detail_scroll = 5;
-        app.handle_event(press(KeyCode::Down));
+        app.handle_event(press(KeyCode::Down), &resolver);
         assert_eq!(app.detail_scroll, 0);
     }
 
@@ -842,19 +870,21 @@ tasks:
     #[test]
     fn f_key_activates_filter_mode() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         assert_eq!(app.input_mode, InputMode::Normal);
 
-        app.handle_event(press(KeyCode::Char('f')));
+        app.handle_event(press(KeyCode::Char('f')), &resolver);
         assert_eq!(app.input_mode, InputMode::Filter);
     }
 
     #[test]
     fn esc_in_filter_mode_clears_filter_and_returns_to_normal() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.input_mode = InputMode::Filter;
         app.filter = "test".to_string();
 
-        app.handle_event(press(KeyCode::Esc));
+        app.handle_event(press(KeyCode::Esc), &resolver);
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(app.filter, "");
     }
@@ -862,10 +892,11 @@ tasks:
     #[test]
     fn enter_in_filter_mode_applies_filter_and_returns_to_normal() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.input_mode = InputMode::Filter;
         app.filter = "test".to_string();
 
-        app.handle_event(press(KeyCode::Enter));
+        app.handle_event(press(KeyCode::Enter), &resolver);
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(app.filter, "test");
     }
@@ -873,12 +904,13 @@ tasks:
     #[test]
     fn typing_in_filter_mode_updates_filter() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.input_mode = InputMode::Filter;
 
-        app.handle_event(press(KeyCode::Char('t')));
-        app.handle_event(press(KeyCode::Char('e')));
-        app.handle_event(press(KeyCode::Char('s')));
-        app.handle_event(press(KeyCode::Char('t')));
+        app.handle_event(press(KeyCode::Char('t')), &resolver);
+        app.handle_event(press(KeyCode::Char('e')), &resolver);
+        app.handle_event(press(KeyCode::Char('s')), &resolver);
+        app.handle_event(press(KeyCode::Char('t')), &resolver);
 
         assert_eq!(app.filter, "test");
     }
@@ -886,13 +918,14 @@ tasks:
     #[test]
     fn backspace_in_filter_mode_removes_last_char() {
         let mut app = make_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.input_mode = InputMode::Filter;
         app.filter = "test".to_string();
 
-        app.handle_event(press(KeyCode::Backspace));
+        app.handle_event(press(KeyCode::Backspace), &resolver);
         assert_eq!(app.filter, "tes");
 
-        app.handle_event(press(KeyCode::Backspace));
+        app.handle_event(press(KeyCode::Backspace), &resolver);
         assert_eq!(app.filter, "te");
     }
 

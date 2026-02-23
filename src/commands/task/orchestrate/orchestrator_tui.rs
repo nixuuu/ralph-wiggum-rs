@@ -15,6 +15,7 @@ use crate::commands::task::orchestrate::summary::TaskSummaryEntry;
 use crate::shared::error::Result;
 use crate::tui::app::AppState;
 use crate::tui::events::{AppEvent, EventResult, is_ctrl_c};
+use crate::tui::keybindings::KeybindingResolver;
 
 use std::collections::HashMap;
 
@@ -30,6 +31,9 @@ pub(super) struct TuiContext {
     pub(super) mux_output: MultiplexedOutput,
     pub(super) task_start_times: HashMap<String, Instant>,
     pub(super) task_summaries: Vec<TaskSummaryEntry>,
+    /// Resolver keybindingów — inicjalizowany raz przy starcie, reużywany per-event.
+    /// Tworzone w orchestrator::run_tui_loop() z opcjonalną konfiguracją z .ralph.toml.
+    pub(super) resolver: KeybindingResolver,
 }
 
 // ── TUI event handling ──────────────────────────────────────────────
@@ -61,8 +65,8 @@ impl Orchestrator {
             }
         }
 
-        // Route event to OrchestrateApp
-        let result = ctx.tui.app.handle_event(event);
+        // TODO(11.4): zamienić hardcoded KeyCode checks w OrchestrateApp na resolver.resolve()
+        let result = ctx.tui.app.handle_event(event, &ctx.tui.resolver);
 
         match result {
             EventResult::Quit => {

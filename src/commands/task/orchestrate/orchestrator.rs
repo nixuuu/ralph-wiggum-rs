@@ -208,6 +208,8 @@ impl Orchestrator {
             mux_output: MultiplexedOutput::new(),
             task_start_times: HashMap::new(),
             task_summaries: Vec::new(),
+            // Resolver inicjalizowany raz — reużywany per-event w handle_tui_event.
+            resolver: crate::tui::keybindings::KeybindingResolver::with_defaults(),
         };
 
         // 11. Spawn EventDispatcher on OS thread + bridge to tokio channel

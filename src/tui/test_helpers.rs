@@ -14,6 +14,7 @@ use ratatui::buffer::Buffer;
 
 use super::app::AppState;
 use super::events::{AppEvent, EventResult};
+use super::keybindings::KeybindingResolver;
 
 // ── Shared test helpers ────────────────────────────────────────────────
 
@@ -77,6 +78,8 @@ pub struct TestApp<S: AppState> {
     event_tx: mpsc::Sender<AppEvent>,
     /// Odbiornik eventów — przekazywany do event loop
     event_rx: mpsc::Receiver<AppEvent>,
+    /// Resolver keybindingów — przekazywany do handle_event
+    resolver: KeybindingResolver,
 }
 
 impl<S: AppState> TestApp<S> {
@@ -97,7 +100,15 @@ impl<S: AppState> TestApp<S> {
             state,
             event_tx,
             event_rx,
+            resolver: KeybindingResolver::with_defaults(),
         }
+    }
+
+    /// Ustaw resolver keybindingów (opcjonalnie — domyślnie używane są defaults).
+    #[allow(dead_code)] // Public API — dostępne dla testów integracyjnych z custom keybindingami
+    pub fn with_resolver(mut self, resolver: KeybindingResolver) -> Self {
+        self.resolver = resolver;
+        self
     }
 
     /// Wstrzyknij pojedyncze zdarzenie klawiatury do event queue.
@@ -198,7 +209,7 @@ impl<S: AppState> TestApp<S> {
     /// Zwraca `Some(EventResult)` jeśli event został przetworzony, `None` jeśli timeout.
     pub fn step_with_timeout(&mut self, timeout: Duration) -> Option<EventResult> {
         match self.event_rx.recv_timeout(timeout) {
-            Ok(event) => Some(self.state.handle_event(event)),
+            Ok(event) => Some(self.state.handle_event(event, &self.resolver)),
             Err(_) => None,
         }
     }
@@ -467,7 +478,11 @@ mod tests {
     impl AppState for CountingState {
         fn draw(&mut self, _frame: &mut Frame, _area: Rect) {}
 
-        fn handle_event(&mut self, event: AppEvent) -> EventResult {
+        fn handle_event(
+            &mut self,
+            event: AppEvent,
+            _resolver: &crate::tui::KeybindingResolver,
+        ) -> EventResult {
             match event {
                 AppEvent::Key(key) => {
                     self.key_count += 1;
@@ -498,7 +513,11 @@ mod tests {
             Text::raw(&self.text).render(area, frame.buffer_mut());
         }
 
-        fn handle_event(&mut self, event: AppEvent) -> EventResult {
+        fn handle_event(
+            &mut self,
+            event: AppEvent,
+            _resolver: &crate::tui::KeybindingResolver,
+        ) -> EventResult {
             match event {
                 AppEvent::Key(key) if key.code == KeyCode::Char('a') => {
                     self.text.push('A');

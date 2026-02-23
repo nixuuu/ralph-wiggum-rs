@@ -580,7 +580,12 @@ impl AppState for OrchestrateApp {
         }
     }
 
-    fn handle_event(&mut self, event: AppEvent) -> EventResult {
+    // TODO(11.4): zamienić hardcoded KeyCode checks w handle_key() na resolver.resolve()
+    fn handle_event(
+        &mut self,
+        event: AppEvent,
+        _resolver: &crate::tui::KeybindingResolver,
+    ) -> EventResult {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::Resize(_, _) => EventResult::Consumed,

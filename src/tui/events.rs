@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use super::keybindings::KeybindingResolver;
+
 // ── Event types ──────────────────────────────────────────────────────
 
 /// Zdarzenie aplikacyjne emitowane przez EventDispatcher.
@@ -63,11 +65,15 @@ pub trait KeyHandler: Send + 'static {
 ///
 /// Polluje crossterm events na osobnym wątku systemowym i przekazuje je
 /// przez `mpsc` kanał. Wspólna obsługa:
-/// - **Ctrl+C** → `AppEvent::Key` + sygnał shutdown
+/// - **Ctrl+C** → `AppEvent::Key` + sygnał shutdown (hardcoded, niezależnie od konfiguracji)
 /// - **Resize** → `AppEvent::Resize`
 /// - **Tick** → `AppEvent::Tick` (gdy brak zdarzeń w oknie pollowania)
 ///
 /// Konsument odbiera eventy przez `recv()` / `recv_timeout()` / `try_recv()`.
+///
+/// Dispatcher przechowuje referencję do `KeybindingResolver` — dostępną
+/// dla konsumentów przez `resolver()`. Pol poll_loop jest prosty i nie
+/// wykonuje żadnych key lookupów: surowe eventy są przekazywane do App.
 #[allow(dead_code)] // Public API — używane przez App
 pub struct EventDispatcher {
     handle: Option<std::thread::JoinHandle<()>>,
@@ -75,15 +81,27 @@ pub struct EventDispatcher {
     receiver: Option<mpsc::Receiver<AppEvent>>,
     /// Gdy true, dispatcher ignoruje key events (TUI widgety same obsługują input)
     paused: Arc<AtomicBool>,
+    /// Resolver keybindingów — przechowywany dla dostępu przez konsumentów.
+    /// Nie jest używany w poll_loop (Ctrl+C pozostaje hardcoded w App::run).
+    resolver: Arc<KeybindingResolver>,
 }
 
 #[allow(dead_code)] // Public API — używane przez App
 impl EventDispatcher {
-    /// Utwórz i uruchom dispatcher na dedykowanym OS thread.
+    /// Utwórz i uruchom dispatcher na dedykowanym OS thread z domyślnym resolverem.
     ///
     /// # Argumenty
     /// - `poll_interval` — interwał pollowania crossterm (typowo 100ms)
     pub fn spawn(poll_interval: Duration) -> Self {
+        Self::spawn_with_resolver(poll_interval, Arc::new(KeybindingResolver::with_defaults()))
+    }
+
+    /// Utwórz i uruchom dispatcher z podanym resolverem keybindingów.
+    ///
+    /// # Argumenty
+    /// - `poll_interval` — interwał pollowania crossterm (typowo 100ms)
+    /// - `resolver` — resolver keybindingów do przechowywania
+    pub fn spawn_with_resolver(poll_interval: Duration, resolver: Arc<KeybindingResolver>) -> Self {
         let (tx, rx) = mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
         let paused = Arc::new(AtomicBool::new(false));
@@ -103,7 +121,20 @@ impl EventDispatcher {
             running,
             receiver: Some(rx),
             paused,
+            resolver,
         }
+    }
+
+    /// Zaktualizuj resolver keybindingów w dispatcherze.
+    ///
+    /// Używane gdy keybindingi są załadowane po spawnie (np. z pliku konfiguracyjnego).
+    pub fn set_resolver(&mut self, resolver: Arc<KeybindingResolver>) {
+        self.resolver = resolver;
+    }
+
+    /// Zwraca referencję do przechowanego resolvera keybindingów.
+    pub fn resolver(&self) -> &Arc<KeybindingResolver> {
+        &self.resolver
     }
 
     /// Główna pętla pollowania — działa na dedykowanym OS thread.

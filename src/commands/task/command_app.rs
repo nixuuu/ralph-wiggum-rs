@@ -463,7 +463,12 @@ impl AppState for TaskCommandApp {
         frame.render_widget(Paragraph::new(status_line), chunks[3]);
     }
 
-    fn handle_event(&mut self, event: AppEvent) -> EventResult {
+    // TODO(11.4): zamienić hardcoded KeyCode checks poniżej na resolver.resolve()
+    fn handle_event(
+        &mut self,
+        event: AppEvent,
+        _resolver: &crate::tui::KeybindingResolver,
+    ) -> EventResult {
         // Obsługa scroll myszki — priorytet przed key handling
         if let AppEvent::Mouse(mouse) = event {
             use crossterm::event::MouseEventKind;
@@ -587,6 +592,7 @@ impl AppState for TaskCommandApp {
 mod tests {
     use super::*;
     use crate::commands::mcp::ask_user::QuestionOption;
+    use crate::tui::KeybindingResolver;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     // ── TaskHeaderData tests ──
@@ -957,7 +963,8 @@ mod tests {
     #[test]
     fn test_handle_event_arrow_up() {
         let mut app = TaskCommandApp::new("task test");
-        let result = app.handle_event(make_key(KeyCode::Up, KeyModifiers::NONE));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(make_key(KeyCode::Up, KeyModifiers::NONE), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.scroll_offset(), 1);
     }
@@ -965,9 +972,10 @@ mod tests {
     #[test]
     fn test_handle_event_arrow_down() {
         let mut app = TaskCommandApp::new("task test");
+        let resolver = KeybindingResolver::with_defaults();
         app.scroll_up(5);
 
-        let result = app.handle_event(make_key(KeyCode::Down, KeyModifiers::NONE));
+        let result = app.handle_event(make_key(KeyCode::Down, KeyModifiers::NONE), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.scroll_offset(), 4);
     }
@@ -975,7 +983,8 @@ mod tests {
     #[test]
     fn test_handle_event_page_up() {
         let mut app = TaskCommandApp::new("task test");
-        let result = app.handle_event(make_key(KeyCode::PageUp, KeyModifiers::NONE));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(make_key(KeyCode::PageUp, KeyModifiers::NONE), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.scroll_offset(), 10);
     }
@@ -983,9 +992,10 @@ mod tests {
     #[test]
     fn test_handle_event_page_down() {
         let mut app = TaskCommandApp::new("task test");
+        let resolver = KeybindingResolver::with_defaults();
         app.scroll_up(20);
 
-        let result = app.handle_event(make_key(KeyCode::PageDown, KeyModifiers::NONE));
+        let result = app.handle_event(make_key(KeyCode::PageDown, KeyModifiers::NONE), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.scroll_offset(), 10);
     }
@@ -993,12 +1003,13 @@ mod tests {
     #[test]
     fn test_handle_event_home() {
         let mut app = TaskCommandApp::new("task test");
+        let resolver = KeybindingResolver::with_defaults();
         // Push some content so home has somewhere to scroll
         for i in 0..50 {
             app.push_text(&format!("line {}", i));
         }
 
-        let result = app.handle_event(make_key(KeyCode::Home, KeyModifiers::NONE));
+        let result = app.handle_event(make_key(KeyCode::Home, KeyModifiers::NONE), &resolver);
         assert_eq!(result, EventResult::Consumed);
         // scroll_home sets offset based on total_visual_rows
         assert!(app.scroll_offset() > 0);
@@ -1008,9 +1019,10 @@ mod tests {
     #[test]
     fn test_handle_event_end() {
         let mut app = TaskCommandApp::new("task test");
+        let resolver = KeybindingResolver::with_defaults();
         app.scroll_up(50);
 
-        let result = app.handle_event(make_key(KeyCode::End, KeyModifiers::NONE));
+        let result = app.handle_event(make_key(KeyCode::End, KeyModifiers::NONE), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.scroll_offset(), 0);
         assert!(app.output_state.auto_follow);
@@ -1019,35 +1031,43 @@ mod tests {
     #[test]
     fn test_handle_event_quit() {
         let mut app = TaskCommandApp::new("task test");
-        let result = app.handle_event(make_key(KeyCode::Char('q'), KeyModifiers::NONE));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(make_key(KeyCode::Char('q'), KeyModifiers::NONE), &resolver);
         assert_eq!(result, EventResult::Quit);
     }
 
     #[test]
     fn test_handle_event_ctrl_c() {
         let mut app = TaskCommandApp::new("task test");
-        let result = app.handle_event(make_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(
+            make_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &resolver,
+        );
         assert_eq!(result, EventResult::Shutdown);
     }
 
     #[test]
     fn test_handle_event_ignored() {
         let mut app = TaskCommandApp::new("task test");
-        let result = app.handle_event(make_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(make_key(KeyCode::Char('x'), KeyModifiers::NONE), &resolver);
         assert_eq!(result, EventResult::Ignored);
     }
 
     #[test]
     fn test_handle_event_tick_ignored() {
         let mut app = TaskCommandApp::new("task test");
-        let result = app.handle_event(AppEvent::Tick);
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Tick, &resolver);
         assert_eq!(result, EventResult::Ignored);
     }
 
     #[test]
     fn test_handle_event_resize_ignored() {
         let mut app = TaskCommandApp::new("task test");
-        let result = app.handle_event(AppEvent::Resize(80, 24));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Resize(80, 24), &resolver);
         assert_eq!(result, EventResult::Ignored);
     }
 

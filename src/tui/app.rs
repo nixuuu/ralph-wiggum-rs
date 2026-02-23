@@ -18,6 +18,7 @@ use ratatui::layout::Rect;
 use ratatui::prelude::CrosstermBackend;
 
 use super::events::{AppEvent, EventDispatcher, EventResult, is_ctrl_c};
+use super::keybindings::KeybindingResolver;
 
 // ── AppState trait ──────────────────────────────────────────────────
 
@@ -30,8 +31,13 @@ pub trait AppState {
     fn draw(&mut self, frame: &mut Frame, area: Rect);
 
     /// Obsłuż zdarzenie aplikacyjne (key, resize, tick).
+    ///
+    /// `resolver` — resolver keybindingów do translacji KeyEvent → KeyAction.
+    /// Używaj `resolver.resolve(&key, View::Global)` lub widoku specyficznego
+    /// zamiast hardcoded KeyCode checks.
+    ///
     /// Zwraca `EventResult` informujący event loop o wymaganej akcji.
-    fn handle_event(&mut self, event: AppEvent) -> EventResult;
+    fn handle_event(&mut self, event: AppEvent, resolver: &KeybindingResolver) -> EventResult;
 }
 
 // ── App struct ──────────────────────────────────────────────────────
@@ -43,6 +49,7 @@ pub trait AppState {
 /// - `EventDispatcher` (crossterm polling na OS thread)
 /// - Raw mode i AlternateScreen lifecycle
 /// - Graceful shutdown via `Arc<AtomicBool>`
+/// - `KeybindingResolver` przekazywany do `AppState::handle_event`
 ///
 /// Typowy cykl życia:
 /// ```ignore
@@ -57,6 +64,8 @@ pub struct App {
     shutdown: Arc<AtomicBool>,
     /// Flaga: czy raw mode jest aktywny (na potrzeby cleanup)
     raw_mode_active: bool,
+    /// Resolver keybindingów — przekazywany do AppState::handle_event w każdym ticku.
+    resolver: KeybindingResolver,
 }
 
 #[allow(dead_code)] // Public API — będzie użyte przez per-command widoki TUI
@@ -90,7 +99,10 @@ impl App {
             }
         };
 
-        let dispatcher = EventDispatcher::spawn(poll_interval);
+        let resolver = KeybindingResolver::with_defaults();
+        // Klonuj resolver do Arc — oba wskazują na te same dane, bez drugiej alokacji.
+        let resolver_arc = Arc::new(resolver.clone());
+        let dispatcher = EventDispatcher::spawn_with_resolver(poll_interval, resolver_arc);
         let shutdown = Arc::new(AtomicBool::new(false));
 
         Ok(App {
@@ -98,6 +110,7 @@ impl App {
             dispatcher: Some(dispatcher),
             shutdown,
             raw_mode_active: true,
+            resolver,
         })
     }
 
@@ -107,6 +120,20 @@ impl App {
     /// np. żeby SIGINT przerwał zarówno TUI loop jak i runner.
     pub fn with_shutdown(mut self, shutdown: Arc<AtomicBool>) -> Self {
         self.shutdown = shutdown;
+        self
+    }
+
+    /// Ustaw resolver keybindingów (np. załadowany z .ralph.toml).
+    ///
+    /// Domyślnie App używa `KeybindingResolver::with_defaults()`.
+    /// Ta metoda pozwala nadpisać resolver po załadowaniu konfiguracji.
+    /// Resolver jest propagowany do dispatcher i do `AppState::handle_event`.
+    pub fn with_keybindings(mut self, resolver: KeybindingResolver) -> Self {
+        let resolver_arc = std::sync::Arc::new(resolver.clone());
+        if let Some(ref mut dispatcher) = self.dispatcher {
+            dispatcher.set_resolver(resolver_arc);
+        }
+        self.resolver = resolver;
         self
     }
 
@@ -141,11 +168,11 @@ impl App {
                 continue;
             }
 
-            // Wspólne handlery: tylko Ctrl+C ma bezwarunkowy priorytet.
-            // Klawisz 'q' delegowany do state (może mieć confirmation flow).
+            // Wspólne handlery: tylko Ctrl+C ma bezwarunkowy priorytet (hardcoded).
+            // Klawisz 'q' i inne — delegowane do state z resolverem.
             let result = match &event {
                 AppEvent::Key(key) if is_ctrl_c(key) => EventResult::Shutdown,
-                _ => state.handle_event(event),
+                _ => state.handle_event(event, &self.resolver),
             };
 
             match result {
@@ -195,7 +222,7 @@ impl App {
                 let mut s = state.lock().expect("AppState mutex poisoned");
                 match &event {
                     AppEvent::Key(key) if is_ctrl_c(key) => EventResult::Shutdown,
-                    _ => s.handle_event(event),
+                    _ => s.handle_event(event, &self.resolver),
                 }
             };
 
@@ -290,7 +317,11 @@ mod tests {
     impl AppState for CountingState {
         fn draw(&mut self, _frame: &mut Frame, _area: Rect) {}
 
-        fn handle_event(&mut self, _event: AppEvent) -> EventResult {
+        fn handle_event(
+            &mut self,
+            _event: AppEvent,
+            _resolver: &KeybindingResolver,
+        ) -> EventResult {
             self.event_count += 1;
             if self.event_count >= self.quit_after {
                 EventResult::Quit
@@ -305,7 +336,11 @@ mod tests {
 
     impl AppState for IgnoringState {
         fn draw(&mut self, _frame: &mut Frame, _area: Rect) {}
-        fn handle_event(&mut self, _event: AppEvent) -> EventResult {
+        fn handle_event(
+            &mut self,
+            _event: AppEvent,
+            _resolver: &KeybindingResolver,
+        ) -> EventResult {
             EventResult::Ignored
         }
     }
@@ -315,7 +350,11 @@ mod tests {
 
     impl AppState for ShutdownState {
         fn draw(&mut self, _frame: &mut Frame, _area: Rect) {}
-        fn handle_event(&mut self, _event: AppEvent) -> EventResult {
+        fn handle_event(
+            &mut self,
+            _event: AppEvent,
+            _resolver: &KeybindingResolver,
+        ) -> EventResult {
             EventResult::Shutdown
         }
     }
@@ -333,28 +372,43 @@ mod tests {
     #[test]
     fn counting_state_tracks_events() {
         let mut state = CountingState::new(3);
+        let resolver = KeybindingResolver::with_defaults();
         let tick = AppEvent::Tick;
 
-        assert_eq!(state.handle_event(tick.clone()), EventResult::Consumed);
+        assert_eq!(
+            state.handle_event(tick.clone(), &resolver),
+            EventResult::Consumed
+        );
         assert_eq!(state.event_count, 1);
 
-        assert_eq!(state.handle_event(tick.clone()), EventResult::Consumed);
+        assert_eq!(
+            state.handle_event(tick.clone(), &resolver),
+            EventResult::Consumed
+        );
         assert_eq!(state.event_count, 2);
 
-        assert_eq!(state.handle_event(tick), EventResult::Quit);
+        assert_eq!(state.handle_event(tick, &resolver), EventResult::Quit);
         assert_eq!(state.event_count, 3);
     }
 
     #[test]
     fn shutdown_state_returns_shutdown() {
         let mut state = ShutdownState;
-        assert_eq!(state.handle_event(AppEvent::Tick), EventResult::Shutdown);
+        let resolver = KeybindingResolver::with_defaults();
+        assert_eq!(
+            state.handle_event(AppEvent::Tick, &resolver),
+            EventResult::Shutdown
+        );
     }
 
     #[test]
     fn ignoring_state_returns_ignored() {
         let mut state = IgnoringState;
-        assert_eq!(state.handle_event(AppEvent::Tick), EventResult::Ignored);
+        let resolver = KeybindingResolver::with_defaults();
+        assert_eq!(
+            state.handle_event(AppEvent::Tick, &resolver),
+            EventResult::Ignored
+        );
     }
 
     // ── Key priority tests (weryfikacja logiki z App::run) ──
@@ -370,6 +424,16 @@ mod tests {
 
     /// Helper: symuluje logikę dispatch z App::run bez prawdziwego terminala.
     fn simulate_dispatch(state: &mut impl AppState, event: AppEvent) -> Option<EventResult> {
+        let resolver = KeybindingResolver::with_defaults();
+        simulate_dispatch_with_resolver(state, event, &resolver)
+    }
+
+    /// Helper: symuluje logikę dispatch z resolverem.
+    fn simulate_dispatch_with_resolver(
+        state: &mut impl AppState,
+        event: AppEvent,
+        resolver: &KeybindingResolver,
+    ) -> Option<EventResult> {
         // Filtrowanie Release/Repeat — jak w App::run()
         if let AppEvent::Key(ref key) = event
             && key.kind != KeyEventKind::Press
@@ -377,10 +441,10 @@ mod tests {
             return None;
         }
 
-        // Od teraz tylko Ctrl+C jest przechwytywany globalnie
+        // Tylko Ctrl+C jest przechwytywany globalnie (hardcoded safety override)
         Some(match &event {
             AppEvent::Key(key) if is_ctrl_c(key) => EventResult::Shutdown,
-            _ => state.handle_event(event),
+            _ => state.handle_event(event, resolver),
         })
     }
 
@@ -499,7 +563,8 @@ mod tests {
     #[test]
     fn app_state_handles_resize_event() {
         let mut state = CountingState::new(10);
-        let result = state.handle_event(AppEvent::Resize(120, 40));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = state.handle_event(AppEvent::Resize(120, 40), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(state.event_count, 1);
     }
@@ -507,7 +572,8 @@ mod tests {
     #[test]
     fn app_state_handles_tick_event() {
         let mut state = CountingState::new(10);
-        let result = state.handle_event(AppEvent::Tick);
+        let resolver = KeybindingResolver::with_defaults();
+        let result = state.handle_event(AppEvent::Tick, &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(state.event_count, 1);
     }
@@ -515,8 +581,9 @@ mod tests {
     #[test]
     fn app_state_handles_key_event() {
         let mut state = CountingState::new(10);
+        let resolver = KeybindingResolver::with_defaults();
         let key = make_key(KeyCode::Char('x'), KeyModifiers::NONE);
-        let result = state.handle_event(AppEvent::Key(key));
+        let result = state.handle_event(AppEvent::Key(key), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(state.event_count, 1);
     }
@@ -526,11 +593,12 @@ mod tests {
     #[test]
     fn app_state_quit_after_n_events() {
         let mut state = CountingState::new(3);
+        let resolver = KeybindingResolver::with_defaults();
         let events = vec![AppEvent::Tick, AppEvent::Tick, AppEvent::Tick];
 
         let mut results = Vec::new();
         for event in events {
-            results.push(state.handle_event(event));
+            results.push(state.handle_event(event, &resolver));
         }
 
         assert_eq!(
@@ -552,6 +620,7 @@ mod tests {
         state: &Arc<Mutex<impl AppState>>,
         event: AppEvent,
     ) -> Option<EventResult> {
+        let resolver = KeybindingResolver::with_defaults();
         if let AppEvent::Key(ref key) = event
             && key.kind != KeyEventKind::Press
         {
@@ -561,7 +630,7 @@ mod tests {
         let mut s = state.lock().expect("test mutex poisoned");
         Some(match &event {
             AppEvent::Key(key) if is_ctrl_c(key) => EventResult::Shutdown,
-            _ => s.handle_event(event),
+            _ => s.handle_event(event, &resolver),
         })
     }
 

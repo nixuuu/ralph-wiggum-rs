@@ -536,7 +536,12 @@ impl AppState for RunApp {
         frame.render_widget(status_bar, layout.status_bar);
     }
 
-    fn handle_event(&mut self, event: AppEvent) -> EventResult {
+    // TODO(11.4): zamienić hardcoded KeyCode checks poniżej na resolver.resolve()
+    fn handle_event(
+        &mut self,
+        event: AppEvent,
+        _resolver: &crate::tui::KeybindingResolver,
+    ) -> EventResult {
         match event {
             AppEvent::Key(key) => {
                 // Jeśli jest splash screen — każdy klawisz go pomija, przejdź do Running
@@ -599,6 +604,7 @@ impl AppState for RunApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::KeybindingResolver;
     use crate::tui::events::AppEvent;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use ratatui::backend::TestBackend;
@@ -710,13 +716,14 @@ mod tests {
     #[test]
     fn tab_toggles_focus() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         assert_eq!(app.focus, FocusArea::Output);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Tab)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Tab)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.focus, FocusArea::Sidebar);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Tab)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Tab)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.focus, FocusArea::Output);
     }
@@ -724,13 +731,14 @@ mod tests {
     #[test]
     fn t_toggles_sidebar_visibility() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         assert!(app.sidebar.visible);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert!(!app.sidebar.visible);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert!(app.sidebar.visible);
     }
@@ -738,13 +746,14 @@ mod tests {
     #[test]
     fn bracket_keys_resize_sidebar() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         let initial_width = app.sidebar.width();
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.sidebar.width(), initial_width + 1);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('['))));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('['))), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.sidebar.width(), initial_width);
     }
@@ -754,13 +763,14 @@ mod tests {
     #[test]
     fn arrow_up_scrolls_output() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         // Dodaj trochę contentu
         for i in 0..20 {
             app.push_lines(vec![Line::raw(format!("Line {i}"))]);
         }
         assert!(app.output_view_state.auto_follow);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Up)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Up)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert!(!app.output_view_state.auto_follow);
         assert_eq!(app.output_view_state.scroll_offset, 1);
@@ -769,13 +779,14 @@ mod tests {
     #[test]
     fn arrow_down_scrolls_output_back() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         for i in 0..20 {
             app.push_lines(vec![Line::raw(format!("Line {i}"))]);
         }
         app.output_view_state.scroll_up(3);
         assert_eq!(app.output_view_state.scroll_offset, 3);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Down)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Down)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.output_view_state.scroll_offset, 2);
     }
@@ -783,10 +794,11 @@ mod tests {
     #[test]
     fn end_key_re_enables_auto_follow() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.output_view_state.scroll_up(5);
         assert!(!app.output_view_state.auto_follow);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::End)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::End)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert!(app.output_view_state.auto_follow);
         assert_eq!(app.output_view_state.scroll_offset, 0);
@@ -795,11 +807,12 @@ mod tests {
     #[test]
     fn page_up_scrolls_by_10() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         for i in 0..50 {
             app.push_lines(vec![Line::raw(format!("Line {i}"))]);
         }
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::PageUp)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::PageUp)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.output_view_state.scroll_offset, 10);
     }
@@ -826,13 +839,14 @@ tasks:
         .unwrap();
         app.sidebar.refresh(&tf);
 
+        let resolver = KeybindingResolver::with_defaults();
         assert_eq!(app.sidebar.selected_index, 0);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Down)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Down)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.sidebar.selected_index, 1);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Up)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Up)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.sidebar.selected_index, 0);
     }
@@ -856,7 +870,8 @@ tasks:
         .unwrap();
         app.sidebar.refresh(&tf);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Enter)));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Enter)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         // Po expand powinno być 2 widoczne wiersze
     }
@@ -866,7 +881,8 @@ tasks:
     #[test]
     fn tick_updates_status() {
         let mut app = default_run_app();
-        let result = app.handle_event(AppEvent::Tick);
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Tick, &resolver);
         assert_eq!(result, EventResult::Consumed);
         // elapsed_secs powinien być >= 0
         assert!(app.status_data.elapsed_secs >= 0.0);
@@ -877,15 +893,17 @@ tasks:
     #[test]
     fn resize_is_consumed() {
         let mut app = default_run_app();
-        let result = app.handle_event(AppEvent::Resize(120, 40));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Resize(120, 40), &resolver);
         assert_eq!(result, EventResult::Consumed);
     }
 
     #[test]
     fn resize_updates_breakpoint_large() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.current_breakpoint = Breakpoint::Small;
-        let result = app.handle_event(AppEvent::Resize(120, 40));
+        let result = app.handle_event(AppEvent::Resize(120, 40), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.current_breakpoint, Breakpoint::Large);
     }
@@ -893,8 +911,9 @@ tasks:
     #[test]
     fn resize_updates_breakpoint_medium() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.current_breakpoint = Breakpoint::Large;
-        let result = app.handle_event(AppEvent::Resize(100, 30));
+        let result = app.handle_event(AppEvent::Resize(100, 30), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.current_breakpoint, Breakpoint::Medium);
     }
@@ -902,8 +921,9 @@ tasks:
     #[test]
     fn resize_updates_breakpoint_small() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.current_breakpoint = Breakpoint::Large;
-        let result = app.handle_event(AppEvent::Resize(70, 20));
+        let result = app.handle_event(AppEvent::Resize(70, 20), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.current_breakpoint, Breakpoint::Small);
     }
@@ -911,8 +931,9 @@ tasks:
     #[test]
     fn resize_preserves_breakpoint_if_same_range() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.current_breakpoint = Breakpoint::Large;
-        let result = app.handle_event(AppEvent::Resize(150, 40));
+        let result = app.handle_event(AppEvent::Resize(150, 40), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.current_breakpoint, Breakpoint::Large);
     }
@@ -920,8 +941,9 @@ tasks:
     #[test]
     fn resize_to_small_preserves_sidebar_focus() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.focus = FocusArea::Sidebar;
-        app.handle_event(AppEvent::Resize(70, 20));
+        app.handle_event(AppEvent::Resize(70, 20), &resolver);
         // Small breakpoint — sidebar jest overlay, focus zachowany
         assert_eq!(app.focus, FocusArea::Sidebar);
         assert_eq!(app.current_breakpoint, Breakpoint::Small);
@@ -930,8 +952,9 @@ tasks:
     #[test]
     fn resize_to_medium_preserves_sidebar_focus() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         app.focus = FocusArea::Sidebar;
-        app.handle_event(AppEvent::Resize(100, 30));
+        app.handle_event(AppEvent::Resize(100, 30), &resolver);
         // Medium nadal ma sidebar (collapsed) — focus zachowany
         assert_eq!(app.focus, FocusArea::Sidebar);
         assert_eq!(app.current_breakpoint, Breakpoint::Medium);
@@ -942,10 +965,11 @@ tasks:
     #[test]
     fn ctrl_c_triggers_shutdown() {
         let mut app = default_run_app();
-        let result = app.handle_event(AppEvent::Key(key_with_mod(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        )));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(
+            AppEvent::Key(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &resolver,
+        );
         assert_eq!(result, EventResult::Shutdown);
         assert!(app.shutdown.load(Ordering::SeqCst));
     }
@@ -955,9 +979,10 @@ tasks:
     #[test]
     fn first_q_enters_quit_pending() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         assert!(!app.quit_pending);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert!(app.quit_pending);
     }
@@ -965,39 +990,42 @@ tasks:
     #[test]
     fn second_q_confirms_quit() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
 
         // Pierwszy 'q'
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &resolver);
         assert!(app.quit_pending);
 
         // Drugi 'q'
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &resolver);
         assert_eq!(result, EventResult::Quit);
     }
 
     #[test]
     fn enter_confirms_quit_when_pending() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
 
         // Pierwszy 'q'
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &resolver);
         assert!(app.quit_pending);
 
         // Enter
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Enter)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Enter)), &resolver);
         assert_eq!(result, EventResult::Quit);
     }
 
     #[test]
     fn esc_cancels_quit_pending() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
 
         // Pierwszy 'q'
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &resolver);
         assert!(app.quit_pending);
 
         // Esc anuluje
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Esc)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Esc)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert!(!app.quit_pending);
     }
@@ -1005,44 +1033,48 @@ tasks:
     #[test]
     fn esc_ignored_when_not_quit_pending() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
         assert!(!app.quit_pending);
 
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Esc)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Esc)), &resolver);
         assert_eq!(result, EventResult::Ignored);
     }
 
     #[test]
     fn navigation_cancels_quit_pending() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
 
         // Wejdź w quit_pending
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &resolver);
         assert!(app.quit_pending);
 
         // Strzałka w górę anuluje quit_pending
-        app.handle_event(AppEvent::Key(key(KeyCode::Up)));
+        app.handle_event(AppEvent::Key(key(KeyCode::Up)), &resolver);
         assert!(!app.quit_pending);
     }
 
     #[test]
     fn sidebar_toggle_cancels_quit_pending() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
 
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &resolver);
         assert!(app.quit_pending);
 
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))), &resolver);
         assert!(!app.quit_pending);
     }
 
     #[test]
     fn tab_cancels_quit_pending() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
 
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &resolver);
         assert!(app.quit_pending);
 
-        app.handle_event(AppEvent::Key(key(KeyCode::Tab)));
+        app.handle_event(AppEvent::Key(key(KeyCode::Tab)), &resolver);
         assert!(!app.quit_pending);
     }
 
@@ -1066,12 +1098,13 @@ tasks:
         .unwrap();
         app.sidebar.refresh(&tf);
 
+        let resolver = KeybindingResolver::with_defaults();
         // Wejdź w quit_pending
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &resolver);
         assert!(app.quit_pending);
 
         // Enter powinien potwierdzić quit, nie expand sidebar
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Enter)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Enter)), &resolver);
         assert_eq!(result, EventResult::Quit);
     }
 
@@ -1100,20 +1133,22 @@ tasks:
     #[test]
     fn unknown_key_is_ignored() {
         let mut app = default_run_app();
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::F(12))));
+        let resolver = KeybindingResolver::with_defaults();
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::F(12))), &resolver);
         assert_eq!(result, EventResult::Ignored);
     }
 
     #[test]
     fn unknown_key_preserves_quit_pending() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
 
         // Wejdź w quit_pending
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &resolver);
         assert!(app.quit_pending);
 
         // Nieznany klawisz — ignorowany, ale quit_pending NIE jest anulowane
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::F(12))));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::F(12))), &resolver);
         assert_eq!(result, EventResult::Ignored);
         assert!(app.quit_pending);
     }
@@ -1319,8 +1354,9 @@ tasks:
         let cached_area = app.last_output_area;
         assert!(cached_area.width > 0);
 
+        let resolver = KeybindingResolver::with_defaults();
         // Home powinien ustawić scroll_offset na max (top)
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Home)));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Home)), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert!(!app.output_view_state.auto_follow);
         assert!(app.output_view_state.scroll_offset > 0);
@@ -1463,10 +1499,11 @@ tasks:
     #[test]
     fn splash_screen_keyboard_skip() {
         let mut app = RunApp::new("run", "claude-sonnet-4-5", false, 100, true);
+        let resolver = KeybindingResolver::with_defaults();
         assert_eq!(app.phase, RunPhase::Splash);
 
         // Każdy klawisz powinien pominąć splash
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('a'))));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('a'))), &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.phase, RunPhase::Running);
         assert_eq!(app.splash_start_time, None);
@@ -1475,11 +1512,12 @@ tasks:
     #[test]
     fn splash_screen_timer_transition() {
         let mut app = RunApp::new("run", "claude-sonnet-4-5", false, 100, true);
+        let resolver = KeybindingResolver::with_defaults();
         assert_eq!(app.phase, RunPhase::Splash);
 
         // Simulate tick events (splash trwa 1500ms)
         for _ in 0..20 {
-            let result = app.handle_event(AppEvent::Tick);
+            let result = app.handle_event(AppEvent::Tick, &resolver);
             assert_eq!(result, EventResult::Consumed);
 
             if app.phase == RunPhase::Running {
@@ -1498,8 +1536,9 @@ tasks:
         let mut app = RunApp::new("run", "claude-sonnet-4-5", false, 100, true);
         let initial_elapsed = app.status_data.elapsed_secs;
 
+        let resolver = KeybindingResolver::with_defaults();
         // Tick podczas splash — status nie powinien być aktualizowany
-        app.handle_event(AppEvent::Tick);
+        app.handle_event(AppEvent::Tick, &resolver);
 
         // elapsed_secs powinien być taki sam
         assert_eq!(app.status_data.elapsed_secs, initial_elapsed);
@@ -1718,8 +1757,9 @@ tasks:
 "#;
         std::fs::write(&path, yaml2).unwrap();
 
+        let resolver = KeybindingResolver::with_defaults();
         // Wywołaj handle_event(Tick) — powinien wywołać check_tasks_reload
-        let result = app.handle_event(AppEvent::Tick);
+        let result = app.handle_event(AppEvent::Tick, &resolver);
         assert_eq!(result, EventResult::Consumed);
 
         // Mtime powinien się zmienić (reload przez Tick event)
@@ -1763,8 +1803,9 @@ tasks:
         let mut app = default_run_app();
         app.push_lines(vec![Line::raw("Test output")]);
 
+        let resolver = KeybindingResolver::with_defaults();
         // Start w Large (120x30)
-        app.handle_event(AppEvent::Resize(120, 30));
+        app.handle_event(AppEvent::Resize(120, 30), &resolver);
         let backend_large = TestBackend::new(120, 30);
         let mut terminal_large = ratatui::Terminal::new(backend_large).unwrap();
         terminal_large
@@ -1776,7 +1817,7 @@ tasks:
         let large_output_width = app.last_output_area.width;
 
         // Resize do Medium (100x30)
-        app.handle_event(AppEvent::Resize(100, 30));
+        app.handle_event(AppEvent::Resize(100, 30), &resolver);
         let backend_medium = TestBackend::new(100, 30);
         let mut terminal_medium = ratatui::Terminal::new(backend_medium).unwrap();
         terminal_medium
@@ -1798,8 +1839,9 @@ tasks:
         let mut app = default_run_app();
         app.push_lines(vec![Line::raw("Test")]);
 
+        let resolver = KeybindingResolver::with_defaults();
         // Start w Medium (100x30)
-        app.handle_event(AppEvent::Resize(100, 30));
+        app.handle_event(AppEvent::Resize(100, 30), &resolver);
         let backend_medium = TestBackend::new(100, 30);
         let mut terminal_medium = ratatui::Terminal::new(backend_medium).unwrap();
         terminal_medium
@@ -1811,7 +1853,7 @@ tasks:
         let medium_output_width = app.last_output_area.width;
 
         // Resize do Small (70x20)
-        app.handle_event(AppEvent::Resize(70, 20));
+        app.handle_event(AppEvent::Resize(70, 20), &resolver);
         let backend_small = TestBackend::new(70, 20);
         let mut terminal_small = ratatui::Terminal::new(backend_small).unwrap();
         terminal_small
@@ -1834,8 +1876,9 @@ tasks:
         let mut app = default_run_app();
         app.push_lines(vec![Line::raw("Test")]);
 
+        let resolver = KeybindingResolver::with_defaults();
         // Start w Small (70x20)
-        app.handle_event(AppEvent::Resize(70, 20));
+        app.handle_event(AppEvent::Resize(70, 20), &resolver);
         let backend_small = TestBackend::new(70, 20);
         let mut terminal_small = ratatui::Terminal::new(backend_small).unwrap();
         terminal_small
@@ -1847,7 +1890,7 @@ tasks:
         assert_eq!(app.current_breakpoint, Breakpoint::Small);
 
         // Resize do Large (120x30)
-        app.handle_event(AppEvent::Resize(120, 30));
+        app.handle_event(AppEvent::Resize(120, 30), &resolver);
         let backend_large = TestBackend::new(120, 30);
         let mut terminal_large = ratatui::Terminal::new(backend_large).unwrap();
         terminal_large
@@ -1866,20 +1909,21 @@ tasks:
     #[test]
     fn multiple_resizes_track_breakpoint() {
         let mut app = default_run_app();
+        let resolver = KeybindingResolver::with_defaults();
 
-        app.handle_event(AppEvent::Resize(120, 30));
+        app.handle_event(AppEvent::Resize(120, 30), &resolver);
         assert_eq!(app.current_breakpoint, Breakpoint::Large);
 
-        app.handle_event(AppEvent::Resize(100, 30));
+        app.handle_event(AppEvent::Resize(100, 30), &resolver);
         assert_eq!(app.current_breakpoint, Breakpoint::Medium);
 
-        app.handle_event(AppEvent::Resize(70, 20));
+        app.handle_event(AppEvent::Resize(70, 20), &resolver);
         assert_eq!(app.current_breakpoint, Breakpoint::Small);
 
-        app.handle_event(AppEvent::Resize(80, 25));
+        app.handle_event(AppEvent::Resize(80, 25), &resolver);
         assert_eq!(app.current_breakpoint, Breakpoint::Medium);
 
-        app.handle_event(AppEvent::Resize(150, 40));
+        app.handle_event(AppEvent::Resize(150, 40), &resolver);
         assert_eq!(app.current_breakpoint, Breakpoint::Large);
     }
 
@@ -2268,8 +2312,9 @@ tasks:
         // Początkowy stan — sidebar visible
         assert!(app.sidebar.visible, "Sidebar should be visible by default");
 
+        let resolver = KeybindingResolver::with_defaults();
         // Naciśnij 't' → sidebar hidden
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))), &resolver);
         assert_eq!(
             result,
             EventResult::Consumed,
@@ -2278,7 +2323,7 @@ tasks:
         assert!(!app.sidebar.visible, "Sidebar should be hidden after 't'");
 
         // Naciśnij 't' ponownie → sidebar visible
-        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))));
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))), &resolver);
         assert_eq!(
             result,
             EventResult::Consumed,
@@ -2301,9 +2346,10 @@ tasks:
             "Default sidebar width should be 40 (DEFAULT_WIDTH)"
         );
 
+        let resolver = KeybindingResolver::with_defaults();
         // Naciśnij ']' 5 razy
         for i in 1..=5 {
-            let result = app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))));
+            let result = app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))), &resolver);
             assert_eq!(
                 result,
                 EventResult::Consumed,
@@ -2334,9 +2380,10 @@ tasks:
         let initial_width = app.sidebar.width();
         assert_eq!(initial_width, 40, "Default sidebar width should be 40");
 
+        let resolver = KeybindingResolver::with_defaults();
         // Naciśnij '[' 3 razy
         for i in 1..=3 {
-            let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('['))));
+            let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('['))), &resolver);
             assert_eq!(
                 result,
                 EventResult::Consumed,
@@ -2367,9 +2414,10 @@ tasks:
         let initial_width = app.sidebar.width();
         assert_eq!(initial_width, 40, "Default sidebar width should be 40");
 
+        let resolver = KeybindingResolver::with_defaults();
         // Naciśnij '[' 30 razy (więcej niż potrzeba do dotarcia do MIN_WIDTH=15)
         for _ in 0..30 {
-            app.handle_event(AppEvent::Key(key(KeyCode::Char('['))));
+            app.handle_event(AppEvent::Key(key(KeyCode::Char('['))), &resolver);
         }
 
         // Szerokość nie powinna być mniejsza niż MIN_WIDTH (15)
@@ -2380,7 +2428,7 @@ tasks:
         );
 
         // Dodatkowe naciśnięcie '[' nie powinno zmniejszyć poniżej 15
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('['))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('['))), &resolver);
         assert_eq!(
             app.sidebar.width(),
             15,
@@ -2396,9 +2444,10 @@ tasks:
         let initial_width = app.sidebar.width();
         assert_eq!(initial_width, 40, "Default sidebar width should be 40");
 
+        let resolver = KeybindingResolver::with_defaults();
         // Naciśnij ']' 30 razy (więcej niż potrzeba do dotarcia do MAX_WIDTH=60)
         for _ in 0..30 {
-            app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))));
+            app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))), &resolver);
         }
 
         // Szerokość nie powinna być większa niż MAX_WIDTH (60)
@@ -2409,7 +2458,7 @@ tasks:
         );
 
         // Dodatkowe naciśnięcie ']' nie powinno zwiększyć powyżej 60
-        app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))), &resolver);
         assert_eq!(
             app.sidebar.width(),
             60,
@@ -2426,14 +2475,15 @@ tasks:
         assert!(app.sidebar.visible, "Sidebar should be visible");
         assert_eq!(app.sidebar.width(), 40, "Default width should be 40");
 
+        let resolver = KeybindingResolver::with_defaults();
         // Zwiększ szerokość o 5
         for _ in 0..5 {
-            app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))));
+            app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))), &resolver);
         }
         assert_eq!(app.sidebar.width(), 45, "Width should be 45");
 
         // Ukryj sidebar
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))), &resolver);
         assert!(!app.sidebar.visible, "Sidebar should be hidden");
 
         // Szerokość powinna pozostać zachowana
@@ -2444,7 +2494,7 @@ tasks:
         );
 
         // Pokaż sidebar ponownie
-        app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))));
+        app.handle_event(AppEvent::Key(key(KeyCode::Char('t'))), &resolver);
         assert!(app.sidebar.visible, "Sidebar should be visible again");
         assert_eq!(
             app.sidebar.width(),
@@ -2454,7 +2504,7 @@ tasks:
 
         // Zmniejsz szerokość o 10
         for _ in 0..10 {
-            app.handle_event(AppEvent::Key(key(KeyCode::Char('['))));
+            app.handle_event(AppEvent::Key(key(KeyCode::Char('['))), &resolver);
         }
         assert_eq!(
             app.sidebar.width(),
@@ -2470,15 +2520,16 @@ tasks:
 
         assert_eq!(app.sidebar.width(), 40, "Initial width should be 40");
 
+        let resolver = KeybindingResolver::with_defaults();
         // Grow by 10
         for _ in 0..10 {
-            app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))));
+            app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))), &resolver);
         }
         assert_eq!(app.sidebar.width(), 50, "Width should be 50 after growing");
 
         // Shrink by 15
         for _ in 0..15 {
-            app.handle_event(AppEvent::Key(key(KeyCode::Char('['))));
+            app.handle_event(AppEvent::Key(key(KeyCode::Char('['))), &resolver);
         }
         assert_eq!(
             app.sidebar.width(),
@@ -2488,7 +2539,7 @@ tasks:
 
         // Grow by 8
         for _ in 0..8 {
-            app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))));
+            app.handle_event(AppEvent::Key(key(KeyCode::Char(']'))), &resolver);
         }
         assert_eq!(
             app.sidebar.width(),

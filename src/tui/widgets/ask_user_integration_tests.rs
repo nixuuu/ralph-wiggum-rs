@@ -57,7 +57,11 @@ mod integration_tests {
             frame.render_widget(self.widget.clone(), widget_area);
         }
 
-        fn handle_event(&mut self, event: AppEvent) -> EventResult {
+        fn handle_event(
+            &mut self,
+            event: AppEvent,
+            _resolver: &crate::tui::KeybindingResolver,
+        ) -> EventResult {
             match event {
                 AppEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     // Przekazujemy cały KeyEvent (z modyfikatorami) — obsługa Shift+Enter
