@@ -408,16 +408,57 @@ impl RunApp {
 
     /// Obsługa zdarzeń myszy w run mode.
     ///
-    /// Routing lewego kliknięcia:
-    /// - Klik w `sidebar_rect` → focus Sidebar + oblicz index tasku z row offset → select
-    /// - Klik poza sidebar → bez zmian focusu
+    /// Routing:
+    /// - Lewy klik w `sidebar_rect` → focus Sidebar + zaznaczenie tasku pod kursorem
+    /// - ScrollUp/ScrollDown nad sidebar → nawigacja po task tree (krok=1)
+    /// - ScrollUp/ScrollDown nad output → scroll output buffera (krok=`scroll_step` z config)
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> EventResult {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.handle_mouse_left_click(mouse.column, mouse.row)
             }
+            MouseEventKind::ScrollUp => self.handle_mouse_scroll(mouse.column, mouse.row, true),
+            MouseEventKind::ScrollDown => self.handle_mouse_scroll(mouse.column, mouse.row, false),
             _ => EventResult::Ignored,
         }
+    }
+
+    /// Obsługa scroll wheel myszy — kontekstowy routing.
+    ///
+    /// Hit-test decyduje o akcji:
+    /// - Kursor nad sidebar → nawigacja po task tree (`select_prev`/`select_next`, krok=1)
+    /// - Kursor nad output → scroll output buffera (`scroll_up`/`scroll_down`, krok=`self.scroll_step`)
+    /// - Kursor poza oboma → Ignored
+    fn handle_mouse_scroll(&mut self, col: u16, row: u16, scroll_up: bool) -> EventResult {
+        let pos = Position::new(col, row);
+
+        // Hit-test na sidebar (priorytet nad output, może nakładać się w Small mode overlay)
+        if let Some(sidebar_rect) = self.sidebar_rect
+            && sidebar_rect.contains(pos)
+        {
+            self.cancel_quit_pending();
+            if scroll_up {
+                self.sidebar.select_prev();
+            } else {
+                self.sidebar.select_next();
+            }
+            return EventResult::Consumed;
+        }
+
+        // Hit-test na output area
+        if let Some(output_rect) = self.output_rect
+            && output_rect.contains(pos)
+        {
+            self.cancel_quit_pending();
+            if scroll_up {
+                self.output_view_state.scroll_up(self.scroll_step);
+            } else {
+                self.output_view_state.scroll_down(self.scroll_step);
+            }
+            return EventResult::Consumed;
+        }
+
+        EventResult::Ignored
     }
 
     /// Obsługa lewego kliknięcia myszy.
@@ -3031,16 +3072,144 @@ tasks:
         }
     }
 
-    /// Scroll myszy poza sidebar → Ignored.
+    /// Scroll myszy poza sidebar i output → Ignored.
     #[test]
-    fn mouse_scroll_returns_ignored() {
+    fn mouse_scroll_outside_all_rects_returns_ignored() {
         let mut app = default_run_app();
-        let sidebar_rect = Rect::new(0, 0, 40, 20);
-        app.sidebar_rect = Some(sidebar_rect);
+        // sidebar: x=0..40, y=0..20
+        app.sidebar_rect = Some(Rect::new(0, 0, 40, 20));
+        // output: x=40..120, y=0..20
+        app.output_rect = Some(Rect::new(40, 0, 80, 20));
+
+        // Kursor na kolumnie 120 — poza oboma prostokątami
+        let scroll = make_mouse(crossterm::event::MouseEventKind::ScrollUp, 120, 5);
+        let result = app.handle_mouse(scroll);
+        assert_eq!(result, EventResult::Ignored);
+    }
+
+    // ── handle_mouse_scroll tests ────────────────────────────────────
+
+    /// ScrollUp nad sidebar → select_prev (nawigacja, krok=1).
+    #[test]
+    fn mouse_scroll_up_in_sidebar_navigates_prev() {
+        let mut app = default_run_app();
+
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(
+            r#"tasks:
+  - id: "1"
+    name: "Task A"
+    status: todo
+  - id: "2"
+    name: "Task B"
+    status: todo
+"#,
+        )
+        .unwrap();
+        app.sidebar.refresh(&tf);
+        // Zaznacz drugi task
+        app.sidebar.select_index(1);
+        assert_eq!(app.sidebar.selected_index, 1);
+
+        app.sidebar_rect = Some(Rect::new(0, 0, 40, 20));
 
         let scroll = make_mouse(crossterm::event::MouseEventKind::ScrollUp, 5, 5);
         let result = app.handle_mouse(scroll);
-        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.sidebar.selected_index, 0);
+    }
+
+    /// ScrollDown nad sidebar → select_next (nawigacja, krok=1).
+    #[test]
+    fn mouse_scroll_down_in_sidebar_navigates_next() {
+        let mut app = default_run_app();
+
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(
+            r#"tasks:
+  - id: "1"
+    name: "Task A"
+    status: todo
+  - id: "2"
+    name: "Task B"
+    status: todo
+"#,
+        )
+        .unwrap();
+        app.sidebar.refresh(&tf);
+        assert_eq!(app.sidebar.selected_index, 0);
+
+        app.sidebar_rect = Some(Rect::new(0, 0, 40, 20));
+
+        let scroll = make_mouse(crossterm::event::MouseEventKind::ScrollDown, 5, 5);
+        let result = app.handle_mouse(scroll);
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.sidebar.selected_index, 1);
+    }
+
+    /// ScrollUp nad output → scroll_up output buffera (krok=scroll_step).
+    #[test]
+    fn mouse_scroll_up_in_output_scrolls_output() {
+        let mut app = default_run_app();
+        app.scroll_step = 3;
+        // Output at x=40..120, y=0..20
+        app.output_rect = Some(Rect::new(40, 0, 80, 20));
+
+        // Symuluj treść w buforze (żeby auto_follow = false po scroll_up)
+        let initial_offset = app.output_view_state.scroll_offset;
+
+        let scroll = make_mouse(crossterm::event::MouseEventKind::ScrollUp, 50, 5);
+        let result = app.handle_mouse(scroll);
+        assert_eq!(result, EventResult::Consumed);
+        // scroll_up zwiększa scroll_offset (przewijanie wstecz) i wyłącza auto_follow
+        assert_eq!(app.output_view_state.scroll_offset, initial_offset + 3);
+        assert!(!app.output_view_state.auto_follow);
+    }
+
+    /// ScrollDown nad output → scroll_down output buffera (krok=scroll_step).
+    #[test]
+    fn mouse_scroll_down_in_output_scrolls_output() {
+        let mut app = default_run_app();
+        app.scroll_step = 3;
+        app.output_rect = Some(Rect::new(40, 0, 80, 20));
+
+        // Najpierw scrolluj w górę, żeby mieć co scrollować w dół
+        app.output_view_state.scroll_offset = 10;
+        app.output_view_state.auto_follow = false;
+
+        let scroll = make_mouse(crossterm::event::MouseEventKind::ScrollDown, 50, 5);
+        let result = app.handle_mouse(scroll);
+        assert_eq!(result, EventResult::Consumed);
+        // scroll_down zmniejsza scroll_offset (do minimum 0)
+        assert_eq!(app.output_view_state.scroll_offset, 7);
+    }
+
+    /// Sidebar ma priorytet nad output przy nakładaniu się (Small mode overlay).
+    #[test]
+    fn mouse_scroll_sidebar_priority_over_output() {
+        let mut app = default_run_app();
+
+        let tf: crate::shared::tasks::TasksFile = serde_yaml::from_str(
+            r#"tasks:
+  - id: "1"
+    name: "Task A"
+    status: todo
+  - id: "2"
+    name: "Task B"
+    status: todo
+"#,
+        )
+        .unwrap();
+        app.sidebar.refresh(&tf);
+        app.sidebar.select_index(1);
+
+        // Sidebar i output pokrywają ten sam obszar (jak w Small mode overlay)
+        app.sidebar_rect = Some(Rect::new(0, 0, 80, 20));
+        app.output_rect = Some(Rect::new(0, 0, 80, 20));
+
+        let scroll = make_mouse(crossterm::event::MouseEventKind::ScrollUp, 5, 5);
+        let result = app.handle_mouse(scroll);
+        assert_eq!(result, EventResult::Consumed);
+        // Sidebar obsłużył scroll (not output)
+        assert_eq!(app.sidebar.selected_index, 0);
     }
 
     /// handle_event deleguje AppEvent::Mouse do handle_mouse.
