@@ -806,6 +806,129 @@ mod tests {
         insta::assert_snapshot!(snap(&buffer));
     }
 
+    // ── Edge case tests: brak wyników, jeden wynik, pełna lista ─────
+
+    /// Edge case: jeden wynik po filtrowaniu.
+    ///
+    /// Gdy filtrowanie zwraca dokładnie 1 wynik:
+    /// - selected_index = 0
+    /// - Down nie przesuwa (brak kolejnych)
+    /// - Enter zwraca ten właśnie element
+    #[test]
+    fn test_single_result_navigation() {
+        let mut state = CommandPaletteState::new(test_items());
+        // "start" pasuje tylko do "Start Worker"
+        for c in "start".chars() {
+            state.handle_key(KeyCode::Char(c));
+        }
+        assert_eq!(state.filtered_count(), 1);
+        assert_eq!(state.selected_index(), 0);
+
+        // Down nie przesuwa za granicę
+        state.handle_key(KeyCode::Down);
+        assert_eq!(state.selected_index(), 0);
+
+        // Up też nie przesuwa (jesteśmy na 0)
+        state.handle_key(KeyCode::Up);
+        assert_eq!(state.selected_index(), 0);
+
+        // Enter zwraca id jedynego wyniku
+        let action = state.handle_key(KeyCode::Enter);
+        assert_eq!(action, PaletteAction::Select("worker.start".into()));
+    }
+
+    /// Edge case: brak wyników — Enter zamyka zamiast wybierać.
+    #[test]
+    fn test_no_results_enter_closes() {
+        let mut state = CommandPaletteState::new(test_items());
+        for c in "xyzabc".chars() {
+            state.handle_key(KeyCode::Char(c));
+        }
+        assert_eq!(state.filtered_count(), 0);
+
+        // Down/Up nic nie robią
+        state.handle_key(KeyCode::Down);
+        state.handle_key(KeyCode::Up);
+        assert_eq!(state.selected_index(), 0);
+
+        // Enter zamyka (brak wyniku do wybrania)
+        assert_eq!(state.handle_key(KeyCode::Enter), PaletteAction::Close);
+    }
+
+    /// Edge case: pełna lista (10 itemów).
+    ///
+    /// Weryfikuje scroll, nawigację i selekcję dla maxymalnej liczby elementów
+    /// wyświetlanych jednocześnie (visible_count = 10).
+    #[test]
+    fn test_full_list_ten_items() {
+        let items: Vec<PaletteItem> = (0..10)
+            .map(|i| PaletteItem {
+                id: format!("item.{i}"),
+                label: format!("Item {i}"),
+                description: None,
+                icon: None,
+                category: "Test".into(),
+            })
+            .collect();
+
+        let mut state = CommandPaletteState::new(items);
+        assert_eq!(state.filtered_count(), 10);
+
+        // Nawiguj przez wszystkie elementy (visible_count=10, więc brak scrollu)
+        for expected_idx in 1..10 {
+            state.handle_key(KeyCode::Down);
+            assert_eq!(state.selected_index(), expected_idx);
+        }
+        // scroll_offset = 0 (wszystkie 10 elementów się mieszczą)
+        assert_eq!(state.scroll_offset, 0);
+
+        // Down na ostatnim nie przesuwa
+        state.handle_key(KeyCode::Down);
+        assert_eq!(state.selected_index(), 9);
+
+        // Cofnij do początku
+        for expected_idx in (0..9).rev() {
+            state.handle_key(KeyCode::Up);
+            assert_eq!(state.selected_index(), expected_idx);
+        }
+
+        // Enter na pierwszym elemencie zwraca item.0
+        assert_eq!(
+            state.handle_key(KeyCode::Enter),
+            PaletteAction::Select("item.0".into())
+        );
+    }
+
+    /// Snapshot: pełna lista 10 elementów, zero query.
+    #[test]
+    fn test_snapshot_full_ten_items() {
+        let items: Vec<PaletteItem> = (0..10)
+            .map(|i| PaletteItem {
+                id: format!("item.{i}"),
+                label: format!("Item {i}"),
+                description: None,
+                icon: None,
+                category: "Test".into(),
+            })
+            .collect();
+        let mut state = CommandPaletteState::new(items);
+        let buffer = render_palette(&mut state, 80, 24);
+        insta::assert_snapshot!(snap(&buffer));
+    }
+
+    /// Snapshot: jeden wynik po filtrowaniu (single result).
+    #[test]
+    fn test_snapshot_single_result() {
+        let mut state = CommandPaletteState::new(test_items());
+        // "start" → tylko "Start Worker"
+        for c in "start".chars() {
+            state.handle_key(KeyCode::Char(c));
+        }
+        assert_eq!(state.filtered_count(), 1);
+        let buffer = render_palette(&mut state, 80, 20);
+        insta::assert_snapshot!(snap(&buffer));
+    }
+
     // ── Multi-byte & Home/End tests ─────────────────────────────────
 
     #[test]

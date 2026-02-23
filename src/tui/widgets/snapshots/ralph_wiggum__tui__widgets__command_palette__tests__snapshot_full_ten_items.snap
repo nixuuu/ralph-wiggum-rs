@@ -1,0 +1,21 @@
+---
+source: src/tui/widgets/command_palette.rs
+expression: snap(&buffer)
+---
+
+
+
+
+
+                 > │
+                 ──────────────────────────────────────────────
+                 [Test] Item 0
+                 [Test] Item 1
+                 [Test] Item 2
+                 [Test] Item 3
+                 [Test] Item 4
+                 [Test] Item 5
+                 [Test] Item 6
+                 [Test] Item 7
+                 [Test] Item 8
+                 [Test] Item 9

@@ -121,7 +121,18 @@ impl OrchestrateApp {
     /// - `PaletteAction::Select(id)` → parsuje ID → wykonuje `OrchestrateAction`
     /// - `PaletteAction::Close` → zamyka paletę
     /// - `PaletteAction::Continue` → pochłonięto, bez efektów zewnętrznych
+    ///
+    /// Specjalny przypadek: Ctrl+P gdy palette otwarta → toggle close (zamknięcie palette).
     fn handle_palette_key(&mut self, key: KeyEvent) -> EventResult {
+        // Ctrl+P gdy palette otwarta → toggle close
+        if matches!(
+            self.resolver.resolve(&key, View::Orchestrate),
+            Some(KeyAction::CommandPalette)
+        ) {
+            self.close_command_palette();
+            return EventResult::Consumed;
+        }
+
         // Pobierz aktualne elementy by umożliwić mutable borrow na state
         let palette_action = {
             let Some(ref mut palette) = self.command_palette else {

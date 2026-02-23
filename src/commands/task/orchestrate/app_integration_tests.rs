@@ -730,6 +730,66 @@ mod tests {
         ]);
     }
 
+    /// Test: Ctrl+P → open, Ctrl+P → close (toggle).
+    ///
+    /// Scenario:
+    /// - Palette jest zamknięta
+    /// - Ctrl+P → palette otwiera się
+    /// - Ctrl+P ponownie → palette zamyka się (toggle)
+    #[test]
+    fn integration_ctrl_p_toggles_palette() {
+        let state = make_app(1);
+        let mut app = TestApp::new(state, 80, 24);
+
+        app.run_steps(vec![
+            // Palette nie jest otwarta
+            TestStep::AssertState(Box::new(|s| !s.is_palette_open())),
+            // Ctrl+P → otwórz palette
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Ctrl+P ponownie → zamknij palette (toggle)
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| !s.is_palette_open())),
+        ]);
+    }
+
+    /// Test: Ctrl+P toggle nie zostawia side effects.
+    ///
+    /// Scenario:
+    /// - Otwórz palette Ctrl+P
+    /// - Wpisz query (filtruje)
+    /// - Zamknij Ctrl+P toggle
+    /// - Otwórz ponownie → palette czysta
+    #[test]
+    fn integration_ctrl_p_toggle_clears_query() {
+        let state = make_app(1);
+        let mut app = TestApp::new(state, 80, 24);
+
+        app.run_steps(vec![
+            // Otwórz palette
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Wpisz query
+            TestStep::KeyPress(make_key(KeyCode::Char('t'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('a'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('s'))),
+            TestStep::KeyPress(make_key(KeyCode::Char('k'))),
+            // Zamknij Ctrl+P toggle
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| !s.is_palette_open())),
+            // Otwórz ponownie
+            TestStep::KeyPress(make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            TestStep::AssertState(Box::new(|s| s.is_palette_open())),
+            // Query czyste (fresh state po otwarciu)
+            TestStep::AssertState(Box::new(|s| {
+                s.command_palette
+                    .as_ref()
+                    .map(|p| p.query().is_empty())
+                    .unwrap_or(false)
+            })),
+        ]);
+    }
+
     /// Test: Otwieranie palette odświeża jej zawartość (fresh state).
     ///
     /// Scenario:
