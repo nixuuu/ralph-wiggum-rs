@@ -5,8 +5,9 @@
 //! 2. Resolve input (file > prompt > stdin)
 //! 3. Build prompt from template (mode-specific)
 //! 4. Resolve model
-//! 5. Run Claude via run_task_command()
-//! 6. Display results (mode-specific)
+//! 5. Load & validate image attachments (if any)
+//! 6. Run Claude via run_task_command()
+//! 7. Display results (mode-specific)
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +15,8 @@ use crossterm::style::Stylize;
 
 use super::input::resolve_input;
 use super::task_runner::{TaskRunOptions, run_task_command};
-use crate::shared::error::Result;
+use crate::shared::attachments::{Attachment, load_attachment};
+use crate::shared::error::{RalphError, Result};
 use crate::shared::file_config::{FileConfig, VerifyProfile, format_profiles_info};
 use crate::shared::tasks::TasksFile;
 use crate::templates;
@@ -60,11 +62,14 @@ impl TaskCommandMode {
 // ---------------------------------------------------------------------------
 
 /// Execute a task command (add / edit / plan) using a shared flow.
+///
+/// `images` — ścieżki do obrazów przekazanych przez `--image` z CLI.
 pub async fn execute_task_command(
     mode: TaskCommandMode,
     file: Option<PathBuf>,
     prompt: Option<String>,
     model: Option<String>,
+    images: Vec<PathBuf>,
     file_config: &FileConfig,
 ) -> Result<()> {
     let tasks_path = &file_config.task.tasks_file;
@@ -83,7 +88,14 @@ pub async fn execute_task_command(
         .or_else(|| file_config.task.default_model.clone())
         .or_else(|| mode.default_model());
 
-    // 5. Run Claude (blocks dangerous tools, auto-starts MCP server)
+    // 5. Waliduj i załaduj załączniki przed uruchomieniem Claude.
+    //    Fail-fast: błąd walidacji obrazu przerywa komendę zanim wystartuje Claude.
+    // TODO(14.5.x): przekaż attachments do TaskRunOptions → RunOnceOptions → ClaudeRunner
+    //               Aktualnie obrazy są walidowane (format, rozmiar, base64), ale nie trafiają
+    //               do wywołania Claude — to celowy placeholder do czasu rozszerzenia TaskRunOptions.
+    let _attachments: Vec<Attachment> = load_attachments(&images)?;
+
+    // 6. Run Claude (blocks dangerous tools, auto-starts MCP server)
     run_task_command(TaskRunOptions {
         prompt: prompt_str,
         command_name: mode.command_name().to_string(),
@@ -94,10 +106,29 @@ pub async fn execute_task_command(
     })
     .await?;
 
-    // 6. Display results
+    // 7. Display results
     display_results(&mode, tasks_path, before.as_ref())?;
 
     Ok(())
+}
+
+/// Ładuje i waliduje listę obrazów z podanych ścieżek.
+///
+/// Zwraca wektor załączników lub błąd przy pierwszym nieważnym obrazie.
+/// Wczytuje pliki, wykrywa format i skaluje w razie potrzeby.
+fn load_attachments(images: &[PathBuf]) -> Result<Vec<Attachment>> {
+    images
+        .iter()
+        .map(|path| {
+            load_attachment(path).map_err(|e| {
+                RalphError::TaskSetup(format!(
+                    "Nie można załadować obrazu {}: {}",
+                    path.display(),
+                    e
+                ))
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

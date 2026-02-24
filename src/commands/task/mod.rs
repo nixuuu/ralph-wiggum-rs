@@ -33,6 +33,7 @@ pub async fn execute(command: TaskCommands, file_config: &FileConfig) -> Result<
                 args.file,
                 args.prompt,
                 args.model,
+                args.images,
                 file_config,
             )
             .await
@@ -43,6 +44,7 @@ pub async fn execute(command: TaskCommands, file_config: &FileConfig) -> Result<
                 args.file,
                 args.prompt,
                 args.model,
+                args.images,
                 file_config,
             )
             .await
@@ -53,6 +55,7 @@ pub async fn execute(command: TaskCommands, file_config: &FileConfig) -> Result<
                 args.file,
                 args.prompt,
                 args.model,
+                args.images,
                 file_config,
             )
             .await
