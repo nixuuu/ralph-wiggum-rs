@@ -1,0 +1,7 @@
+---
+source: src/tui/widgets/multiline_text_input.rs
+expression: snapshot
+---
+> abcdefghijklmnopqr
+  stuvwxyz0123456789
+  ABCDEFGHIJKLMNOP█

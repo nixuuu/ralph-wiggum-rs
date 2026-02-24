@@ -2422,6 +2422,377 @@ mod tests {
         insta::assert_snapshot!(snapshot);
     }
 
+    // ── Placeholder snapshot tests ────────────────────────────────────
+
+    #[test]
+    fn snapshot_multiline_input_placeholder_focused() {
+        // Pusty bufor, focused, placeholder — kursor + placeholder za nim
+        let state = MultilineTextInputState::new();
+        let widget = MultilineTextInput::new(state).with_placeholder("Type here...".to_string());
+        let snapshot = render_multiline_input(widget, 20, 3);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn snapshot_multiline_input_placeholder_unfocused() {
+        // Pusty bufor, unfocused, placeholder — cały placeholder bez kursora
+        let state = MultilineTextInputState::new();
+        let widget = MultilineTextInput::new(state)
+            .focused(false)
+            .with_placeholder("Type here...".to_string());
+        let snapshot = render_multiline_input(widget, 20, 3);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn snapshot_multiline_input_unicode_content() {
+        // Unicode zawartość (polskie znaki + emoji) — kursor na końcu
+        let state = MultilineTextInputState::with_content("Zażółć gęślą jaźń 🦀");
+        let widget = MultilineTextInput::new(state);
+        let snapshot = render_multiline_input(widget, 30, 3);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn snapshot_multiline_input_long_line_scrolled() {
+        // Długa linia wrapping — kursor na końcu, widoczny fragment po scrollu
+        let state = MultilineTextInputState::with_content(
+            "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP",
+        );
+        let widget = MultilineTextInput::new(state);
+        let snapshot = render_multiline_input(widget, 20, 3);
+        insta::assert_snapshot!(snapshot);
+    }
+
+    // ── Unicode cursor movement integration tests ──────────────────────
+
+    #[test]
+    fn test_cursor_left_through_emoji_string() {
+        // Poruszanie kursora w lewo przez string z emoji
+        let mut state = MultilineTextInputState::with_content("🦀🎉🌟");
+        // cursor at (0, 3) — koniec stringa
+        assert_eq!(state.cursor(), (0, 3));
+
+        state.move_cursor_left();
+        assert_eq!(state.cursor(), (0, 2)); // na '🌟'
+
+        state.move_cursor_left();
+        assert_eq!(state.cursor(), (0, 1)); // na '🎉'
+
+        state.move_cursor_left();
+        assert_eq!(state.cursor(), (0, 0)); // na '🦀'
+
+        state.move_cursor_left();
+        assert_eq!(state.cursor(), (0, 0)); // nie wyjdzie poza granicę
+    }
+
+    #[test]
+    fn test_cursor_right_through_emoji_string() {
+        // Poruszanie kursora w prawo przez string z emoji
+        let mut state = MultilineTextInputState::with_content("🦀🎉🌟");
+        state.cursor_col = 0;
+
+        state.move_cursor_right();
+        assert_eq!(state.cursor(), (0, 1));
+
+        state.move_cursor_right();
+        assert_eq!(state.cursor(), (0, 2));
+
+        state.move_cursor_right();
+        assert_eq!(state.cursor(), (0, 3));
+
+        state.move_cursor_right();
+        assert_eq!(state.cursor(), (0, 3)); // nie wyjdzie poza granicę
+    }
+
+    #[test]
+    fn test_home_end_unicode_line() {
+        // Home i End na linii z unicode znakami
+        let mut state = MultilineTextInputState::with_content("ąęśółźćżń");
+        // cursor at (0, 9) — koniec
+        state.move_cursor_home();
+        assert_eq!(state.cursor(), (0, 0));
+
+        state.move_cursor_end();
+        assert_eq!(state.cursor(), (0, 9));
+    }
+
+    #[test]
+    fn test_home_end_emoji_multiline() {
+        // Home/End na linii z emoji w multiline bufferze
+        let mut state = MultilineTextInputState::with_content("abc🦀def\nhello");
+        // cursor at (1, 5) — końce "hello"
+        state.cursor_row = 0;
+        state.cursor_col = 5; // w środku "abc🦀def"
+
+        state.move_cursor_home();
+        assert_eq!(state.cursor(), (0, 0));
+
+        state.move_cursor_end();
+        // "abc🦀def" ma 8 znaków (a,b,c,🦀,d,e,f — to 7; ale sprawdźmy)
+        // "abc" = 3, "🦀" = 1, "def" = 3 → łącznie 7
+        assert_eq!(state.cursor(), (0, 7));
+    }
+
+    #[test]
+    fn test_delete_char_in_middle_of_emoji_string() {
+        // delete_char (backspace) na różnych pozycjach w emoji stringu
+        let mut state = MultilineTextInputState::with_content("A🎉B");
+        // cursor at (0, 3) — po 'B'
+        assert_eq!(state.cursor(), (0, 3));
+
+        // Usuń 'B'
+        state.delete_char();
+        assert_eq!(state.buffer(), "A🎉");
+        assert_eq!(state.cursor(), (0, 2));
+
+        // Usuń '🎉'
+        state.delete_char();
+        assert_eq!(state.buffer(), "A");
+        assert_eq!(state.cursor(), (0, 1));
+
+        // Usuń 'A'
+        state.delete_char();
+        assert_eq!(state.buffer(), "");
+        assert_eq!(state.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn test_delete_char_unicode_multibyte_sequence() {
+        // delete_char poprawnie usuwa wielobajtowe znaki UTF-8
+        // ą=2 bajty, ę=2 bajty, ś=2 bajty — każdy jest 1 char
+        let mut state = MultilineTextInputState::with_content("ąęś");
+        // cursor at (0, 3)
+
+        state.delete_char(); // usuń 'ś'
+        assert_eq!(state.buffer(), "ąę");
+        assert_eq!(state.cursor(), (0, 2));
+
+        state.cursor_col = 1; // między 'ą' i 'ę'
+        state.delete_char(); // usuń 'ą'
+        assert_eq!(state.buffer(), "ę");
+        assert_eq!(state.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn test_delete_forward_in_emoji_string() {
+        // delete_char_forward na różnych pozycjach w emoji stringu
+        let mut state = MultilineTextInputState::with_content("A🎉B");
+        state.cursor_col = 0;
+
+        // Usuń 'A' (forward)
+        state.delete_char_forward();
+        assert_eq!(state.buffer(), "🎉B");
+        assert_eq!(state.cursor(), (0, 0));
+
+        // Usuń '🎉' (forward)
+        state.delete_char_forward();
+        assert_eq!(state.buffer(), "B");
+        assert_eq!(state.cursor(), (0, 0));
+
+        // Usuń 'B' (forward)
+        state.delete_char_forward();
+        assert_eq!(state.buffer(), "");
+        assert_eq!(state.cursor(), (0, 0));
+    }
+
+    // ── Long text tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_long_single_line_visual_rows() {
+        // Bardzo długa pojedyncza linia — wiele visual rows po zawinięciu
+        let long_line = "a".repeat(50);
+        let mut state = MultilineTextInputState::with_content(&long_line);
+        state.set_wrap_width(10);
+
+        // 50 znaków ÷ 10 = 5 visual rows
+        let vl = state.visual_lines();
+        assert_eq!(vl.len(), 5);
+        for row in &vl {
+            assert_eq!(row.logical_row, 0); // wszystkie w tej samej logical line
+        }
+        assert_eq!(vl[0].char_count, 10);
+        assert_eq!(vl[4].char_count, 10);
+    }
+
+    #[test]
+    fn test_long_line_cursor_at_start_visual_row() {
+        // Kursor na początku long line — visual row 0
+        let long_line = "a".repeat(30);
+        let mut state = MultilineTextInputState::with_content(&long_line);
+        state.set_wrap_width(10);
+        state.cursor_col = 0;
+        state.clamp_scroll();
+
+        assert_eq!(state.cursor_visual_line_index(), Some(0));
+    }
+
+    #[test]
+    fn test_long_line_cursor_at_end_visual_row() {
+        // Kursor na końcu long line — ostatni visual row
+        let long_line = "a".repeat(30);
+        let mut state = MultilineTextInputState::with_content(&long_line);
+        state.set_wrap_width(10);
+        // cursor at (0, 30) — koniec linii, visual row 2 (rows: 0-9, 10-19, 20-29)
+        assert_eq!(state.cursor_visual_line_index(), Some(2));
+    }
+
+    #[test]
+    fn test_long_line_scroll_viewport() {
+        // Długa linia, mały viewport — scroll podąża za kursorem
+        let long_line: String = (0..10).map(|i| format!("line{i}\n")).collect();
+        let mut state = MultilineTextInputState::with_content(long_line.trim_end_matches('\n'));
+        state.set_viewport_height(3);
+
+        // Cursor na ostatniej linii (9) — scroll powinien pokazywać końcowe linie
+        let scroll = state.scroll_offset();
+        assert!(
+            scroll >= 7,
+            "scroll {scroll} powinien być ≥ 7 dla 10 linii w viewporcie 3"
+        );
+
+        // Przesuń na górę (kursor zachowuje col, więc sprawdzamy tylko row)
+        for _ in 0..20 {
+            state.move_cursor_up();
+        }
+        assert_eq!(state.cursor_row, 0);
+        assert_eq!(state.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn test_many_short_lines_vs_one_long_line() {
+        // Wiele krótkich linii vs jedna długa — ta sama ilość visual rows
+        // 5 linii po 4 znaki = 20 znaków łącznie, ale 5 logical/visual rows (wrap=10)
+        let many_lines = MultilineTextInputState::with_content("aaaa\nbbbb\ncccc\ndddd\neeee");
+        let many_vl = {
+            let mut s = many_lines;
+            s.set_wrap_width(10);
+            s.visual_lines()
+        };
+        // 5 logicznych linii, każda 4 znaki < 10 → 5 visual rows
+        assert_eq!(many_vl.len(), 5);
+
+        // Jedna długa linia 20 znaków, wrap=10 → 2 visual rows
+        let mut one_long = MultilineTextInputState::with_content(&"a".repeat(20));
+        one_long.set_wrap_width(10);
+        let long_vl = one_long.visual_lines();
+        assert_eq!(long_vl.len(), 2);
+    }
+
+    #[test]
+    fn test_cursor_move_up_down_long_line() {
+        // move_up/move_down przez wrapped long line
+        let long_line = "abcdefghijklmnopqrst"; // 20 znaków, wrap=10 → 2 visual rows
+        let mut state = MultilineTextInputState::with_content(long_line);
+        state.set_wrap_width(10);
+        // cursor at (0, 20) — koniec, visual row 1
+
+        state.move_cursor_up();
+        // Powinien przejść do visual row 0, display col = cursor_col in prev visual
+        // 20-10=10 (end of vr1) → display col = 10 (out of vr0 range) → clamped to 10
+        assert_eq!(state.cursor_row, 0);
+        assert!(state.cursor_col <= 10); // w visual row 0 (0..=10)
+
+        state.move_cursor_down();
+        // Wraca do visual row 1 — col odpowiada display col w vr1
+        assert_eq!(state.cursor_row, 0);
+    }
+
+    #[test]
+    fn test_scroll_auto_follow_on_insert_at_long_content() {
+        // Wpisywanie tekstu w długim buforze — scroll zawsze podąża za kursorem
+        let content: String = (0..20).map(|i| format!("{i}\n")).collect();
+        let mut state = MultilineTextInputState::with_content(content.trim_end_matches('\n'));
+        state.set_viewport_height(5);
+
+        // Cursor na końcu (wiersz 19), scroll powinien pokazywać koniec
+        let initial_scroll = state.scroll_offset();
+        assert!(
+            initial_scroll > 10,
+            "scroll {initial_scroll} powinien być >10"
+        );
+
+        // Wstaw znak — scroll nie powinien zmaleć (kursor dalej na końcu)
+        state.insert_char('X');
+        assert!(
+            state.scroll_offset() >= initial_scroll,
+            "scroll powinien pozostać lub wzrosnąć po wstawieniu"
+        );
+
+        // Kursor jest zawsze widoczny
+        let vl_idx = state.cursor_visual_line_index().unwrap_or(0);
+        let off = state.scroll_offset();
+        let height = state.viewport_height();
+        assert!(
+            vl_idx >= off && vl_idx < off + height,
+            "kursor vl={vl_idx} powinien być w viewporcie [{off}, {})",
+            off + height
+        );
+    }
+
+    #[test]
+    fn test_unicode_wrap_correct_char_count() {
+        // Unicode znaki mogą mieć różną display width — wrap działa na display cols
+        // CJK chars mają display width 2, normalne 1
+        // "AB中C" z wrap_width=3: 'A'(1)+'B'(1)=2, '中'(2) nie mieści się → nowy fragment
+        // Fragment 0: "AB", Fragment 1: "中C"? ale '中'(2)+'C'(1)=3 ≤ 3 → tak
+        let result = wrap_logical_line("AB中C", 3, 0);
+        // AB: width=2, następny '中': width=2, 2+2=4>3 → split before '中'
+        // Fragment 0: "AB" (char_count=2, display_width=2)
+        // '中'(2)+'C'(1)=3 ≤ 3 → Fragment 1: "中C" (char_count=2)
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].char_count, 2); // "AB"
+        assert_eq!(result[1].char_count, 2); // "中C"
+    }
+
+    #[test]
+    fn test_wrap_with_emoji_display_width() {
+        // Emoji mają display width 2
+        // "🦀🎉" z wrap_width=2: '🦀'(2) → fragment, '🎉'(2) → fragment
+        let result = wrap_logical_line("🦀🎉", 2, 0);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].char_count, 1); // "🦀"
+        assert_eq!(result[1].char_count, 1); // "🎉"
+    }
+
+    #[test]
+    fn test_insert_and_delete_unicode_full_flow() {
+        // Pełny przepływ: wpisz unicode, skasuj z różnych pozycji
+        let mut state = MultilineTextInputState::new();
+
+        // Wpisz "Hę🦀llo"
+        for c in "Hę".chars() {
+            state.insert_char(c);
+        }
+        state.insert_char('🦀');
+        for c in "llo".chars() {
+            state.insert_char(c);
+        }
+
+        assert_eq!(state.buffer(), "Hę🦀llo");
+        assert_eq!(state.cursor(), (0, 6));
+
+        // Home → col=0
+        state.move_cursor_home();
+        assert_eq!(state.cursor(), (0, 0));
+
+        // End → col=6
+        state.move_cursor_end();
+        assert_eq!(state.cursor(), (0, 6));
+
+        // Backspace usuwa 'o'
+        state.delete_char();
+        assert_eq!(state.buffer(), "Hę🦀ll");
+        assert_eq!(state.cursor(), (0, 5));
+
+        // Przesuń kursor na '🦀' (col=2)
+        state.set_cursor(0, 2);
+        // Delete forward usuwa '🦀'
+        state.delete_char_forward();
+        assert_eq!(state.buffer(), "Hęll");
+        assert_eq!(state.cursor(), (0, 2));
+    }
+
     /// Test buffer-level: weryfikuje REVERSED modifier na znaku pod kursorem
     /// dla MultilineTextInput (Widget z prefixem).
     ///

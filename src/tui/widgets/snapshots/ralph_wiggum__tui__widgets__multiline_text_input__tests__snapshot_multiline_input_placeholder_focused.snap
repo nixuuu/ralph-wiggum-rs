@@ -1,0 +1,5 @@
+---
+source: src/tui/widgets/multiline_text_input.rs
+expression: snapshot
+---
+> █ype here...
