@@ -214,8 +214,8 @@ pub(super) fn render_overlay(
     area: Rect,
     shared_overlay: &Arc<Mutex<Option<TextInputOverlay>>>,
 ) {
-    if let Ok(guard) = shared_overlay.lock()
-        && let Some(ref overlay) = *guard
+    if let Ok(mut guard) = shared_overlay.lock()
+        && let Some(ref mut overlay) = *guard
     {
         overlay.render(frame, area);
     }
