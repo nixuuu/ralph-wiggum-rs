@@ -1108,8 +1108,14 @@ mod tests {
         let new_h = resized.height();
 
         // Dłuższy bok (szerokość) ograniczony do MAX_DIMENSION
-        assert_eq!(new_w, MAX_DIMENSION, "Szerokość powinna wynosić {MAX_DIMENSION}");
-        assert!(new_h <= MAX_DIMENSION, "Wysokość nie może przekraczać {MAX_DIMENSION}");
+        assert_eq!(
+            new_w, MAX_DIMENSION,
+            "Szerokość powinna wynosić {MAX_DIMENSION}"
+        );
+        assert!(
+            new_h <= MAX_DIMENSION,
+            "Wysokość nie może przekraczać {MAX_DIMENSION}"
+        );
 
         // Aspect ratio: 2000/1000 = 2.0 → 1568/784 = 2.0
         let orig_ratio = orig_w as f64 / orig_h as f64;
@@ -1136,8 +1142,14 @@ mod tests {
         let new_h = resized.height();
 
         // Dłuższy bok (wysokość) ograniczony do MAX_DIMENSION
-        assert_eq!(new_h, MAX_DIMENSION, "Wysokość powinna wynosić {MAX_DIMENSION}");
-        assert!(new_w <= MAX_DIMENSION, "Szerokość nie może przekraczać {MAX_DIMENSION}");
+        assert_eq!(
+            new_h, MAX_DIMENSION,
+            "Wysokość powinna wynosić {MAX_DIMENSION}"
+        );
+        assert!(
+            new_w <= MAX_DIMENSION,
+            "Szerokość nie może przekraczać {MAX_DIMENSION}"
+        );
 
         // Aspect ratio: 1000/2000 = 0.5 → 784/1568 = 0.5
         let orig_ratio = orig_w as f64 / orig_h as f64;

@@ -125,6 +125,26 @@ impl AttachmentPanelState {
             self.selected = self.items.len() - 1;
         }
     }
+
+    /// Dodaje załącznik do listy.
+    pub fn add_attachment(&mut self, info: AttachmentInfo) {
+        self.items.push(info);
+    }
+
+    /// Ustawia stan fokusa panelu.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    /// Zwraca true jeśli panel jest aktywnie sfokusowany.
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    /// Zwraca true jeśli panel zawiera jakiekolwiek załączniki.
+    pub fn has_items(&self) -> bool {
+        !self.items.is_empty()
+    }
 }
 
 // ── AttachmentPanelWidget ─────────────────────────────────────────────
@@ -391,6 +411,104 @@ mod tests {
         let mut state = AttachmentPanelState::new();
         state.selected = 5;
         state.clamp();
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn add_attachment_appends_item() {
+        let mut state = AttachmentPanelState::new();
+        assert!(state.is_empty());
+        state.add_attachment(AttachmentInfo {
+            filename: "file.txt".into(),
+            size_display: "1 KB".into(),
+            path: PathBuf::from("/tmp/file.txt"),
+        });
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0].filename, "file.txt");
+    }
+
+    #[test]
+    fn add_attachment_multiple_preserves_order() {
+        let mut state = AttachmentPanelState::new();
+        for i in 0..3u8 {
+            state.add_attachment(AttachmentInfo {
+                filename: format!("file{i}.txt"),
+                size_display: "1 KB".into(),
+                path: PathBuf::from(format!("/tmp/file{i}.txt")),
+            });
+        }
+        assert_eq!(state.items.len(), 3);
+        assert_eq!(state.items[0].filename, "file0.txt");
+        assert_eq!(state.items[2].filename, "file2.txt");
+    }
+
+    #[test]
+    fn set_focused_changes_focus_state() {
+        let mut state = AttachmentPanelState::new();
+        assert!(!state.is_focused());
+        state.set_focused(true);
+        assert!(state.is_focused());
+        state.set_focused(false);
+        assert!(!state.is_focused());
+    }
+
+    #[test]
+    fn is_focused_reflects_focused_field() {
+        let mut state = AttachmentPanelState::new();
+        state.focused = true;
+        assert!(state.is_focused());
+        state.focused = false;
+        assert!(!state.is_focused());
+    }
+
+    #[test]
+    fn has_items_false_when_empty() {
+        let state = AttachmentPanelState::new();
+        assert!(!state.has_items());
+    }
+
+    #[test]
+    fn has_items_true_when_not_empty() {
+        let state = AttachmentPanelState::with_items(sample_items());
+        assert!(state.has_items());
+    }
+
+    #[test]
+    fn has_items_and_is_empty_are_complementary() {
+        let mut state = AttachmentPanelState::new();
+        assert_eq!(state.has_items(), !state.is_empty());
+        state.add_attachment(AttachmentInfo {
+            filename: "x.txt".into(),
+            size_display: "1 B".into(),
+            path: PathBuf::from("/tmp/x.txt"),
+        });
+        assert_eq!(state.has_items(), !state.is_empty());
+    }
+
+    #[test]
+    fn remove_selected_returns_path_of_removed_item() {
+        let mut state = AttachmentPanelState::with_items(sample_items());
+        state.selected = 0;
+        let removed = state.remove_selected().expect("should return item");
+        assert_eq!(removed.path, PathBuf::from("/tmp/screenshot.png"));
+    }
+
+    #[test]
+    fn add_then_select_then_remove_roundtrip() {
+        let mut state = AttachmentPanelState::new();
+        // Dodaj załącznik
+        state.add_attachment(AttachmentInfo {
+            filename: "round.txt".into(),
+            size_display: "1 KB".into(),
+            path: PathBuf::from("/tmp/round.txt"),
+        });
+        assert!(!state.is_empty());
+        // Zaznacz jedyny element
+        state.selected = 0;
+        // Usuń go i sprawdź że wrócił pusty stan
+        let removed = state.remove_selected().expect("should return item");
+        assert_eq!(removed.filename, "round.txt");
+        assert!(state.is_empty());
         assert_eq!(state.selected, 0);
     }
 
