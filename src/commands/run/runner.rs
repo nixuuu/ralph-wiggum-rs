@@ -19,8 +19,8 @@ pub(crate) use super::runner_types::{
 
 use super::runner_reader::{self, POST_RESULT_TIMEOUT};
 use super::runner_types::{
-    ReadOutcome, StdinControlRequest, StdinInitPayload, StdinMessageContent, StdinTextBlock,
-    StdinUserMessage,
+    ReadOutcome, StdinContentBlock, StdinControlRequest, StdinInitPayload, StdinMessageContent,
+    StdinTextBlock, StdinUserMessage,
 };
 
 // ---------------------------------------------------------------------------
@@ -199,10 +199,10 @@ impl ClaudeRunner {
             session_id: "",
             message: StdinMessageContent {
                 role: "user",
-                content: vec![StdinTextBlock {
+                content: vec![StdinContentBlock::Text(StdinTextBlock {
                     block_type: "text",
                     text: &self.user_prompt,
-                }],
+                })],
             },
             parent_tool_use_id: None,
         };

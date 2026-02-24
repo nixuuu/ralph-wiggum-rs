@@ -13,7 +13,8 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use crate::shared::error::{RalphError, Result};
 
 use super::runner_types::{
-    ClaudeEvent, ContentBlock, ReadOutcome, StdinMessageContent, StdinTextBlock, StdinUserMessage,
+    ClaudeEvent, ContentBlock, ReadOutcome, StdinContentBlock, StdinMessageContent, StdinTextBlock,
+    StdinUserMessage,
 };
 
 /// Post-Result timeout: if stdout doesn't close within this time after receiving
@@ -284,10 +285,10 @@ where
         session_id: "",
         message: StdinMessageContent {
             role: "user",
-            content: vec![StdinTextBlock {
+            content: vec![StdinContentBlock::Text(StdinTextBlock {
                 block_type: "text",
                 text,
-            }],
+            })],
         },
         parent_tool_use_id: None,
     };

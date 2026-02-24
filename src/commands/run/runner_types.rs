@@ -48,15 +48,78 @@ pub(crate) struct StdinUserMessage<'a> {
 #[derive(Serialize)]
 pub(crate) struct StdinMessageContent<'a> {
     pub role: &'a str,
-    pub content: Vec<StdinTextBlock<'a>>,
+    /// Content blocks — może zawierać tekst i/lub obrazy.
+    pub content: Vec<StdinContentBlock<'a>>,
 }
 
 /// A text content block for user messages.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct StdinTextBlock<'a> {
     #[serde(rename = "type")]
     pub block_type: &'a str,
     pub text: &'a str,
+}
+
+/// Source danych dla bloku obrazu — base64-encoded.
+#[derive(Debug, Serialize)]
+pub(crate) struct StdinImageSource<'a> {
+    /// Zawsze "base64".
+    #[serde(rename = "type")]
+    pub source_type: &'a str,
+    /// MIME type obrazu, np. "image/png", "image/jpeg".
+    pub media_type: &'a str,
+    /// Dane obrazu zakodowane w base64.
+    pub data: &'a str,
+}
+
+/// Blok obrazu do przesłania do Claude CLI.
+///
+/// Serializuje się do: `{"type":"image","source":{"type":"base64","media_type":"...","data":"..."}}`.
+#[derive(Debug, Serialize)]
+pub(crate) struct StdinImageBlock<'a> {
+    /// Zawsze "image".
+    #[serde(rename = "type")]
+    pub block_type: &'a str,
+    pub source: StdinImageSource<'a>,
+}
+
+impl<'a> StdinImageBlock<'a> {
+    /// Tworzy blok obrazu z podanym źródłem — `block_type` jest zawsze `"image"`.
+    /// Używany przy wysyłaniu obrazów do Claude (task 14.x).
+    #[allow(dead_code)]
+    pub fn new(source: StdinImageSource<'a>) -> Self {
+        Self {
+            block_type: "image",
+            source,
+        }
+    }
+}
+
+/// Wariant bloku treści w wiadomości użytkownika — tekst lub obraz.
+///
+/// Serializuje się "płasko" — deleguje do wewnętrznej struktury
+/// (każda ma własne pole `type`), więc JSON jest poprawny bez dodatkowego wrappera.
+#[derive(Debug)]
+pub(crate) enum StdinContentBlock<'a> {
+    /// Blok tekstowy: `{"type":"text","text":"..."}`.
+    Text(StdinTextBlock<'a>),
+    /// Blok obrazu: `{"type":"image","source":{...}}`.
+    /// Używany przy wysyłaniu obrazów do Claude (task 14.x).
+    #[allow(dead_code)]
+    Image(StdinImageBlock<'a>),
+}
+
+impl<'a> serde::Serialize for StdinContentBlock<'a> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Delegujemy do konkretnej struktury — każda ma własne pole `type`.
+        match self {
+            StdinContentBlock::Text(block) => block.serialize(serializer),
+            StdinContentBlock::Image(block) => block.serialize(serializer),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -378,10 +441,10 @@ mod tests {
             session_id: "",
             message: StdinMessageContent {
                 role: "user",
-                content: vec![StdinTextBlock {
+                content: vec![StdinContentBlock::Text(StdinTextBlock {
                     block_type: "text",
                     text: "Hello Claude",
-                }],
+                })],
             },
             parent_tool_use_id: None,
         };
@@ -416,6 +479,128 @@ mod tests {
                 .unwrap()
                 .len(),
             200_000
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Tests for StdinContentBlock serialization
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_stdin_content_block_text_serializes_correctly() {
+        let block = StdinContentBlock::Text(StdinTextBlock {
+            block_type: "text",
+            text: "Hello, world!",
+        });
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "text");
+        assert_eq!(parsed["text"], "Hello, world!");
+        // Upewniamy się, że nie ma zbędnego pola "source"
+        assert!(parsed.get("source").is_none());
+    }
+
+    #[test]
+    fn test_stdin_content_block_image_serializes_correctly() {
+        let block = StdinContentBlock::Image(StdinImageBlock {
+            block_type: "image",
+            source: StdinImageSource {
+                source_type: "base64",
+                media_type: "image/png",
+                data: "iVBORw0KGgo=",
+            },
+        });
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "image");
+        assert_eq!(parsed["source"]["type"], "base64");
+        assert_eq!(parsed["source"]["media_type"], "image/png");
+        assert_eq!(parsed["source"]["data"], "iVBORw0KGgo=");
+        // Upewniamy się, że nie ma pola "text"
+        assert!(parsed.get("text").is_none());
+    }
+
+    #[test]
+    fn test_stdin_content_block_image_jpeg() {
+        // Walidacja drugiego MIME type
+        let block = StdinContentBlock::Image(StdinImageBlock {
+            block_type: "image",
+            source: StdinImageSource {
+                source_type: "base64",
+                media_type: "image/jpeg",
+                data: "/9j/4AAQ==",
+            },
+        });
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "image");
+        assert_eq!(parsed["source"]["media_type"], "image/jpeg");
+    }
+
+    #[test]
+    fn test_stdin_message_content_with_mixed_blocks() {
+        // Wiadomość z blokiem tekstowym i obrazem
+        let msg = StdinUserMessage {
+            msg_type: "user",
+            session_id: "sess-1",
+            message: StdinMessageContent {
+                role: "user",
+                content: vec![
+                    StdinContentBlock::Text(StdinTextBlock {
+                        block_type: "text",
+                        text: "Describe this image:",
+                    }),
+                    StdinContentBlock::Image(StdinImageBlock {
+                        block_type: "image",
+                        source: StdinImageSource {
+                            source_type: "base64",
+                            media_type: "image/png",
+                            data: "ABC123==",
+                        },
+                    }),
+                ],
+            },
+            parent_tool_use_id: None,
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        let content = &parsed["message"]["content"];
+        assert_eq!(content.as_array().unwrap().len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Describe this image:");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["data"], "ABC123==");
+    }
+
+    #[test]
+    fn test_stdin_content_block_text_exact_json_format() {
+        // Weryfikacja dokładnego formatu JSON dla acceptance criteria
+        let block = StdinContentBlock::Text(StdinTextBlock {
+            block_type: "text",
+            text: "hello",
+        });
+        let json = serde_json::to_string(&block).unwrap();
+        assert_eq!(json, r#"{"type":"text","text":"hello"}"#);
+    }
+
+    #[test]
+    fn test_stdin_content_block_image_exact_json_format() {
+        // Weryfikacja dokładnego formatu JSON dla acceptance criteria
+        let block = StdinContentBlock::Image(StdinImageBlock {
+            block_type: "image",
+            source: StdinImageSource {
+                source_type: "base64",
+                media_type: "image/png",
+                data: "...",
+            },
+        });
+        let json = serde_json::to_string(&block).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}"#
         );
     }
 
@@ -454,10 +639,10 @@ mod tests {
             session_id: "test-session",
             message: StdinMessageContent {
                 role: "user",
-                content: vec![StdinTextBlock {
+                content: vec![StdinContentBlock::Text(StdinTextBlock {
                     block_type: "text",
                     text: "test content",
-                }],
+                })],
             },
             parent_tool_use_id: None,
         };
