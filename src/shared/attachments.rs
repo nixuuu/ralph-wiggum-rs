@@ -8,12 +8,15 @@
 #![allow(dead_code)]
 use base64::{Engine as _, engine::general_purpose};
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
-
-use crate::shared::error::{RalphError, Result};
 
 /// Obsługiwane rozszerzenia plików graficznych (małe litery).
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+
+use image::imageops::FilterType;
+
+use super::error::{RalphError, Result};
 
 /// Maksymalna liczba obrazów w jednej wiadomości.
 pub const MAX_IMAGES: usize = 10;
@@ -236,6 +239,63 @@ pub fn validate_image_file(path: &Path) -> Result<(Vec<u8>, MediaType)> {
     Ok((data, media_type))
 }
 
+impl From<&MediaType> for image::ImageFormat {
+    fn from(media_type: &MediaType) -> Self {
+        match media_type {
+            MediaType::Png => image::ImageFormat::Png,
+            MediaType::Jpeg => image::ImageFormat::Jpeg,
+            MediaType::Gif => image::ImageFormat::Gif,
+            MediaType::WebP => image::ImageFormat::WebP,
+        }
+    }
+}
+
+/// Zmniejsza obraz do `max_dim` pikseli na dłuższym boku, zachowując proporcje.
+///
+/// Jeśli obraz mieści się w limicie (oba wymiary ≤ `max_dim`), zwraca oryginalne bajty
+/// bez dodatkowego kodowania. Dzięki temu unikamy stratnych re-enkodowań dla JPEG/WebP.
+///
+/// Format wyjściowy odpowiada formatowi wejściowemu (PNG→PNG, JPEG→JPEG, itd.).
+///
+/// # Ograniczenia
+///
+/// - **GIF animowany**: image crate podczas resize traci animację — wynikowy GIF będzie
+///   statyczny (tylko pierwsza klatka). Jeśli konieczna jest obsługa animowanych GIFów,
+///   należy użyć dedykowanej biblioteki (np. `gifsicle` przez subprocess).
+/// - **WebP animowany**: analogiczne ograniczenie jak GIF.
+pub fn resize_if_needed(data: &[u8], media_type: &MediaType, max_dim: u32) -> Result<Vec<u8>> {
+    let img =
+        image::load_from_memory(data).map_err(|e| RalphError::ImageProcessing(e.to_string()))?;
+
+    let (w, h) = (img.width(), img.height());
+
+    // Jeśli obraz mieści się w limicie, zwróć oryginalne bajty bez re-enkodowania
+    if w <= max_dim && h <= max_dim {
+        return Ok(data.to_vec());
+    }
+
+    // Oblicz nowe wymiary zachowując aspect ratio (dłuższy bok → max_dim)
+    let (new_w, new_h) = if w >= h {
+        let new_h = (h as f64 * max_dim as f64 / w as f64).round() as u32;
+        (max_dim, new_h.max(1))
+    } else {
+        let new_w = (w as f64 * max_dim as f64 / h as f64).round() as u32;
+        (new_w.max(1), max_dim)
+    };
+
+    // resize_exact zamiast resize — proporcje już obliczone ręcznie powyżej,
+    // więc nie chcemy, żeby image crate przeliczało je ponownie.
+    let resized = img.resize_exact(new_w, new_h, FilterType::Lanczos3);
+
+    let format = image::ImageFormat::from(media_type);
+    let mut output = Vec::new();
+    resized
+        .write_to(&mut Cursor::new(&mut output), format)
+        .map_err(|e| RalphError::ImageProcessing(e.to_string()))?;
+
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +501,27 @@ mod tests {
     }
 
     // ── Istniejące testy ──────────────────────────────────────────────────────
+
+    /// Tworzy minimalny obraz PNG o podanych wymiarach (1px solid color) jako Vec<u8>.
+    fn make_png(width: u32, height: u32) -> Vec<u8> {
+        let img = image::DynamicImage::new_rgb8(width, height);
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    /// Tworzy minimalny obraz JPEG o podanych wymiarach jako Vec<u8>.
+    fn make_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let img = image::DynamicImage::new_rgb8(width, height);
+        let mut buf = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+        buf
+    }
 
     #[test]
     fn test_media_type_mime_strings() {
@@ -768,5 +849,143 @@ mod tests {
                 "Error should mention supported formats: {msg}"
             );
         }
+    }
+
+    // ─── resize_if_needed ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_resize_small_image_unchanged() {
+        // Obraz poniżej limitu — oryginalne bajty powinny wrócić bez zmian
+        let data = make_png(100, 100);
+        let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
+        assert_eq!(result, data, "Mały obraz nie powinien być modyfikowany");
+    }
+
+    #[test]
+    fn test_resize_exact_limit_unchanged() {
+        // Obraz dokładnie na granicy limitu — bez zmian
+        let data = make_png(MAX_DIMENSION, MAX_DIMENSION);
+        let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
+        assert_eq!(
+            result, data,
+            "Obraz na granicy limitu nie powinien być modyfikowany"
+        );
+    }
+
+    #[test]
+    fn test_resize_wide_image_reduced() {
+        // Szeroki obraz — szerokość zostaje zmniejszona do max_dim, wysokość proporcjonalnie
+        let data = make_png(3000, 1000);
+        let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
+
+        let resized = image::load_from_memory(&result).unwrap();
+        assert_eq!(
+            resized.width(),
+            MAX_DIMENSION,
+            "Szerokość powinna wynosić max_dim"
+        );
+        assert!(
+            resized.height() <= MAX_DIMENSION,
+            "Wysokość nie może przekraczać max_dim"
+        );
+        // Proporcje: 3000:1000 = 3:1 → oczekiwana wysokość ≈ 1568/3 ≈ 523
+        let expected_h = (1000.0 * MAX_DIMENSION as f64 / 3000.0).round() as u32;
+        assert_eq!(
+            resized.height(),
+            expected_h,
+            "Wysokość powinna być proporcjonalna"
+        );
+    }
+
+    #[test]
+    fn test_resize_tall_image_reduced() {
+        // Wysoki obraz — wysokość zostaje zmniejszona do max_dim, szerokość proporcjonalnie
+        let data = make_png(800, 4000);
+        let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
+
+        let resized = image::load_from_memory(&result).unwrap();
+        assert_eq!(
+            resized.height(),
+            MAX_DIMENSION,
+            "Wysokość powinna wynosić max_dim"
+        );
+        assert!(
+            resized.width() <= MAX_DIMENSION,
+            "Szerokość nie może przekraczać max_dim"
+        );
+    }
+
+    #[test]
+    fn test_resize_preserves_jpeg_format() {
+        // Wynik dla JPEG powinien być wykrywalny jako JPEG
+        let data = make_jpeg(2000, 1500);
+        let result = resize_if_needed(&data, &MediaType::Jpeg, MAX_DIMENSION).unwrap();
+
+        // Dane wynikowe nie mogą być puste
+        assert!(!result.is_empty());
+        // Wynik powinien dekodować się jako prawidłowy obraz
+        let resized = image::load_from_memory(&result).unwrap();
+        assert_eq!(resized.width(), MAX_DIMENSION);
+    }
+
+    #[test]
+    fn test_resize_square_image() {
+        // Obraz kwadratowy — oba wymiary skalowane do max_dim
+        let data = make_png(2000, 2000);
+        let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
+
+        let resized = image::load_from_memory(&result).unwrap();
+        assert_eq!(resized.width(), MAX_DIMENSION);
+        assert_eq!(resized.height(), MAX_DIMENSION);
+    }
+
+    #[test]
+    fn test_resize_one_dimension_just_above_limit() {
+        // Szerokość minimalnie przekracza limit, wysokość poniżej — typowy landscape foto
+        // 1600x1000: tylko szerokość > 1568, wysokość OK
+        let data = make_png(1600, 1000);
+        let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
+
+        let resized = image::load_from_memory(&result).unwrap();
+        assert_eq!(resized.width(), MAX_DIMENSION, "Szerokość powinna być obcięta do max_dim");
+        assert!(resized.height() < MAX_DIMENSION, "Wysokość powinna być < max_dim");
+        // Proporcje: 1600:1000 → 1568:980
+        let expected_h = (1000.0 * MAX_DIMENSION as f64 / 1600.0).round() as u32;
+        assert_eq!(resized.height(), expected_h, "Wysokość powinna być proporcjonalna");
+    }
+
+    #[test]
+    fn test_resize_invalid_data_returns_error() {
+        let garbage = b"not an image at all";
+        let result = resize_if_needed(garbage, &MediaType::Png, MAX_DIMENSION);
+        assert!(result.is_err(), "Nieprawidłowe dane powinny zwrócić błąd");
+        // Sprawdź że to ImageProcessing error
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, RalphError::ImageProcessing(_)),
+            "Błąd powinien być ImageProcessing, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_media_type_to_image_format() {
+        // Sprawdź konwersje MediaType → image::ImageFormat
+        assert_eq!(
+            image::ImageFormat::from(&MediaType::Png),
+            image::ImageFormat::Png
+        );
+        assert_eq!(
+            image::ImageFormat::from(&MediaType::Jpeg),
+            image::ImageFormat::Jpeg
+        );
+        assert_eq!(
+            image::ImageFormat::from(&MediaType::Gif),
+            image::ImageFormat::Gif
+        );
+        assert_eq!(
+            image::ImageFormat::from(&MediaType::WebP),
+            image::ImageFormat::WebP
+        );
     }
 }

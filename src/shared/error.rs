@@ -67,6 +67,9 @@ pub enum RalphError {
     /// Zawiera ścieżkę do pliku oraz listę obsługiwanych formatów.
     #[error("Nieobsługiwany format obrazu: '{path}'. Obsługiwane formaty: {supported}")]
     UnsupportedImageFormat { path: String, supported: String },
+
+    #[error("Image processing error: {0}")]
+    ImageProcessing(String),
 }
 
 pub type Result<T> = std::result::Result<T, RalphError>;
