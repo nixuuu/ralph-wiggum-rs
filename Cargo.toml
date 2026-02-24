@@ -68,6 +68,12 @@ url = "2.5"
 # Glob pattern matching with negation and alternatives
 globset = "0.4"
 
+# Base64 encoding/decoding
+base64 = "0.22"
+
+# Image processing (PNG, JPEG, GIF, WebP)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
 [dev-dependencies]
 tempfile = "3.25.0"
 tower = { version = "0.5", features = ["util"] }
