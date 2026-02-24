@@ -6,6 +6,7 @@
 //! Typy są publicznym API — będą używane przez przyszłe moduły (np. attachment loader).
 // TODO: remove when attachment loader is implemented
 #![allow(dead_code)]
+use base64::{Engine as _, engine::general_purpose};
 use std::path::PathBuf;
 
 /// Maksymalna liczba obrazów w jednej wiadomości.
@@ -79,6 +80,13 @@ pub struct ImageAttachment {
 #[derive(Debug, Clone)]
 pub enum Attachment {
     Image(ImageAttachment),
+}
+
+/// Koduje bajty do stringa base64 (standard encoding, bez prefixu `data:`).
+///
+/// Używa standardowego alfabetu base64 z paddingiem `=`.
+pub fn encode_base64(data: &[u8]) -> String {
+    general_purpose::STANDARD.encode(data)
 }
 
 #[cfg(test)]
@@ -201,5 +209,34 @@ mod tests {
         // 11 bajtów RIFF — za krótkie na WebP (potrzeba 12)
         let riff_short = b"RIFF\x00\x00\x00WEB";
         assert_eq!(detect_media_type(riff_short), None);
+    }
+
+    #[test]
+    fn test_encode_base64_known_value() {
+        // "test" → base64 STANDARD to "dGVzdA=="
+        assert_eq!(encode_base64(b"test"), "dGVzdA==");
+    }
+
+    #[test]
+    fn test_encode_base64_empty() {
+        assert_eq!(encode_base64(b""), "");
+    }
+
+    #[test]
+    fn test_encode_base64_roundtrip() {
+        use base64::{Engine as _, engine::general_purpose};
+        let original = b"\x89PNG\r\n\x1a\nsome_image_bytes";
+        let encoded = encode_base64(original);
+        // Brak prefixu data:
+        assert!(!encoded.starts_with("data:"));
+        // Dekodowanie zwraca identyczne bajty
+        let decoded = general_purpose::STANDARD.decode(&encoded).unwrap();
+        assert_eq!(decoded.as_slice(), original.as_slice());
+    }
+
+    #[test]
+    fn test_encode_base64_no_data_prefix() {
+        let encoded = encode_base64(b"hello world");
+        assert!(!encoded.starts_with("data:"));
     }
 }
