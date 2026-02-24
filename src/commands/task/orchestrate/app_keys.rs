@@ -3,7 +3,7 @@
 //! Migrated from `dashboard_input.rs` — full keyboard routing:
 //! quit flow, focus navigation, restart, preview, scroll, overlay.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
 use crate::commands::task::orchestrate::app::{OrchestrateApp, QuitState, RestartState};
@@ -11,7 +11,7 @@ use crate::commands::task::orchestrate::command_registry::{
     OrchestrateAction, execute_palette_action,
 };
 use crate::tui::events::EventResult;
-use crate::tui::keybindings::{KeyAction, View};
+use crate::tui::keybindings::{KeyAction, KeybindingResolver, View};
 use crate::tui::widgets::{InputAction, PaletteAction};
 
 impl OrchestrateApp {
@@ -26,7 +26,11 @@ impl OrchestrateApp {
     /// 2. Text input overlay (gdy aktywny) — pochłania wszystkie klawisze
     /// 3. Sidebar (gdy focused) — routing do sidebar
     /// 4. Globalne klawisze aplikacji
-    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> EventResult {
+    pub(crate) fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        resolver: &KeybindingResolver,
+    ) -> EventResult {
         // Priorytet 1: Command palette pochłania wszystkie klawisze gdy jest otwarta
         if self.is_palette_open() {
             return self.handle_palette_key(key);
@@ -40,7 +44,7 @@ impl OrchestrateApp {
         // Priorytet 3: Command palette — keybinding przez KeybindingResolver (domyślnie Ctrl+P,
         // konfiguralny przez .ralph.toml)
         if matches!(
-            self.resolver.resolve(&key, View::Orchestrate),
+            resolver.resolve(&key, View::Global),
             Some(KeyAction::CommandPalette)
         ) {
             self.open_command_palette();
@@ -49,37 +53,42 @@ impl OrchestrateApp {
 
         // Priorytet 4: Sidebar (gdy focused)
         if self.sidebar_focused && self.sidebar_state.visible {
-            return self.handle_sidebar_key(key);
+            return self.handle_sidebar_key(key, resolver);
         }
 
-        match key.code {
-            KeyCode::Char('q') => self.handle_quit_key(),
-            KeyCode::Enter => self.handle_enter_key(),
-            KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => self.handle_tab(true),
-            KeyCode::BackTab => self.handle_tab(false),
-            KeyCode::Esc => self.handle_esc_key(),
-            KeyCode::Char(ch) if ch.is_ascii_digit() && ch != '0' => {
-                self.handle_direct_focus(ch as u32 - '0' as u32)
-            }
-            KeyCode::Char('p') => self.handle_toggle_preview(),
-            KeyCode::Char('t') => self.handle_toggle_sidebar(),
-            KeyCode::Char('i') => self.handle_input_overlay_key(),
-            KeyCode::Up => self.handle_scroll(-(self.scroll_step as i32)),
-            KeyCode::Down => self.handle_scroll(self.scroll_step as i32),
-            KeyCode::Left => self.handle_scroll(i32::MIN),
-            KeyCode::Right => self.handle_scroll(i32::MAX),
-            KeyCode::Char('r') => {
+        match resolver.resolve(&key, View::Orchestrate) {
+            Some(KeyAction::Quit) => self.handle_quit_key(),
+            Some(KeyAction::Confirm) => self.handle_enter_key(),
+            Some(KeyAction::FocusNext) => self.handle_tab(true),
+            Some(KeyAction::FocusPrev) => self.handle_tab(false),
+            Some(KeyAction::Cancel) => self.handle_esc_key(),
+            Some(KeyAction::TogglePreview) => self.handle_toggle_preview(),
+            Some(KeyAction::ToggleSidebar) => self.handle_toggle_sidebar(),
+            Some(KeyAction::SendMessage) => self.handle_input_overlay_key(),
+            Some(KeyAction::ScrollUp) => self.handle_scroll(-(self.scroll_step as i32)),
+            Some(KeyAction::ScrollDown) => self.handle_scroll(self.scroll_step as i32),
+            Some(KeyAction::Reload) => {
                 self.reload_requested = true;
                 EventResult::Consumed
             }
-            KeyCode::Char('R') => self.handle_restart_key(),
-            KeyCode::Char('y') => self.handle_confirm_restart(),
-            KeyCode::Char('n') => self.handle_cancel_restart(),
-            KeyCode::Char('h') => {
+            Some(KeyAction::Restart) => self.handle_restart_key(),
+            Some(KeyAction::ConfirmRestart) => self.handle_confirm_restart(),
+            Some(KeyAction::CancelRestart) => self.handle_cancel_restart(),
+            Some(KeyAction::ToggleIdleWorkers) => {
                 self.show_idle = !self.show_idle;
                 EventResult::Consumed
             }
-            _ => EventResult::Ignored,
+            _ => {
+                // Special cases not in resolver: Left/Right scroll home/end, digit direct focus
+                match key.code {
+                    KeyCode::Left => self.handle_scroll(i32::MIN),
+                    KeyCode::Right => self.handle_scroll(i32::MAX),
+                    KeyCode::Char(ch) if ch.is_ascii_digit() && ch != '0' => {
+                        self.handle_direct_focus(ch as u32 - '0' as u32)
+                    }
+                    _ => EventResult::Ignored,
+                }
+            }
         }
     }
 
@@ -295,50 +304,76 @@ impl OrchestrateApp {
 
     // ── Sidebar key handling ───────────────────────────────────────
 
-    fn handle_sidebar_key(&mut self, key: KeyEvent) -> EventResult {
-        match key.code {
-            // Navigation
-            KeyCode::Up | KeyCode::Char('k') => {
+    fn handle_sidebar_key(&mut self, key: KeyEvent, resolver: &KeybindingResolver) -> EventResult {
+        match resolver.resolve(&key, View::Orchestrate) {
+            // Navigation via resolver (Up/Down arrows)
+            Some(KeyAction::ScrollUp) => {
                 self.sidebar_state.select_prev();
                 EventResult::Consumed
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            Some(KeyAction::ScrollDown) => {
                 self.sidebar_state.select_next();
                 EventResult::Consumed
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
+            // Toggle expand via Enter (global Confirm)
+            Some(KeyAction::Confirm) => {
                 self.sidebar_state.toggle_expand();
                 EventResult::Consumed
             }
-            // Resize sidebar
-            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char(']') => {
+            // Resize sidebar via resolver ([ and ])
+            Some(KeyAction::GrowSidebar) => {
                 self.sidebar_state.grow();
                 EventResult::Consumed
             }
-            KeyCode::Char('-') | KeyCode::Char('[') => {
+            Some(KeyAction::ShrinkSidebar) => {
                 self.sidebar_state.shrink();
                 EventResult::Consumed
             }
             // Esc — unfocus sidebar
-            KeyCode::Esc => {
+            Some(KeyAction::Cancel) => {
                 self.unfocus_sidebar();
                 EventResult::Consumed
             }
-            // Pass-through: global keys
-            KeyCode::Char('q') => self.handle_quit_key(),
-            KeyCode::Char('t') => self.handle_toggle_sidebar(),
-            KeyCode::Char('r') => {
+            // Pass-through: global/orchestrate actions
+            Some(KeyAction::Quit) => self.handle_quit_key(),
+            Some(KeyAction::ToggleSidebar) => self.handle_toggle_sidebar(),
+            Some(KeyAction::Reload) => {
                 self.reload_requested = true;
                 EventResult::Consumed
             }
-            KeyCode::Char('R') => self.handle_restart_key(),
-            KeyCode::Char('p') => self.handle_toggle_preview(),
-            KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => self.handle_tab(true),
-            KeyCode::BackTab => self.handle_tab(false),
-            KeyCode::Char(ch) if ch.is_ascii_digit() && ch != '0' => {
-                self.handle_direct_focus(ch as u32 - '0' as u32)
+            Some(KeyAction::Restart) => self.handle_restart_key(),
+            Some(KeyAction::TogglePreview) => self.handle_toggle_preview(),
+            Some(KeyAction::FocusNext) => self.handle_tab(true),
+            Some(KeyAction::FocusPrev) => self.handle_tab(false),
+            _ => {
+                // Special cases not in resolver: vim aliases (j/k), Space, +/= resize, digits
+                match key.code {
+                    KeyCode::Char('k') => {
+                        self.sidebar_state.select_prev();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('j') => {
+                        self.sidebar_state.select_next();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char(' ') => {
+                        self.sidebar_state.toggle_expand();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        self.sidebar_state.grow();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('-') => {
+                        self.sidebar_state.shrink();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char(ch) if ch.is_ascii_digit() && ch != '0' => {
+                        self.handle_direct_focus(ch as u32 - '0' as u32)
+                    }
+                    _ => EventResult::Ignored,
+                }
             }
-            _ => EventResult::Ignored,
         }
     }
 
@@ -643,6 +678,7 @@ mod tests {
     use crate::commands::task::orchestrate::app::{QuitState, RestartState};
     use crate::commands::task::orchestrate::worker_status::WorkerState;
     use crate::tui::events::{AppEvent, EventResult};
+    use crate::tui::keybindings::KeybindingResolver;
     use crate::tui::widgets::TextInputOverlay;
 
     fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -661,6 +697,10 @@ mod tests {
         app
     }
 
+    fn make_resolver() -> KeybindingResolver {
+        KeybindingResolver::with_defaults()
+    }
+
     /// Helper: make all workers active (Implementing state) for navigation tests.
     fn activate_workers(app: &mut OrchestrateApp, ids: &[u32]) {
         for &id in ids {
@@ -676,8 +716,9 @@ mod tests {
     #[test]
     fn quit_first_q_enters_pending() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         let key = make_key(KeyCode::Char('q'), KeyModifiers::NONE);
-        let result = app.handle_key(key);
+        let result = app.handle_key(key, &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.quit_state, QuitState::Pending);
     }
@@ -685,9 +726,10 @@ mod tests {
     #[test]
     fn quit_second_q_triggers_graceful_shutdown() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.quit_state = QuitState::Pending;
         let key = make_key(KeyCode::Char('q'), KeyModifiers::NONE);
-        let result = app.handle_key(key);
+        let result = app.handle_key(key, &resolver);
         assert_eq!(result, EventResult::Quit);
         assert!(app.graceful_shutdown);
     }
@@ -695,9 +737,10 @@ mod tests {
     #[test]
     fn quit_enter_confirms_pending() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.quit_state = QuitState::Pending;
         let key = make_key(KeyCode::Enter, KeyModifiers::NONE);
-        let result = app.handle_key(key);
+        let result = app.handle_key(key, &resolver);
         assert_eq!(result, EventResult::Quit);
         assert!(app.graceful_shutdown);
     }
@@ -705,9 +748,10 @@ mod tests {
     #[test]
     fn quit_esc_cancels_pending() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.quit_state = QuitState::Pending;
         let key = make_key(KeyCode::Esc, KeyModifiers::NONE);
-        let result = app.handle_key(key);
+        let result = app.handle_key(key, &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.quit_state, QuitState::Normal);
     }
@@ -715,9 +759,10 @@ mod tests {
     #[test]
     fn quit_during_shutdown_forces() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.graceful_shutdown = true;
         let key = make_key(KeyCode::Char('q'), KeyModifiers::NONE);
-        let result = app.handle_key(key);
+        let result = app.handle_key(key, &resolver);
         assert_eq!(result, EventResult::Shutdown);
     }
 
@@ -726,88 +771,94 @@ mod tests {
     #[test]
     fn tab_cycles_through_active_workers() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1, 2, 3]);
 
         let tab = make_key(KeyCode::Tab, KeyModifiers::NONE);
 
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, Some(1));
 
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, Some(2));
 
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, Some(3));
 
         // Wrap around
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, Some(1));
     }
 
     #[test]
     fn backtab_cycles_backward() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1, 2, 3]);
 
-        let backtab = make_key(KeyCode::BackTab, KeyModifiers::NONE);
+        // BackTab = Shift+Tab — crossterm sends BackTab with SHIFT modifier
+        let backtab = make_key(KeyCode::BackTab, KeyModifiers::SHIFT);
 
         // From None → last active
-        app.handle_key(backtab);
+        app.handle_key(backtab, &resolver);
         assert_eq!(app.focused_worker, Some(3));
 
-        app.handle_key(backtab);
+        app.handle_key(backtab, &resolver);
         assert_eq!(app.focused_worker, Some(2));
 
-        app.handle_key(backtab);
+        app.handle_key(backtab, &resolver);
         assert_eq!(app.focused_worker, Some(1));
 
         // Wrap around
-        app.handle_key(backtab);
+        app.handle_key(backtab, &resolver);
         assert_eq!(app.focused_worker, Some(3));
     }
 
     #[test]
     fn tab_with_no_active_workers_unfocuses() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         // All workers are idle by default
         app.refresh_active_worker_ids();
         app.focused_worker = Some(1);
 
         let tab = make_key(KeyCode::Tab, KeyModifiers::NONE);
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, None);
     }
 
     #[test]
     fn digit_key_focuses_nth_active_worker() {
         let mut app = make_app(5);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[2, 4, 5]);
 
         // '1' → first active (worker 2)
         let key1 = make_key(KeyCode::Char('1'), KeyModifiers::NONE);
-        app.handle_key(key1);
+        app.handle_key(key1, &resolver);
         assert_eq!(app.focused_worker, Some(2));
 
         // '2' → second active (worker 4)
         let key2 = make_key(KeyCode::Char('2'), KeyModifiers::NONE);
-        app.handle_key(key2);
+        app.handle_key(key2, &resolver);
         assert_eq!(app.focused_worker, Some(4));
 
         // '3' → third active (worker 5)
         let key3 = make_key(KeyCode::Char('3'), KeyModifiers::NONE);
-        app.handle_key(key3);
+        app.handle_key(key3, &resolver);
         assert_eq!(app.focused_worker, Some(5));
     }
 
     #[test]
     fn digit_key_out_of_range_no_change() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1, 2]);
         app.focused_worker = Some(1);
 
         // '5' — out of range
         let key5 = make_key(KeyCode::Char('5'), KeyModifiers::NONE);
-        app.handle_key(key5);
+        app.handle_key(key5, &resolver);
         assert_eq!(app.focused_worker, Some(1)); // unchanged
     }
 
@@ -816,11 +867,13 @@ mod tests {
     #[test]
     fn restart_key_initiates_restart() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1, 2, 3]);
         app.focused_worker = Some(2);
 
-        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::NONE);
-        app.handle_key(key_r);
+        // Restart binding: 'R' with SHIFT modifier
+        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        app.handle_key(key_r, &resolver);
 
         assert_eq!(app.restart_state, RestartState::Pending { worker_id: 2 });
     }
@@ -828,10 +881,11 @@ mod tests {
     #[test]
     fn restart_key_ignored_no_focus() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1, 2, 3]);
 
-        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::NONE);
-        app.handle_key(key_r);
+        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        app.handle_key(key_r, &resolver);
 
         assert_eq!(app.restart_state, RestartState::None);
     }
@@ -839,10 +893,11 @@ mod tests {
     #[test]
     fn restart_confirm_y() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         app.restart_state = RestartState::Pending { worker_id: 2 };
 
         let key_y = make_key(KeyCode::Char('y'), KeyModifiers::NONE);
-        app.handle_key(key_y);
+        app.handle_key(key_y, &resolver);
 
         assert_eq!(app.restart_state, RestartState::Confirmed { worker_id: 2 });
     }
@@ -850,10 +905,11 @@ mod tests {
     #[test]
     fn restart_cancel_n() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         app.restart_state = RestartState::Pending { worker_id: 2 };
 
         let key_n = make_key(KeyCode::Char('n'), KeyModifiers::NONE);
-        app.handle_key(key_n);
+        app.handle_key(key_n, &resolver);
 
         assert_eq!(app.restart_state, RestartState::None);
     }
@@ -861,10 +917,11 @@ mod tests {
     #[test]
     fn restart_cancel_esc() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         app.restart_state = RestartState::Pending { worker_id: 2 };
 
         let key_esc = make_key(KeyCode::Esc, KeyModifiers::NONE);
-        app.handle_key(key_esc);
+        app.handle_key(key_esc, &resolver);
 
         assert_eq!(app.restart_state, RestartState::None);
     }
@@ -872,12 +929,13 @@ mod tests {
     #[test]
     fn restart_ignored_during_shutdown() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1, 2, 3]);
         app.focused_worker = Some(1);
         app.graceful_shutdown = true;
 
-        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::NONE);
-        app.handle_key(key_r);
+        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        app.handle_key(key_r, &resolver);
 
         assert_eq!(app.restart_state, RestartState::None);
     }
@@ -885,16 +943,17 @@ mod tests {
     #[test]
     fn restart_double_r_ignored() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1, 2, 3]);
         app.focused_worker = Some(1);
 
-        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::NONE);
-        app.handle_key(key_r);
+        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        app.handle_key(key_r, &resolver);
         assert_eq!(app.restart_state, RestartState::Pending { worker_id: 1 });
 
         // Focus different worker and press R again
         app.focused_worker = Some(2);
-        app.handle_key(key_r);
+        app.handle_key(key_r, &resolver);
         // Should still be worker 1
         assert_eq!(app.restart_state, RestartState::Pending { worker_id: 1 });
     }
@@ -904,10 +963,11 @@ mod tests {
     #[test]
     fn quit_cancels_restart() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         app.restart_state = RestartState::Pending { worker_id: 1 };
 
         let key_q = make_key(KeyCode::Char('q'), KeyModifiers::NONE);
-        app.handle_key(key_q);
+        app.handle_key(key_q, &resolver);
 
         assert_eq!(app.restart_state, RestartState::None);
         assert_eq!(app.quit_state, QuitState::Pending);
@@ -916,12 +976,13 @@ mod tests {
     #[test]
     fn restart_cancels_quit() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1, 2, 3]);
         app.quit_state = QuitState::Pending;
         app.focused_worker = Some(1);
 
-        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::NONE);
-        app.handle_key(key_r);
+        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        app.handle_key(key_r, &resolver);
 
         assert_eq!(app.quit_state, QuitState::Normal);
         assert_eq!(app.restart_state, RestartState::Pending { worker_id: 1 });
@@ -930,13 +991,14 @@ mod tests {
     #[test]
     fn tab_cancels_both_quit_and_restart() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1, 2, 3]);
         app.quit_state = QuitState::Pending;
         app.restart_state = RestartState::Pending { worker_id: 1 };
         app.focused_worker = Some(1);
 
         let tab = make_key(KeyCode::Tab, KeyModifiers::NONE);
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
 
         assert_eq!(app.quit_state, QuitState::Normal);
         assert_eq!(app.restart_state, RestartState::None);
@@ -947,11 +1009,12 @@ mod tests {
     #[test]
     fn esc_priority_restart_over_quit() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         app.restart_state = RestartState::Pending { worker_id: 1 };
         app.quit_state = QuitState::Pending;
 
         let esc = make_key(KeyCode::Esc, KeyModifiers::NONE);
-        app.handle_key(esc);
+        app.handle_key(esc, &resolver);
 
         // Restart cancelled first
         assert_eq!(app.restart_state, RestartState::None);
@@ -962,10 +1025,11 @@ mod tests {
     #[test]
     fn esc_unfocuses_when_no_pending() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         app.focused_worker = Some(2);
 
         let esc = make_key(KeyCode::Esc, KeyModifiers::NONE);
-        app.handle_key(esc);
+        app.handle_key(esc, &resolver);
 
         assert_eq!(app.focused_worker, None);
     }
@@ -975,10 +1039,11 @@ mod tests {
     #[test]
     fn scroll_cancels_quit_pending() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         app.quit_state = QuitState::Pending;
 
         let up = make_key(KeyCode::Up, KeyModifiers::NONE);
-        app.handle_key(up);
+        app.handle_key(up, &resolver);
 
         assert_eq!(app.quit_state, QuitState::Normal);
     }
@@ -986,10 +1051,11 @@ mod tests {
     #[test]
     fn scroll_cancels_restart_pending() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         app.restart_state = RestartState::Pending { worker_id: 1 };
 
         let down = make_key(KeyCode::Down, KeyModifiers::NONE);
-        app.handle_key(down);
+        app.handle_key(down, &resolver);
 
         assert_eq!(app.restart_state, RestartState::None);
     }
@@ -999,23 +1065,25 @@ mod tests {
     #[test]
     fn p_key_toggles_preview() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         assert!(!app.show_task_preview);
 
         let key_p = make_key(KeyCode::Char('p'), KeyModifiers::NONE);
-        app.handle_key(key_p);
+        app.handle_key(key_p, &resolver);
         assert!(app.show_task_preview);
 
-        app.handle_key(key_p);
+        app.handle_key(key_p, &resolver);
         assert!(!app.show_task_preview);
     }
 
     #[test]
     fn esc_closes_preview() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.show_task_preview = true;
 
         let esc = make_key(KeyCode::Esc, KeyModifiers::NONE);
-        app.handle_key(esc);
+        app.handle_key(esc, &resolver);
 
         assert!(!app.show_task_preview);
     }
@@ -1025,30 +1093,32 @@ mod tests {
     #[test]
     fn focus_cycling_non_sequential_workers() {
         let mut app = make_app(7);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[2, 5, 7]);
 
         let tab = make_key(KeyCode::Tab, KeyModifiers::NONE);
 
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, Some(2));
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, Some(5));
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, Some(7));
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, Some(2)); // wrap
     }
 
     #[test]
     fn focus_cycling_single_worker() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[2]);
 
         let tab = make_key(KeyCode::Tab, KeyModifiers::NONE);
 
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, Some(2));
-        app.handle_key(tab);
+        app.handle_key(tab, &resolver);
         assert_eq!(app.focused_worker, Some(2)); // wraps to itself
     }
 
@@ -1057,11 +1127,12 @@ mod tests {
     #[test]
     fn restart_ignored_for_inactive_worker() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1, 3]);
         app.focused_worker = Some(2); // Worker 2 is idle
 
-        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::NONE);
-        app.handle_key(key_r);
+        let key_r = make_key(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        app.handle_key(key_r, &resolver);
 
         assert_eq!(app.restart_state, RestartState::None);
     }
@@ -1105,10 +1176,11 @@ mod tests {
     fn overlay_active_routes_all_keys_to_overlay() {
         let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
         let mut app = OrchestrateApp::new(1, overlay);
+        let resolver = make_resolver();
 
         // 'q' should NOT trigger quit when overlay is active
         let key_q = make_key(KeyCode::Char('q'), KeyModifiers::NONE);
-        let result = app.handle_key(key_q);
+        let result = app.handle_key(key_q, &resolver);
         assert_eq!(result, EventResult::Consumed);
         // Quit state should remain Normal
         assert_eq!(app.quit_state, QuitState::Normal);
@@ -1119,10 +1191,11 @@ mod tests {
     #[test]
     fn r_key_sets_reload_requested() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         assert!(!app.reload_requested);
 
         let key_r = make_key(KeyCode::Char('r'), KeyModifiers::NONE);
-        app.handle_key(key_r);
+        app.handle_key(key_r, &resolver);
 
         assert!(app.reload_requested);
     }
@@ -1144,16 +1217,17 @@ mod tests {
     fn overlay_send_buffers_message() {
         let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(2))));
         let mut app = OrchestrateApp::new(3, overlay);
+        let resolver = make_resolver();
 
         // Type some text into the overlay
         let key_h = make_key(KeyCode::Char('h'), KeyModifiers::NONE);
         let key_i = make_key(KeyCode::Char('i'), KeyModifiers::NONE);
-        app.handle_key(key_h);
-        app.handle_key(key_i);
+        app.handle_key(key_h, &resolver);
+        app.handle_key(key_i, &resolver);
 
         // Send with Ctrl+Enter
         let ctrl_enter = make_key(KeyCode::Enter, KeyModifiers::CONTROL);
-        app.handle_key(ctrl_enter);
+        app.handle_key(ctrl_enter, &resolver);
 
         // Verify message buffered
         let messages = app.take_pending_messages();
@@ -1166,14 +1240,15 @@ mod tests {
     fn overlay_cancel_no_message() {
         let overlay = Arc::new(Mutex::new(Some(TextInputOverlay::new(1))));
         let mut app = OrchestrateApp::new(1, overlay);
+        let resolver = make_resolver();
 
         // Type text
         let key_a = make_key(KeyCode::Char('a'), KeyModifiers::NONE);
-        app.handle_key(key_a);
+        app.handle_key(key_a, &resolver);
 
         // Cancel with Esc
         let esc = make_key(KeyCode::Esc, KeyModifiers::NONE);
-        app.handle_key(esc);
+        app.handle_key(esc, &resolver);
 
         // No messages should be buffered
         assert!(app.take_pending_messages().is_empty());
@@ -1201,18 +1276,19 @@ mod tests {
         use crate::commands::task::orchestrate::events::WorkerPhase;
 
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1]);
         app.focused_worker = Some(1);
 
         // Worker in Setup phase — 'i' should not activate overlay
         app.panels.get_mut(&1).unwrap().status.phase = Some(WorkerPhase::Setup);
         let key_i = make_key(KeyCode::Char('i'), KeyModifiers::NONE);
-        app.handle_key(key_i);
+        app.handle_key(key_i, &resolver);
         assert!(!app.is_overlay_active());
 
         // Worker in Implement phase — 'i' should activate overlay
         app.panels.get_mut(&1).unwrap().status.phase = Some(WorkerPhase::Implement);
-        app.handle_key(key_i);
+        app.handle_key(key_i, &resolver);
         assert!(app.is_overlay_active());
     }
 
@@ -1221,25 +1297,27 @@ mod tests {
         use crate::commands::task::orchestrate::events::WorkerPhase;
 
         let mut app = make_app(3);
+        let resolver = make_resolver();
         // Worker 1 is idle (not activated), but in Implement phase
         app.refresh_active_worker_ids();
         app.focused_worker = Some(1);
         app.panels.get_mut(&1).unwrap().status.phase = Some(WorkerPhase::Implement);
 
         let key_i = make_key(KeyCode::Char('i'), KeyModifiers::NONE);
-        app.handle_key(key_i);
+        app.handle_key(key_i, &resolver);
         assert!(!app.is_overlay_active());
     }
 
     #[test]
     fn input_overlay_requires_focus() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1]);
         // No focus
         app.focused_worker = None;
 
         let key_i = make_key(KeyCode::Char('i'), KeyModifiers::NONE);
-        app.handle_key(key_i);
+        app.handle_key(key_i, &resolver);
         assert!(!app.is_overlay_active());
     }
 
@@ -1248,11 +1326,12 @@ mod tests {
     #[test]
     fn left_arrow_scrolls_home() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.focused_worker = Some(1);
         app.panels.get_mut(&1).unwrap().scroll_offset = 5;
 
         let left = make_key(KeyCode::Left, KeyModifiers::NONE);
-        app.handle_key(left);
+        app.handle_key(left, &resolver);
 
         // Left = scroll home (i32::MIN via apply_scroll)
         // For worker panel: scroll_offset = usize::MAX (oldest)
@@ -1262,11 +1341,12 @@ mod tests {
     #[test]
     fn right_arrow_scrolls_end() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.focused_worker = Some(1);
         app.panels.get_mut(&1).unwrap().scroll_offset = 100;
 
         let right = make_key(KeyCode::Right, KeyModifiers::NONE);
-        app.handle_key(right);
+        app.handle_key(right, &resolver);
 
         // Right = scroll end (i32::MAX via apply_scroll → offset 0 = follow tail)
         assert_eq!(app.panels[&1].scroll_offset, 0);
@@ -1277,10 +1357,11 @@ mod tests {
     #[test]
     fn enter_key_ignored_in_normal_state() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         assert_eq!(app.quit_state, QuitState::Normal);
 
         let enter = make_key(KeyCode::Enter, KeyModifiers::NONE);
-        let result = app.handle_key(enter);
+        let result = app.handle_key(enter, &resolver);
 
         assert_eq!(result, EventResult::Consumed);
         assert!(!app.graceful_shutdown);
@@ -1310,10 +1391,11 @@ mod tests {
     #[test]
     fn y_key_ignored_without_restart_pending() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         assert_eq!(app.restart_state, RestartState::None);
 
         let key_y = make_key(KeyCode::Char('y'), KeyModifiers::NONE);
-        app.handle_key(key_y);
+        app.handle_key(key_y, &resolver);
 
         assert_eq!(app.restart_state, RestartState::None);
     }
@@ -1321,10 +1403,11 @@ mod tests {
     #[test]
     fn n_key_ignored_without_restart_pending() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         assert_eq!(app.restart_state, RestartState::None);
 
         let key_n = make_key(KeyCode::Char('n'), KeyModifiers::NONE);
-        app.handle_key(key_n);
+        app.handle_key(key_n, &resolver);
 
         assert_eq!(app.restart_state, RestartState::None);
     }
@@ -1334,10 +1417,11 @@ mod tests {
     #[test]
     fn ctrl_p_opens_command_palette() {
         let mut app = make_app(2);
+        let resolver = make_resolver();
         assert!(!app.is_palette_open());
 
         let ctrl_p = make_key(KeyCode::Char('p'), KeyModifiers::CONTROL);
-        let result = app.handle_key(ctrl_p);
+        let result = app.handle_key(ctrl_p, &resolver);
 
         assert_eq!(result, EventResult::Consumed);
         assert!(app.is_palette_open());
@@ -1346,12 +1430,13 @@ mod tests {
     #[test]
     fn palette_open_absorbs_all_keys() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.open_command_palette();
         assert!(app.is_palette_open());
 
         // 'q' nie powinno triggerować quit gdy palette jest otwarta
         let key_q = make_key(KeyCode::Char('q'), KeyModifiers::NONE);
-        let result = app.handle_key(key_q);
+        let result = app.handle_key(key_q, &resolver);
 
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.quit_state, QuitState::Normal);
@@ -1362,6 +1447,7 @@ mod tests {
     #[test]
     fn t_key_three_state_toggle() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.sidebar_state.visible = true;
         app.sidebar_focused = true; // enable for this test
         // Initially visible + focused
@@ -1370,19 +1456,19 @@ mod tests {
 
         let key_t = make_key(KeyCode::Char('t'), KeyModifiers::NONE);
 
-        // Sidebar focused → hide + unfocus
-        app.handle_key(key_t);
+        // Sidebar focused → handle_sidebar_key → ToggleSidebar → hide + unfocus
+        app.handle_key(key_t, &resolver);
         assert!(!app.sidebar_state.visible);
         assert!(!app.sidebar_focused);
 
         // Hidden → show + focus
-        app.handle_key(key_t);
+        app.handle_key(key_t, &resolver);
         assert!(app.sidebar_state.visible);
         assert!(app.sidebar_focused);
 
         // Unfocus first, then 't' → focus (visible but not focused → focus)
         app.sidebar_focused = false;
-        app.handle_key(key_t);
+        app.handle_key(key_t, &resolver);
         assert!(app.sidebar_state.visible);
         assert!(app.sidebar_focused);
     }
@@ -1390,10 +1476,11 @@ mod tests {
     #[test]
     fn sidebar_toggle_cancels_quit_pending() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.quit_state = QuitState::Pending;
 
         let key_t = make_key(KeyCode::Char('t'), KeyModifiers::NONE);
-        app.handle_key(key_t);
+        app.handle_key(key_t, &resolver);
 
         // Quit state should be cancelled
         assert_eq!(app.quit_state, QuitState::Normal);
@@ -1402,10 +1489,11 @@ mod tests {
     #[test]
     fn sidebar_toggle_cancels_restart_pending() {
         let mut app = make_app(3);
+        let resolver = make_resolver();
         app.restart_state = RestartState::Pending { worker_id: 1 };
 
         let key_t = make_key(KeyCode::Char('t'), KeyModifiers::NONE);
-        app.handle_key(key_t);
+        app.handle_key(key_t, &resolver);
 
         // Restart state should be cancelled
         assert_eq!(app.restart_state, RestartState::None);
@@ -1416,6 +1504,7 @@ mod tests {
     #[test]
     fn sidebar_focused_up_down_navigates() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.sidebar_state.visible = true;
         app.sidebar_focused = true;
         assert!(app.sidebar_focused);
@@ -1425,48 +1514,50 @@ mod tests {
         let down = make_key(KeyCode::Down, KeyModifiers::NONE);
 
         // Should be consumed (not passed to worker panel scroll)
-        let result = app.handle_key(up);
+        let result = app.handle_key(up, &resolver);
         assert_eq!(result, EventResult::Consumed);
 
-        let result = app.handle_key(down);
+        let result = app.handle_key(down, &resolver);
         assert_eq!(result, EventResult::Consumed);
 
-        // j/k should also work
+        // j/k should also work (vim aliases — special case in _ arm)
         let k = make_key(KeyCode::Char('k'), KeyModifiers::NONE);
         let j = make_key(KeyCode::Char('j'), KeyModifiers::NONE);
 
-        let result = app.handle_key(k);
+        let result = app.handle_key(k, &resolver);
         assert_eq!(result, EventResult::Consumed);
 
-        let result = app.handle_key(j);
+        let result = app.handle_key(j, &resolver);
         assert_eq!(result, EventResult::Consumed);
     }
 
     #[test]
     fn sidebar_focused_space_toggles_expand() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.sidebar_state.visible = true;
         app.sidebar_focused = true;
         assert!(app.sidebar_focused);
 
         let space = make_key(KeyCode::Char(' '), KeyModifiers::NONE);
-        let result = app.handle_key(space);
+        let result = app.handle_key(space, &resolver);
         assert_eq!(result, EventResult::Consumed);
 
         let enter = make_key(KeyCode::Enter, KeyModifiers::NONE);
-        let result = app.handle_key(enter);
+        let result = app.handle_key(enter, &resolver);
         assert_eq!(result, EventResult::Consumed);
     }
 
     #[test]
     fn sidebar_focused_esc_unfocuses() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.sidebar_state.visible = true;
         app.sidebar_focused = true;
         assert!(app.sidebar_focused);
 
         let esc = make_key(KeyCode::Esc, KeyModifiers::NONE);
-        app.handle_key(esc);
+        app.handle_key(esc, &resolver);
 
         assert!(!app.sidebar_focused);
         // Sidebar still visible
@@ -1476,11 +1567,14 @@ mod tests {
     #[test]
     fn sidebar_focused_passthrough_quit() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
+        // Note: sidebar_state.visible is false here (default), so sidebar routing is skipped
+        // even with sidebar_focused = true; 'q' goes directly to main handler → Quit action
         app.sidebar_focused = true;
         assert!(app.sidebar_focused);
 
         let key_q = make_key(KeyCode::Char('q'), KeyModifiers::NONE);
-        let result = app.handle_key(key_q);
+        let result = app.handle_key(key_q, &resolver);
 
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.quit_state, QuitState::Pending);
@@ -1489,12 +1583,13 @@ mod tests {
     #[test]
     fn sidebar_unfocused_arrows_scroll_worker() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         activate_workers(&mut app, &[1]);
         app.focused_worker = Some(1);
         app.sidebar_focused = false; // explicitly unfocus sidebar
 
         let up = make_key(KeyCode::Up, KeyModifiers::NONE);
-        app.handle_key(up);
+        app.handle_key(up, &resolver);
 
         // Should scroll worker panel by scroll_step (default=3), not sidebar
         assert_eq!(app.panels[&1].scroll_offset, 3);
@@ -1503,6 +1598,7 @@ mod tests {
     #[test]
     fn sidebar_focused_resize_keys() {
         let mut app = make_app(1);
+        let resolver = make_resolver();
         app.sidebar_state.visible = true;
         app.sidebar_focused = true;
         assert!(app.sidebar_focused);
@@ -1510,12 +1606,12 @@ mod tests {
         let initial_width = app.sidebar_state.width();
 
         let plus = make_key(KeyCode::Char('+'), KeyModifiers::NONE);
-        let result = app.handle_key(plus);
+        let result = app.handle_key(plus, &resolver);
         assert_eq!(result, EventResult::Consumed);
         assert!(app.sidebar_state.width() >= initial_width);
 
         let minus = make_key(KeyCode::Char('-'), KeyModifiers::NONE);
-        let result = app.handle_key(minus);
+        let result = app.handle_key(minus, &resolver);
         assert_eq!(result, EventResult::Consumed);
     }
 
@@ -2537,5 +2633,50 @@ tasks:
         {
             assert_eq!(o.cursor_pos(), 3);
         }
+    }
+
+    // ── Custom keybinding tests ─────────────────────────────────────
+
+    /// Test: zmiana keybindingu 'quit' z 'q' na 'x' — 'x' wchodzi w quit_pending, 'q' jest ignorowane.
+    #[test]
+    fn custom_keybinding_quit_key_changed() {
+        use crate::tui::keybindings::{GlobalBindings, KeyCombo, KeybindingsConfig};
+
+        let custom_config = KeybindingsConfig {
+            global: GlobalBindings {
+                quit: KeyCombo::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                ..GlobalBindings::default()
+            },
+            ..KeybindingsConfig::default()
+        };
+        let custom_resolver = KeybindingResolver::from_user_config(custom_config);
+
+        let mut app = make_app(1);
+        assert_eq!(app.quit_state, QuitState::Normal);
+
+        // 'q' z custom resolverem → nie jest już quit → Ignored
+        let key_q = make_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        let result = app.handle_key(key_q, &custom_resolver);
+        assert_eq!(
+            result,
+            EventResult::Ignored,
+            "'q' nie powinno działać gdy quit = 'x'"
+        );
+        assert_eq!(app.quit_state, QuitState::Normal);
+
+        // 'x' z custom resolverem → quit → pending
+        let key_x = make_key(KeyCode::Char('x'), KeyModifiers::NONE);
+        let result = app.handle_key(key_x, &custom_resolver);
+        assert_eq!(
+            result,
+            EventResult::Consumed,
+            "'x' powinno wejść w quit_pending"
+        );
+        assert_eq!(app.quit_state, QuitState::Pending);
+
+        // Drugi 'x' → potwierdza quit
+        let result = app.handle_key(key_x, &custom_resolver);
+        assert_eq!(result, EventResult::Quit, "Drugi 'x' powinien zwrócić Quit");
+        assert!(app.graceful_shutdown);
     }
 }

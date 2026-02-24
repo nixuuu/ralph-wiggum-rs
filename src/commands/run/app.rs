@@ -17,6 +17,7 @@ use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::tui::app::AppState;
 use crate::tui::events::{AppEvent, EventResult};
+use crate::tui::keybindings::{KeyAction, KeybindingResolver, View};
 use crate::tui::responsive::Breakpoint;
 use crate::tui::responsive::LayoutAreas;
 use crate::tui::ring_buffer::OutputRingBuffer;
@@ -104,6 +105,9 @@ pub struct RunApp {
     /// Obszar pod kursorem myszy (hover, niezależny od focus).
     /// Aktualizowany na MouseMoved via hit-test; None gdy kursor poza panelami.
     pub(crate) hovered_area: Option<FocusArea>,
+    /// Resolver keybindingów — aktualizowany przez handle_event, używany przez keybinding_hints().
+    /// Przechowywany w struct żeby update_status() (wywoływane zewnętrznie) miało dostęp.
+    resolver: KeybindingResolver,
 }
 
 impl RunApp {
@@ -162,6 +166,7 @@ impl RunApp {
             sidebar_rect: None,
             output_rect: None,
             hovered_area: None,
+            resolver: KeybindingResolver::with_defaults(),
         }
     }
 
@@ -245,37 +250,63 @@ impl RunApp {
     }
 
     /// Keybinding hints dla status bar — zależne od focus i quit_pending.
-    fn keybinding_hints(&self) -> Vec<(&'static str, &'static str)> {
+    ///
+    /// Używa resolvera do pobrania aktualnych klawiszy (konfigurowalnych przez TOML).
+    fn keybinding_hints(&self) -> Vec<(String, String)> {
+        // Helper: formatuje klawisz dla podanej akcji z resolvera
+        let fmt = |action: KeyAction| -> String {
+            self.resolver
+                .key_for_action(action)
+                .map(|c| KeybindingResolver::format_key(&c))
+                .unwrap_or_else(|| "?".to_string())
+        };
+
         if self.quit_pending {
             // W trybie quit_pending pokazujemy specjalne podpowiedzi
-            vec![("q/Enter", "Confirm"), ("Esc", "Cancel")]
+            let quit_key = fmt(KeyAction::Quit);
+            let confirm_key = fmt(KeyAction::Confirm);
+            let cancel_key = fmt(KeyAction::Cancel);
+            vec![
+                (format!("{quit_key}/{confirm_key}"), "Confirm".to_string()),
+                (cancel_key, "Cancel".to_string()),
+            ]
         } else {
-            // Normalne podpowiedzi
-            let mut h = vec![("q", "Quit"), ("t", "Sidebar")];
+            // Normalne podpowiedzi z konfigurowanymi klawiszami
+            let scroll_key = fmt(KeyAction::ScrollUp);
+            let scroll_hint = format!("{}↓", scroll_key);
+            let mut h = vec![
+                (fmt(KeyAction::Quit), "Quit".to_string()),
+                (fmt(KeyAction::ToggleSidebar), "Sidebar".to_string()),
+            ];
             match self.focus {
-                FocusArea::Output => h.push(("↑↓", "Scroll")),
-                FocusArea::Sidebar => h.push(("↑↓", "Navigate")),
+                FocusArea::Output => h.push((scroll_hint, "Scroll".to_string())),
+                FocusArea::Sidebar => h.push((scroll_hint, "Navigate".to_string())),
             }
-            h.push(("Tab", "Focus"));
+            h.push((fmt(KeyAction::SwitchFocus), "Focus".to_string()));
             h
         }
     }
 
     /// Obsługa klawiszy sidebar (gdy focus=Sidebar).
-    fn handle_sidebar_key(&mut self, key: &KeyEvent) -> EventResult {
-        match key.code {
-            KeyCode::Up => {
+    ///
+    /// Używa View::Run żeby Enter → ToggleExpand (view-specific) miało pierwszeństwo
+    /// nad View::Global Enter → Confirm. Handle_global_key obsługuje Enter
+    /// gdy quit_pending (zwraca Quit), więc tutaj Enter trafia tylko gdy !quit_pending.
+    fn handle_sidebar_key(&mut self, key: &KeyEvent, resolver: &KeybindingResolver) -> EventResult {
+        match resolver.resolve(key, View::Run) {
+            Some(KeyAction::ScrollUp) => {
                 self.cancel_quit_pending();
                 self.sidebar.select_prev();
                 EventResult::Consumed
             }
-            KeyCode::Down => {
+            Some(KeyAction::ScrollDown) => {
                 self.cancel_quit_pending();
                 self.sidebar.select_next();
                 EventResult::Consumed
             }
-            KeyCode::Enter if !self.quit_pending => {
-                // Enter w sidebar tylko gdy nie jest quit_pending (wtedy Enter = confirm quit)
+            // ToggleExpand = Enter w View::Run (view-specific wygrywa nad global::Confirm).
+            // handle_global_key obsługuje Enter gdy quit_pending (zwraca Quit przed tym wywołaniem).
+            Some(KeyAction::ToggleExpand) => {
                 self.sidebar.toggle_expand();
                 EventResult::Consumed
             }
@@ -284,29 +315,31 @@ impl RunApp {
     }
 
     /// Obsługa klawiszy output (gdy focus=Output).
-    fn handle_output_key(&mut self, key: &KeyEvent) -> EventResult {
-        match key.code {
-            KeyCode::Up => {
+    ///
+    /// Używa View::Global (klawisze scroll nie mają view-specific bindingów).
+    fn handle_output_key(&mut self, key: &KeyEvent, resolver: &KeybindingResolver) -> EventResult {
+        match resolver.resolve(key, View::Global) {
+            Some(KeyAction::ScrollUp) => {
                 self.cancel_quit_pending();
                 self.output_view_state.scroll_up(self.scroll_step);
                 EventResult::Consumed
             }
-            KeyCode::Down => {
+            Some(KeyAction::ScrollDown) => {
                 self.cancel_quit_pending();
                 self.output_view_state.scroll_down(self.scroll_step);
                 EventResult::Consumed
             }
-            KeyCode::PageUp => {
+            Some(KeyAction::ScrollPageUp) => {
                 self.cancel_quit_pending();
                 self.output_view_state.scroll_up(self.scroll_step * 3);
                 EventResult::Consumed
             }
-            KeyCode::PageDown => {
+            Some(KeyAction::ScrollPageDown) => {
                 self.cancel_quit_pending();
                 self.output_view_state.scroll_down(self.scroll_step * 3);
                 EventResult::Consumed
             }
-            KeyCode::Home => {
+            Some(KeyAction::ScrollToTop) => {
                 self.cancel_quit_pending();
                 // Użyj cache'owanego rozmiaru output area z ostatniego draw()
                 let width = self.last_output_area.width;
@@ -315,7 +348,7 @@ impl RunApp {
                 self.output_view_state.scroll_home(total, height);
                 EventResult::Consumed
             }
-            KeyCode::End => {
+            Some(KeyAction::ScrollToBottom) => {
                 self.cancel_quit_pending();
                 self.output_view_state.scroll_end();
                 EventResult::Consumed
@@ -361,23 +394,26 @@ impl RunApp {
     }
 
     /// Obsługa klawiszy globalnych (niezależnych od focus).
-    fn handle_global_key(&mut self, key: &KeyEvent) -> EventResult {
-        match key.code {
-            // 'q' — quit confirmation flow (pierwszy q → pending, drugi q → Quit)
-            KeyCode::Char('q') => {
+    ///
+    /// Używa View::Global — tylko globalne bindingi, bez view-specific.
+    /// Enter (Confirm) jest obsługiwane tu tylko gdy quit_pending; w innym przypadku
+    /// zwraca Ignored i sterowanie przechodzi do handle_sidebar_key (View::Run → ToggleExpand).
+    fn handle_global_key(&mut self, key: &KeyEvent, resolver: &KeybindingResolver) -> EventResult {
+        match resolver.resolve(key, View::Global) {
+            // 'q' — quit confirmation flow (pierwszy → pending, drugi → Quit)
+            Some(KeyAction::Quit) => {
                 if self.quit_pending {
-                    // Drugi 'q' — potwierdź quit
                     EventResult::Quit
                 } else {
-                    // Pierwszy 'q' — wejdź w tryb quit_pending
                     self.quit_pending = true;
                     EventResult::Consumed
                 }
             }
-            // Enter — potwierdź quit gdy quit_pending
-            KeyCode::Enter if self.quit_pending => EventResult::Quit,
-            // Esc — anuluj quit_pending
-            KeyCode::Esc => {
+            // Enter — potwierdź quit gdy quit_pending (w View::Run Enter → ToggleExpand,
+            // więc tutaj używamy View::Global żeby zawsze przechwycić Confirm gdy pending)
+            Some(KeyAction::Confirm) if self.quit_pending => EventResult::Quit,
+            // Esc — anuluj quit_pending lub ignoruj
+            Some(KeyAction::Cancel) => {
                 if self.quit_pending {
                     self.quit_pending = false;
                     EventResult::Consumed
@@ -385,26 +421,26 @@ impl RunApp {
                     EventResult::Ignored
                 }
             }
-            // 't' — toggle sidebar visibility
-            KeyCode::Char('t') => {
+            // toggle sidebar visibility
+            Some(KeyAction::ToggleSidebar) => {
                 self.cancel_quit_pending();
                 self.sidebar.toggle_visible();
                 EventResult::Consumed
             }
-            // '[' / '-' — shrink sidebar
-            KeyCode::Char('[') | KeyCode::Char('-') => {
+            // shrink sidebar
+            Some(KeyAction::ShrinkSidebar) => {
                 self.cancel_quit_pending();
                 self.sidebar.shrink();
                 EventResult::Consumed
             }
-            // ']' / '+' / '=' — grow sidebar
-            KeyCode::Char(']') | KeyCode::Char('+') | KeyCode::Char('=') => {
+            // grow sidebar
+            Some(KeyAction::GrowSidebar) => {
                 self.cancel_quit_pending();
                 self.sidebar.grow();
                 EventResult::Consumed
             }
             // Tab — switch focus
-            KeyCode::Tab => {
+            Some(KeyAction::SwitchFocus) => {
                 self.cancel_quit_pending();
                 self.focus = match self.focus {
                     FocusArea::Output => FocusArea::Sidebar,
@@ -719,12 +755,14 @@ impl AppState for RunApp {
         frame.render_widget(status_bar, layout.status_bar);
     }
 
-    // TODO(11.4): zamienić hardcoded KeyCode checks poniżej na resolver.resolve()
     fn handle_event(
         &mut self,
         event: AppEvent,
-        _resolver: &crate::tui::KeybindingResolver,
+        resolver: &crate::tui::KeybindingResolver,
     ) -> EventResult {
+        // Cache resolver dla keybinding_hints() w update_status() wywoływanym zewnętrznie
+        self.resolver = resolver.clone();
+
         match event {
             AppEvent::Key(key) => {
                 // Jeśli jest splash screen — każdy klawisz go pomija, przejdź do Running
@@ -740,16 +778,16 @@ impl AppState for RunApp {
                     return EventResult::Shutdown;
                 }
 
-                // Globalne klawisze (t, [, ], Tab) — niezależne od focus
-                let global_result = self.handle_global_key(&key);
+                // Globalne akcje (quit flow, sidebar, focus) — niezależne od aktywnego panelu
+                let global_result = self.handle_global_key(&key, resolver);
                 if global_result != EventResult::Ignored {
                     return global_result;
                 }
 
                 // Routing do focus area
                 match self.focus {
-                    FocusArea::Output => self.handle_output_key(&key),
-                    FocusArea::Sidebar => self.handle_sidebar_key(&key),
+                    FocusArea::Output => self.handle_output_key(&key, resolver),
+                    FocusArea::Sidebar => self.handle_sidebar_key(&key, resolver),
                 }
             }
             AppEvent::Resize(w, _h) => {
@@ -3565,5 +3603,117 @@ tasks:
         assert_eq!(result, EventResult::Consumed);
         // Sidebar obsłużył scroll (nie output)
         assert_eq!(app.sidebar.selected_index, 0);
+    }
+
+    // ── Testy custom keybindingów (zadanie 11.4) ────────────────────
+
+    /// Test: zmiana keybindingu 'quit' z 'q' na 'x' — 'x' powinien teraz wchodzić
+    /// w quit_pending, a 'q' powinien być ignorowany.
+    #[test]
+    fn custom_keybinding_quit_key_changed() {
+        use crate::tui::keybindings::{GlobalBindings, KeyCombo, KeybindingsConfig};
+
+        // Resolver z 'x' jako klawiszem quit (zamiast domyślnego 'q')
+        let custom_config = KeybindingsConfig {
+            global: GlobalBindings {
+                quit: KeyCombo::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                ..GlobalBindings::default()
+            },
+            ..KeybindingsConfig::default()
+        };
+        let custom_resolver = KeybindingResolver::from_user_config(custom_config);
+
+        let mut app = default_run_app();
+        assert!(!app.quit_pending);
+
+        // 'q' z custom resolverem → nie jest już quit → Ignored
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('q'))), &custom_resolver);
+        assert_eq!(
+            result,
+            EventResult::Ignored,
+            "'q' nie powinno działać gdy quit = 'x'"
+        );
+        assert!(!app.quit_pending);
+
+        // 'x' z custom resolverem → quit → pending
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('x'))), &custom_resolver);
+        assert_eq!(
+            result,
+            EventResult::Consumed,
+            "'x' powinno wejść w quit_pending"
+        );
+        assert!(app.quit_pending);
+
+        // Ponowne 'x' → potwierdza quit
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Char('x'))), &custom_resolver);
+        assert_eq!(result, EventResult::Quit, "Drugi 'x' powinien zwrócić Quit");
+    }
+
+    /// Test: zmiana keybindingu 'switch_focus' z Tab na BackTab — BackTab switchuje focus.
+    #[test]
+    fn custom_keybinding_focus_switch_changed() {
+        use crate::tui::keybindings::{GlobalBindings, KeyCombo, KeybindingsConfig};
+
+        let custom_config = KeybindingsConfig {
+            global: GlobalBindings {
+                switch_focus: KeyCombo::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+                ..GlobalBindings::default()
+            },
+            ..KeybindingsConfig::default()
+        };
+        let custom_resolver = KeybindingResolver::from_user_config(custom_config);
+
+        let mut app = default_run_app();
+        assert_eq!(app.focus, FocusArea::Output);
+
+        // Tab z custom resolverem → nie jest już switch_focus → Ignored
+        let result = app.handle_event(AppEvent::Key(key(KeyCode::Tab)), &custom_resolver);
+        assert_eq!(
+            result,
+            EventResult::Ignored,
+            "Tab nie powinno działać gdy switch_focus = Shift+Tab"
+        );
+        assert_eq!(app.focus, FocusArea::Output);
+
+        // Shift+Tab z custom resolverem → switch focus
+        let result = app.handle_event(
+            AppEvent::Key(key_with_mod(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            &custom_resolver,
+        );
+        assert_eq!(
+            result,
+            EventResult::Consumed,
+            "Shift+Tab powinno przełączyć focus"
+        );
+        assert_eq!(app.focus, FocusArea::Sidebar);
+    }
+
+    /// Test: keybinding_hints pokazuje aktualny klawisz z resolvera.
+    #[test]
+    fn custom_keybinding_hints_reflect_resolver() {
+        use crate::tui::keybindings::{GlobalBindings, KeyCombo, KeybindingsConfig};
+
+        let custom_config = KeybindingsConfig {
+            global: GlobalBindings {
+                quit: KeyCombo::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                ..GlobalBindings::default()
+            },
+            ..KeybindingsConfig::default()
+        };
+        let custom_resolver = KeybindingResolver::from_user_config(custom_config);
+
+        let mut app = default_run_app();
+        // Uruchom handle_event aby zaktualizować self.resolver (Tick nie przetwarza klawiszy)
+        app.handle_event(AppEvent::Tick, &custom_resolver);
+
+        let hints = app.keybinding_hints();
+        // Hint dla Quit powinien pokazywać 'x' (custom), nie 'q'
+        let quit_hint = hints.iter().find(|(_, d)| d == "Quit");
+        assert!(quit_hint.is_some(), "Powinien istnieć hint Quit");
+        assert_eq!(
+            quit_hint.unwrap().0,
+            "x",
+            "Hint Quit powinien pokazywać 'x' (custom keybinding)"
+        );
     }
 }

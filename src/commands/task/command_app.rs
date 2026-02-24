@@ -477,7 +477,9 @@ impl AppState for TaskCommandApp {
         frame.render_widget(Paragraph::new(status_line), chunks[3]);
     }
 
-    // TODO(11.4): zamienić hardcoded KeyCode checks poniżej na resolver.resolve()
+    // Note: TaskCommandApp obsługuje task add/edit/prd/plan/continue — uproszczone komendy
+    // bez pełnej nawigacji. Resolver przyjmowany dla zgodności z AppState trait,
+    // ale key routing używa raw KeyCode (poza scope 11.4 — dotyczy RunApp/OrchestrateApp/TaskExplorerApp).
     fn handle_event(
         &mut self,
         event: AppEvent,

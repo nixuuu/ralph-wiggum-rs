@@ -65,7 +65,6 @@ impl Orchestrator {
             }
         }
 
-        // TODO(11.4): zamienić hardcoded KeyCode checks w OrchestrateApp na resolver.resolve()
         let result = ctx.tui.app.handle_event(event, &ctx.tui.resolver);
 
         match result {

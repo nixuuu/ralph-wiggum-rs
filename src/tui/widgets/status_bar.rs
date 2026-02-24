@@ -37,9 +37,10 @@ pub struct StatusBarData {
     pub elapsed_secs: f64,
     /// Opcjonalne dane progress gauge (done/total + ETA)
     pub progress: Option<ProgressData>,
-    /// Keybinding hints jako pary (klawisz, opis)
-    /// Np. vec![("q", "Quit"), ("r", "Restart")]
-    pub hints: Vec<(&'static str, &'static str)>,
+    /// Keybinding hints jako pary (klawisz, opis).
+    /// Dynamiczne stringi pozwalają na wyświetlanie aktualnych keybindingów z resolvera.
+    /// Np. vec![("q".to_string(), "Quit".to_string())]
+    pub hints: Vec<(String, String)>,
 }
 
 impl Default for StatusBarData {
@@ -103,7 +104,7 @@ impl StatusBarData {
                 if i > 0 {
                     spans.push(Span::raw(" "));
                 }
-                spans.push(Span::styled(*key, theme.muted_style()));
+                spans.push(Span::styled(key.clone(), theme.muted_style()));
                 spans.push(Span::raw(format!(" {}", desc)));
             }
         }
@@ -164,7 +165,7 @@ impl StatusBarData {
 ///     cost_usd: 0.4231,
 ///     elapsed_secs: 42.7,
 ///     progress: None,
-///     hints: vec![("q", "Quit"), ("r", "Restart")],
+///     hints: vec![("q".to_string(), "Quit".to_string()), ("r".to_string(), "Restart".to_string())],
 /// };
 ///
 /// let widget = StatusBar::new(data, &DEFAULT_THEME, false);
@@ -280,7 +281,10 @@ mod tests {
             output_tokens: 3000,
             cost_usd: 0.15,
             elapsed_secs: 12.3,
-            hints: vec![("q", "Quit"), ("r", "Restart")],
+            hints: vec![
+                ("q".to_string(), "Quit".to_string()),
+                ("r".to_string(), "Restart".to_string()),
+            ],
             ..Default::default()
         };
         let buffer = render_status_bar(data, 80, 1);
@@ -404,7 +408,10 @@ mod tests {
                 total: 12,
                 eta_text: Some("~1h 15m".to_string()),
             }),
-            hints: vec![("q", "Quit"), ("r", "Restart")],
+            hints: vec![
+                ("q".to_string(), "Quit".to_string()),
+                ("r".to_string(), "Restart".to_string()),
+            ],
         };
         let buffer = render_status_bar(data, 100, 2);
         insta::assert_snapshot!(snap(&buffer), @"
@@ -486,7 +493,7 @@ mod tests {
             cost_usd: 0.05,
             elapsed_secs: 10.0,
             progress: None,
-            hints: vec![("q", "Quit")],
+            hints: vec![("q".to_string(), "Quit".to_string())],
         };
         let d2 = StatusBarData {
             input_tokens: 1000,
@@ -494,7 +501,7 @@ mod tests {
             cost_usd: 0.05,
             elapsed_secs: 10.0,
             progress: None,
-            hints: vec![("q", "Quit")],
+            hints: vec![("q".to_string(), "Quit".to_string())],
         };
         let d3 = StatusBarData {
             input_tokens: 2000,
@@ -502,7 +509,7 @@ mod tests {
             cost_usd: 0.05,
             elapsed_secs: 10.0,
             progress: None,
-            hints: vec![("q", "Quit")],
+            hints: vec![("q".to_string(), "Quit".to_string())],
         };
         assert_eq!(d1, d2);
         assert_ne!(d1, d3);

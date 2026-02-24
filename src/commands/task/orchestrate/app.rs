@@ -26,7 +26,7 @@ use crate::commands::task::orchestrate::worker_status::{WorkerState, WorkerStatu
 use crate::shared::tasks::TasksFile;
 use crate::tui::app::AppState;
 use crate::tui::events::{AppEvent, EventResult};
-use crate::tui::keybindings::{KeyAction, KeybindingResolver};
+use crate::tui::keybindings::KeybindingResolver;
 use crate::tui::ring_buffer::OutputRingBuffer;
 use crate::tui::widgets::{
     CommandPaletteState, CommandPaletteWidget, TaskSidebar, TaskSidebarState, TextInputOverlay,
@@ -636,19 +636,14 @@ impl AppState for OrchestrateApp {
             );
         }
 
-        // Render global status bar — użyj resolvera do wyświetlenia konfigurowalnego keybindingu
-        let palette_key = self
-            .resolver
-            .key_for_action(KeyAction::CommandPalette)
-            .map(|combo| KeybindingResolver::format_key(&combo))
-            .unwrap_or_else(|| "Ctrl+p".to_string());
+        // Render global status bar — resolver formatuje keybindingi dynamicznie
         let status_bar = render_global_bar(
             &self.orchestrator_status,
             self.focused_worker,
             self.show_task_preview,
             self.sidebar_focused && self.sidebar_state.visible,
             self.show_idle,
-            &palette_key,
+            &self.resolver,
         );
         frame.render_widget(status_bar, vertical[1]);
 
@@ -674,14 +669,16 @@ impl AppState for OrchestrateApp {
         }
     }
 
-    // TODO(11.4): zamienić hardcoded KeyCode checks w handle_key() na resolver.resolve()
     fn handle_event(
         &mut self,
         event: AppEvent,
-        _resolver: &crate::tui::KeybindingResolver,
+        resolver: &crate::tui::KeybindingResolver,
     ) -> EventResult {
+        // Cache resolver for draw() (keybinding hints depend on current configuration)
+        self.resolver = resolver.clone();
+
         match event {
-            AppEvent::Key(key) => self.handle_key(key),
+            AppEvent::Key(key) => self.handle_key(key, resolver),
             AppEvent::Resize(_, _) => EventResult::Consumed,
             AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
             AppEvent::Tick => {

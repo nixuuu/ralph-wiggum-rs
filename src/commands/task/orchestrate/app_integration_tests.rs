@@ -15,7 +15,7 @@ mod tests {
 
     use crate::commands::task::orchestrate::app::{OrchestrateApp, QuitState, RestartState};
     use crate::commands::task::orchestrate::worker_status::WorkerState;
-    use crate::tui::test_helpers::{TestApp, TestStep, make_key};
+    use crate::tui::test_helpers::{TestApp, TestStep, make_key, make_key_shift};
 
     /// Helper: tworzy KeyEvent z modyfikatorami (dla testów wymagających Ctrl/Shift/Alt).
     fn make_key_mod(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -94,16 +94,16 @@ mod tests {
             // Initial state: no focus
             TestStep::AssertState(Box::new(|s| s.focused_worker.is_none())),
             // BackTab → focus worker 3 (last)
-            TestStep::KeyPress(make_key(KeyCode::BackTab)),
+            TestStep::KeyPress(make_key_shift(KeyCode::BackTab)),
             TestStep::AssertState(Box::new(|s| s.focused_worker == Some(3))),
             // BackTab → focus worker 2
-            TestStep::KeyPress(make_key(KeyCode::BackTab)),
+            TestStep::KeyPress(make_key_shift(KeyCode::BackTab)),
             TestStep::AssertState(Box::new(|s| s.focused_worker == Some(2))),
             // BackTab → focus worker 1
-            TestStep::KeyPress(make_key(KeyCode::BackTab)),
+            TestStep::KeyPress(make_key_shift(KeyCode::BackTab)),
             TestStep::AssertState(Box::new(|s| s.focused_worker == Some(1))),
             // BackTab → wrap around to worker 3
-            TestStep::KeyPress(make_key(KeyCode::BackTab)),
+            TestStep::KeyPress(make_key_shift(KeyCode::BackTab)),
             TestStep::AssertState(Box::new(|s| s.focused_worker == Some(3))),
         ]);
     }
@@ -181,7 +181,7 @@ mod tests {
             // Initial state: no restart
             TestStep::AssertState(Box::new(|s| s.restart_state == RestartState::None)),
             // Press 'R' → restart pending for worker 2
-            TestStep::KeyPress(make_key(KeyCode::Char('R'))),
+            TestStep::KeyPress(make_key_shift(KeyCode::Char('R'))),
             TestStep::AssertState(Box::new(|s| {
                 s.restart_state == RestartState::Pending { worker_id: 2 }
             })),
@@ -208,7 +208,7 @@ mod tests {
 
         app.run_steps(vec![
             // Press 'R' → restart pending
-            TestStep::KeyPress(make_key(KeyCode::Char('R'))),
+            TestStep::KeyPress(make_key_shift(KeyCode::Char('R'))),
             TestStep::AssertState(Box::new(|s| {
                 s.restart_state == RestartState::Pending { worker_id: 1 }
             })),
@@ -233,7 +233,7 @@ mod tests {
 
         app.run_steps(vec![
             // Press 'R' → restart pending
-            TestStep::KeyPress(make_key(KeyCode::Char('R'))),
+            TestStep::KeyPress(make_key_shift(KeyCode::Char('R'))),
             TestStep::AssertState(Box::new(|s| {
                 s.restart_state == RestartState::Pending { worker_id: 3 }
             })),
@@ -440,7 +440,7 @@ mod tests {
 
         app.run_steps(vec![
             // Press 'R' → restart pending
-            TestStep::KeyPress(make_key(KeyCode::Char('R'))),
+            TestStep::KeyPress(make_key_shift(KeyCode::Char('R'))),
             TestStep::AssertState(Box::new(|s| {
                 s.restart_state == RestartState::Pending { worker_id: 1 }
             })),
@@ -472,7 +472,7 @@ mod tests {
             TestStep::KeyPress(make_key(KeyCode::Char('q'))),
             TestStep::AssertState(Box::new(|s| s.quit_state == QuitState::Pending)),
             // Press 'R' → quit cancelled, restart pending
-            TestStep::KeyPress(make_key(KeyCode::Char('R'))),
+            TestStep::KeyPress(make_key_shift(KeyCode::Char('R'))),
             TestStep::AssertState(Box::new(|s| s.quit_state == QuitState::Normal)),
             TestStep::AssertState(Box::new(|s| {
                 s.restart_state == RestartState::Pending { worker_id: 2 }
@@ -547,7 +547,7 @@ mod tests {
             TestStep::KeyPress(make_key(KeyCode::Char('3'))),
             TestStep::AssertState(Box::new(|s| s.focused_worker == Some(3))),
             // Initiate restart
-            TestStep::KeyPress(make_key(KeyCode::Char('R'))),
+            TestStep::KeyPress(make_key_shift(KeyCode::Char('R'))),
             TestStep::AssertState(Box::new(|s| {
                 s.restart_state == RestartState::Pending { worker_id: 3 }
             })),

@@ -19,6 +19,7 @@ use crate::commands::task::orchestrate::shutdown_types::{OrchestratorStatus, Shu
 use crate::commands::task::orchestrate::worker_panel::WorkerPanelWidget;
 use crate::commands::task::orchestrate::worker_status::WorkerState;
 use crate::shared::tasks::TasksFile;
+use crate::tui::keybindings::{KeyAction, KeybindingResolver};
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::{TextInputOverlay, render_task_preview};
 
@@ -228,7 +229,7 @@ pub(super) fn render_global_bar<'a>(
     preview_active: bool,
     sidebar_focused: bool,
     show_idle: bool,
-    palette_key: &str,
+    resolver: &KeybindingResolver,
 ) -> Paragraph<'a> {
     let theme = &DEFAULT_THEME;
     let total = status.scheduler.total;
@@ -296,32 +297,69 @@ pub(super) fn render_global_bar<'a>(
         Span::raw("    "),
     ];
 
-    // Keybinding hints
+    // Keybinding hints — dynamiczne skróty z resolvera (konfigurowalny przez .ralph.toml)
+    let fmt = |action: KeyAction| -> String {
+        resolver
+            .key_for_action(action)
+            .map(|c| KeybindingResolver::format_key(&c))
+            .unwrap_or_else(|| "?".to_string())
+    };
     if status.restart_pending.is_some() {
         queue_line_spans.push(Span::styled(
-            "y=confirm n/Esc=cancel",
+            format!(
+                "{}=confirm {}/{}=cancel",
+                fmt(KeyAction::ConfirmRestart),
+                fmt(KeyAction::CancelRestart),
+                fmt(KeyAction::Cancel),
+            ),
             theme.warning_style().add_modifier(Modifier::BOLD),
         ));
     } else if status.quit_pending {
         queue_line_spans.push(Span::styled(
-            "Press q/Enter to confirm, Esc to cancel",
+            format!(
+                "Press {}/{} to confirm, {} to cancel",
+                fmt(KeyAction::Quit),
+                fmt(KeyAction::Confirm),
+                fmt(KeyAction::Cancel),
+            ),
             theme.warning_style().add_modifier(Modifier::BOLD),
         ));
     } else if preview_active {
-        queue_line_spans.push(Span::styled("p/Esc=close ↑↓=scroll", theme.muted_style()));
+        queue_line_spans.push(Span::styled(
+            format!(
+                "{}/{}=close ↑↓=scroll",
+                fmt(KeyAction::TogglePreview),
+                fmt(KeyAction::Cancel),
+            ),
+            theme.muted_style(),
+        ));
     } else if sidebar_focused {
         queue_line_spans.push(Span::styled(
-            "Esc ↑↓ Space=expand +/-=resize t=close",
+            format!(
+                "{} ↑↓ Space=expand +/-=resize {}=close",
+                fmt(KeyAction::Cancel),
+                fmt(KeyAction::ToggleSidebar),
+            ),
             theme.muted_style(),
         ));
     } else {
         let idle_hint = if show_idle {
-            "h=hide-idle"
+            format!("{}=hide-idle", fmt(KeyAction::ToggleIdleWorkers))
         } else {
-            "h=show-idle"
+            format!("{}=show-idle", fmt(KeyAction::ToggleIdleWorkers))
         };
         queue_line_spans.push(Span::styled(
-            format!("q Tab ↑↓ Esc p=tasks t=sidebar {idle_hint} r=reload R=restart {palette_key}=palette"),
+            format!(
+                "{} {} ↑↓ {} {}=tasks {}=sidebar {} {}=reload {}=restart",
+                fmt(KeyAction::Quit),
+                fmt(KeyAction::FocusNext),
+                fmt(KeyAction::Cancel),
+                fmt(KeyAction::TogglePreview),
+                fmt(KeyAction::ToggleSidebar),
+                idle_hint,
+                fmt(KeyAction::Reload),
+                fmt(KeyAction::Restart),
+            ),
             theme.muted_style(),
         ));
     }

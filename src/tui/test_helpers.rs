@@ -44,6 +44,17 @@ pub fn make_left_click(col: u16, row: u16) -> MouseEvent {
     }
 }
 
+/// Tworzy KeyEvent z KeyCode i modyfikatorem SHIFT.
+/// Używane dla klawiszy wymagających Shift (np. 'R' = Shift+r, BackTab = Shift+Tab).
+pub fn make_key_shift(code: KeyCode) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::SHIFT,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
 // ── TestStep ─────────────────────────────────────────────────────────
 
 /// Krok w multi-step test sequence.
