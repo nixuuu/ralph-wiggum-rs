@@ -1014,6 +1014,92 @@ mod tests {
         );
     }
 
+    // ─── Testy resize z wymiarami z opisu zadania ─────────────────────────────
+
+    /// PNG 3000x2000 → resize → sprawdź wymiary (1568x1045).
+    ///
+    /// Obliczenia: w >= h, więc nowa_w = 1568, nowa_h = round(2000 * 1568 / 3000) = 1045.
+    #[test]
+    fn test_resize_3000x2000_to_1568x1045() {
+        let data = make_png(3000, 2000);
+        let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
+
+        // Obraz powinien zostać przeskalowany (nie są to oryginalne bajty)
+        assert_ne!(result, data, "Obraz 3000x2000 powinien być przeskalowany");
+
+        let resized = image::load_from_memory(&result).unwrap();
+        assert_eq!(resized.width(), 1568, "Szerokość powinna wynosić 1568");
+        assert_eq!(resized.height(), 1045, "Wysokość powinna wynosić 1045");
+    }
+
+    /// PNG 800x600 → resize → powinien zwrócić oryginalne dane (oba wymiary < 1568).
+    #[test]
+    fn test_resize_800x600_unchanged() {
+        let data = make_png(800, 600);
+        let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
+
+        assert_eq!(
+            result, data,
+            "Obraz 800x600 nie powinien być modyfikowany — oba wymiary poniżej limitu"
+        );
+    }
+
+    /// PNG 2000x1000 (landscape) → sprawdź aspect ratio po resize.
+    ///
+    /// Oczekiwane wymiary: 1568 x 784. Stosunek 2:1 powinien być zachowany.
+    #[test]
+    fn test_resize_landscape_2000x1000_aspect_ratio() {
+        let orig_w = 2000u32;
+        let orig_h = 1000u32;
+        let data = make_png(orig_w, orig_h);
+        let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
+
+        let resized = image::load_from_memory(&result).unwrap();
+        let new_w = resized.width();
+        let new_h = resized.height();
+
+        // Dłuższy bok (szerokość) ograniczony do MAX_DIMENSION
+        assert_eq!(new_w, MAX_DIMENSION, "Szerokość powinna wynosić {MAX_DIMENSION}");
+        assert!(new_h <= MAX_DIMENSION, "Wysokość nie może przekraczać {MAX_DIMENSION}");
+
+        // Aspect ratio: 2000/1000 = 2.0 → 1568/784 = 2.0
+        let orig_ratio = orig_w as f64 / orig_h as f64;
+        let new_ratio = new_w as f64 / new_h as f64;
+        let tolerance = 0.01; // <1% odchyłka dopuszczalna przy zaokrąglaniu
+        assert!(
+            (orig_ratio - new_ratio).abs() < tolerance,
+            "Aspect ratio powinien być zachowany: oryginalne {orig_ratio:.4}, po resize {new_ratio:.4}"
+        );
+    }
+
+    /// PNG 1000x2000 (portrait) → sprawdź aspect ratio po resize.
+    ///
+    /// Oczekiwane wymiary: 784 x 1568. Stosunek 1:2 powinien być zachowany.
+    #[test]
+    fn test_resize_portrait_1000x2000_aspect_ratio() {
+        let orig_w = 1000u32;
+        let orig_h = 2000u32;
+        let data = make_png(orig_w, orig_h);
+        let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
+
+        let resized = image::load_from_memory(&result).unwrap();
+        let new_w = resized.width();
+        let new_h = resized.height();
+
+        // Dłuższy bok (wysokość) ograniczony do MAX_DIMENSION
+        assert_eq!(new_h, MAX_DIMENSION, "Wysokość powinna wynosić {MAX_DIMENSION}");
+        assert!(new_w <= MAX_DIMENSION, "Szerokość nie może przekraczać {MAX_DIMENSION}");
+
+        // Aspect ratio: 1000/2000 = 0.5 → 784/1568 = 0.5
+        let orig_ratio = orig_w as f64 / orig_h as f64;
+        let new_ratio = new_w as f64 / new_h as f64;
+        let tolerance = 0.01; // <1% odchyłka dopuszczalna przy zaokrąglaniu
+        assert!(
+            (orig_ratio - new_ratio).abs() < tolerance,
+            "Aspect ratio powinien być zachowany: oryginalne {orig_ratio:.4}, po resize {new_ratio:.4}"
+        );
+    }
+
     #[test]
     fn test_media_type_to_image_format() {
         // Sprawdź konwersje MediaType → image::ImageFormat
