@@ -58,6 +58,10 @@ pub struct SharedTaskArgs {
     /// Claude model to use
     #[arg(short, long)]
     pub model: Option<String>,
+
+    /// Path to image file (can be specified multiple times)
+    #[arg(short = 'i', long = "image")]
+    pub images: Vec<PathBuf>,
 }
 
 pub type AddArgs = SharedTaskArgs;
@@ -360,6 +364,95 @@ mod tests {
             assert!(args.file.is_some());
             assert_eq!(args.prompt.as_deref(), Some("Analyze"));
             assert_eq!(args.model.as_deref(), Some("claude-opus-4-6"));
+        } else {
+            panic!("Expected Plan command");
+        }
+    }
+
+    #[test]
+    fn test_plan_with_single_image() {
+        let cli = TestCli::parse_from(["test", "plan", "--image", "img1.png"]);
+        if let super::TaskCommands::Plan(args) = cli.command {
+            assert_eq!(args.images.len(), 1);
+            assert_eq!(args.images[0].to_str().unwrap(), "img1.png");
+        } else {
+            panic!("Expected Plan command");
+        }
+    }
+
+    #[test]
+    fn test_plan_with_multiple_images() {
+        let cli = TestCli::parse_from([
+            "test", "plan", "--image", "img1.png", "--image", "img2.png", "--image", "img3.jpg",
+        ]);
+        if let super::TaskCommands::Plan(args) = cli.command {
+            assert_eq!(args.images.len(), 3);
+            assert_eq!(args.images[0].to_str().unwrap(), "img1.png");
+            assert_eq!(args.images[1].to_str().unwrap(), "img2.png");
+            assert_eq!(args.images[2].to_str().unwrap(), "img3.jpg");
+        } else {
+            panic!("Expected Plan command");
+        }
+    }
+
+    #[test]
+    fn test_plan_without_images() {
+        let cli = TestCli::parse_from(["test", "plan", "--prompt", "Plan it"]);
+        if let super::TaskCommands::Plan(args) = cli.command {
+            assert!(args.images.is_empty());
+        } else {
+            panic!("Expected Plan command");
+        }
+    }
+
+    #[test]
+    fn test_add_with_single_image() {
+        let cli = TestCli::parse_from(["test", "add", "--image", "screenshot.png"]);
+        if let super::TaskCommands::Add(args) = cli.command {
+            assert_eq!(args.images.len(), 1);
+            assert_eq!(args.images[0].to_str().unwrap(), "screenshot.png");
+        } else {
+            panic!("Expected Add command");
+        }
+    }
+
+    #[test]
+    fn test_add_with_multiple_images() {
+        let cli = TestCli::parse_from([
+            "test",
+            "add",
+            "--image",
+            "before.png",
+            "--image",
+            "after.png",
+        ]);
+        if let super::TaskCommands::Add(args) = cli.command {
+            assert_eq!(args.images.len(), 2);
+            assert_eq!(args.images[0].to_str().unwrap(), "before.png");
+            assert_eq!(args.images[1].to_str().unwrap(), "after.png");
+        } else {
+            panic!("Expected Add command");
+        }
+    }
+
+    #[test]
+    fn test_edit_with_image() {
+        let cli = TestCli::parse_from(["test", "edit", "--image", "diagram.png"]);
+        if let super::TaskCommands::Edit(args) = cli.command {
+            assert_eq!(args.images.len(), 1);
+            assert_eq!(args.images[0].to_str().unwrap(), "diagram.png");
+        } else {
+            panic!("Expected Edit command");
+        }
+    }
+
+    #[test]
+    fn test_plan_short_image_flag() {
+        let cli = TestCli::parse_from(["test", "plan", "-i", "img1.png", "-i", "img2.png"]);
+        if let super::TaskCommands::Plan(args) = cli.command {
+            assert_eq!(args.images.len(), 2);
+            assert_eq!(args.images[0].to_str().unwrap(), "img1.png");
+            assert_eq!(args.images[1].to_str().unwrap(), "img2.png");
         } else {
             panic!("Expected Plan command");
         }
