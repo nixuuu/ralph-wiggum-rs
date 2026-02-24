@@ -459,6 +459,32 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_image_with_prompt_and_file() {
+        let cli = TestCli::parse_from([
+            "test",
+            "plan",
+            "--image",
+            "diagram.png",
+            "--image",
+            "schema.png",
+            "--prompt",
+            "Analyze design",
+            "--file",
+            "spec.md",
+        ]);
+        if let super::TaskCommands::Plan(args) = cli.command {
+            assert_eq!(args.images.len(), 2);
+            assert_eq!(args.images[0].to_str().unwrap(), "diagram.png");
+            assert_eq!(args.images[1].to_str().unwrap(), "schema.png");
+            assert_eq!(args.prompt.as_deref(), Some("Analyze design"));
+            assert!(args.file.is_some());
+            assert_eq!(args.file.unwrap().to_str().unwrap(), "spec.md");
+        } else {
+            panic!("Expected Plan command");
+        }
+    }
+
+    #[test]
     fn test_orchestrate_review_model_flag() {
         let cli = TestCli::parse_from(["test", "orchestrate", "--review-model", "claude-opus-4-6"]);
         if let super::TaskCommands::Orchestrate(args) = cli.command {
