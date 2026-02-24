@@ -2,7 +2,7 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
 use crate::commands::standalone_text_input::standalone_text_input;
-use crate::shared::attachments::Attachment;
+use crate::shared::attachments::{Attachment, MAX_IMAGES, load_attachment};
 use crate::shared::error::{RalphError, Result};
 use crossterm::style::Stylize;
 
@@ -94,6 +94,51 @@ pub fn resolve_input(
     Err(RalphError::TaskSetup(
         "No input provided. Use --file <path>, --prompt <text>, or pipe via stdin.".into(),
     ))
+}
+
+/// Rozszerza `resolve_input()` o obsługę flag `--image`.
+///
+/// Łączy tekst promptu (z pliku / flagi / stdin / TUI) z listą załadowanych obrazów.
+/// Każdy obraz jest walidowany i ładowany przez [`load_attachment`].
+///
+/// # Argumenty
+/// * `file` - Opcjonalna ścieżka do pliku z tekstem promptu
+/// * `prompt` - Opcjonalny tekst promptu
+/// * `context_hint` - Opcjonalny placeholder dla trybu interaktywnego
+/// * `images` - Lista ścieżek do obrazów przekazanych przez `--image`
+///
+/// # Błędy
+/// - Przekroczenie `MAX_IMAGES` daje czytelny błąd z aktualnym limitem.
+/// - Każdy nieistniejący lub nieprawidłowy obraz przerywa przetwarzanie (fail-fast).
+/// - Propaguje błędy z `resolve_input()` bez zmian.
+// TODO: remove when integrated into task commands using --image flag
+#[allow(dead_code)]
+pub fn resolve_input_with_attachments(
+    file: Option<&PathBuf>,
+    prompt: Option<&str>,
+    context_hint: Option<&str>,
+    images: &[PathBuf],
+) -> Result<ResolvedInput> {
+    // Krok 1: Sprawdź limit obrazów — przed resolve_input(), by nie angażować
+    // użytkownika interaktywnymi TUI tylko po to, by dostał błąd limitu.
+    if images.len() > MAX_IMAGES {
+        return Err(RalphError::TaskSetup(format!(
+            "Przekroczono limit obrazów: podano {}, maksimum to {}.",
+            images.len(),
+            MAX_IMAGES
+        )));
+    }
+
+    // Krok 2: Resolvuj tekst promptu (file > prompt > stdin > TUI)
+    let text = resolve_input(file, prompt, context_hint)?;
+
+    // Krok 3: Załaduj każdy obraz — fail-fast przy pierwszym błędzie
+    let attachments: Vec<Attachment> = images
+        .iter()
+        .map(|path| load_attachment(path))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(ResolvedInput { text, attachments })
 }
 
 /// Echoes user's submitted text after text_input viewport collapses.
@@ -360,5 +405,180 @@ mod tests {
                 "Expected error when stdin is not terminal and no input provided"
             );
         }
+    }
+
+    // ── Testy resolve_input_with_attachments ────────────────────────────────
+
+    /// Tworzy prawidłowy plik PNG 1x1 w podanym katalogu, zwraca ścieżkę.
+    ///
+    /// Używa crate `image` do wygenerowania poprawnego obrazu (z prawidłowym CRC).
+    fn write_temp_png(dir: &std::path::Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let img = image::DynamicImage::new_rgb8(1, 1);
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&path, &buf).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_resolve_input_with_attachments_no_images() {
+        // Brak obrazów → ResolvedInput z tekstem i pustą listą załączników
+        let result = resolve_input_with_attachments(None, Some("Hello"), None, &[]);
+        assert!(result.is_ok());
+        let ri = result.unwrap();
+        assert_eq!(ri.text, "Hello");
+        assert!(!ri.has_attachments());
+        assert_eq!(ri.attachment_count(), 0);
+    }
+
+    #[test]
+    fn test_resolve_input_with_attachments_valid_image() {
+        let dir = std::env::temp_dir().join("ralph_test_resolve_attach_valid");
+        let _ = std::fs::create_dir_all(&dir);
+        let img_path = write_temp_png(&dir, "test.png");
+
+        let result = resolve_input_with_attachments(None, Some("Opis obrazu"), None, &[img_path]);
+
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
+        let ri = result.unwrap();
+        assert_eq!(ri.text, "Opis obrazu");
+        assert!(ri.has_attachments());
+        assert_eq!(ri.attachment_count(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_input_with_attachments_multiple_images() {
+        let dir = std::env::temp_dir().join("ralph_test_resolve_attach_multi");
+        let _ = std::fs::create_dir_all(&dir);
+        let paths: Vec<PathBuf> = (0..3)
+            .map(|i| write_temp_png(&dir, &format!("img{i}.png")))
+            .collect();
+
+        let result = resolve_input_with_attachments(None, Some("Trzy obrazy"), None, &paths);
+
+        assert!(result.is_ok());
+        let ri = result.unwrap();
+        assert_eq!(ri.attachment_count(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_input_with_attachments_exceeds_limit() {
+        // MAX_IMAGES + 1 ścieżek → błąd z czytelnym komunikatem,
+        // zwracany PRZED wywołaniem resolve_input() (fail-fast, bez TUI).
+        let fake_paths: Vec<PathBuf> = (0..=MAX_IMAGES)
+            .map(|i| PathBuf::from(format!("/tmp/fake_{i}.png")))
+            .collect();
+
+        // prompt=None, file=None — gdyby limit nie był sprawdzany jako pierwszy,
+        // funkcja próbowałaby uruchomić interaktywny TUI. Nie powinna.
+        let result = resolve_input_with_attachments(None, None, None, &fake_paths);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("limit") || err_msg.contains("maksimum"),
+            "Błąd powinien wspominać o limicie: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_input_with_attachments_nonexistent_image() {
+        // Nieistniejący obraz → fail-fast z błędem
+        let bad_path = PathBuf::from("/nonexistent/image.png");
+
+        let result = resolve_input_with_attachments(None, Some("Tekst"), None, &[bad_path]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_input_with_attachments_fail_fast_on_second_bad_image() {
+        // Pierwszy obraz OK, drugi nieistniejący → przerywa z błędem (fail-fast)
+        let dir = std::env::temp_dir().join("ralph_test_resolve_attach_failfast");
+        let _ = std::fs::create_dir_all(&dir);
+        let good = write_temp_png(&dir, "good.png");
+        let bad = PathBuf::from("/nonexistent/bad.png");
+
+        let result =
+            resolve_input_with_attachments(None, Some("Fail fast test"), None, &[good, bad]);
+
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_input_with_attachments_text_from_file() {
+        // Tekst pochodzi z pliku — file ma wyższy priorytet niż prompt
+        let dir = std::env::temp_dir().join("ralph_test_resolve_attach_file");
+        let _ = std::fs::create_dir_all(&dir);
+        let text_file = dir.join("input.md");
+        std::fs::write(&text_file, "Treść z pliku").unwrap();
+        let img = write_temp_png(&dir, "img.png");
+
+        let result = resolve_input_with_attachments(
+            Some(&text_file),
+            Some("Zignorowany prompt"),
+            None,
+            &[img],
+        );
+
+        assert!(result.is_ok());
+        let ri = result.unwrap();
+        assert_eq!(ri.text, "Treść z pliku");
+        assert_eq!(ri.attachment_count(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_input_with_attachments_exactly_at_limit() {
+        // Dokładnie MAX_IMAGES obrazów → powinno przejść (limit jest włączny)
+        let dir = std::env::temp_dir().join("ralph_test_resolve_attach_limit");
+        let _ = std::fs::create_dir_all(&dir);
+        let paths: Vec<PathBuf> = (0..MAX_IMAGES)
+            .map(|i| write_temp_png(&dir, &format!("img{i}.png")))
+            .collect();
+
+        let result = resolve_input_with_attachments(None, Some("Na granicy"), None, &paths);
+
+        assert!(
+            result.is_ok(),
+            "MAX_IMAGES obrazów powinno być OK: {:?}",
+            result.err()
+        );
+        let ri = result.unwrap();
+        assert_eq!(ri.attachment_count(), MAX_IMAGES);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_input_with_attachments_propagates_resolve_error() {
+        // images=[] + brakujący plik tekstowy → propaguje błąd z resolve_input()
+        let bad_file = PathBuf::from("/nonexistent/input.md");
+        let result = resolve_input_with_attachments(Some(&bad_file), None, None, &[]);
+        assert!(
+            result.is_err(),
+            "Powinien propagować błąd z resolve_input() gdy plik nie istnieje"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::type_complexity)]
+    fn test_resolve_input_with_attachments_signature() {
+        // Weryfikacja że sygnatura funkcji jest poprawna i kompiluje się
+        let _fn_ptr: fn(
+            Option<&PathBuf>,
+            Option<&str>,
+            Option<&str>,
+            &[PathBuf],
+        ) -> Result<ResolvedInput> = resolve_input_with_attachments;
     }
 }
