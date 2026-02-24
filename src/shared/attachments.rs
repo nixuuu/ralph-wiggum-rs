@@ -3,8 +3,8 @@
 //! Obsługuje obrazy w formatach PNG, JPEG, GIF i WebP,
 //! kodowane jako base64 i przesyłane inline w żądaniu API.
 //!
-//! Typy są publicznym API — będą używane przez przyszłe moduły (np. attachment loader).
-// TODO: remove when attachment loader is implemented
+//! Główny punkt wejścia: [`load_attachment`] — kompletny pipeline od ścieżki do gotowego załącznika.
+// Moduł jest publicznym API — integracja z CLI i innymi modułami nastąpi w kolejnych taskach.
 #![allow(dead_code)]
 use base64::{Engine as _, engine::general_purpose};
 use std::fs;
@@ -237,6 +237,44 @@ pub fn validate_image_file(path: &Path) -> Result<(Vec<u8>, MediaType)> {
         })?;
 
     Ok((data, media_type))
+}
+
+/// Ładuje obraz jako gotowy do wysłania załącznik Claude API.
+///
+/// Pipeline end-to-end:
+/// 1. **Walidacja** — sprawdza istnienie pliku i wykrywa format z magic bytes.
+/// 2. **Resize** — zmniejsza obraz do [`MAX_DIMENSION`] na dłuższym boku jeśli
+///    obraz przekracza ten limit; mniejsze obrazy zostają bez zmian.
+/// 3. **Base64** — koduje bajty do stringa gotowego do umieszczenia w JSON API.
+/// 4. **Struktura** — zwraca `Attachment::Image` z pełnymi metadanymi.
+///
+/// # Błędy
+/// - [`RalphError::MissingFile`] — plik nie istnieje.
+/// - [`RalphError::Io`] — błąd odczytu pliku.
+/// - [`RalphError::UnsupportedImageFormat`] — nieobsługiwany format obrazu.
+/// - [`RalphError::ImageProcessing`] — błąd podczas resize (uszkodzone dane).
+pub fn load_attachment(path: &Path) -> Result<Attachment> {
+    // Krok 1: Walidacja — odczyt bajtów + wykrycie formatu
+    let (data, media_type) = validate_image_file(path)?;
+
+    // Zachowaj rozmiar oryginalnego pliku przed ewentualnym resizem
+    let original_size_bytes = data.len() as u64;
+
+    // Krok 2: Resize — zmniejsz obraz jeśli przekracza MAX_DIMENSION
+    let resized_data = resize_if_needed(&data, &media_type, MAX_DIMENSION)?;
+
+    // Krok 3: Base64 — zakoduj bajty do stringa
+    let base64_data = encode_base64(&resized_data);
+
+    // Krok 4: Stwórz załącznik z wszystkimi metadanymi
+    let attachment = ImageAttachment {
+        path: path.to_path_buf(),
+        media_type,
+        base64_data,
+        original_size_bytes,
+    };
+
+    Ok(Attachment::Image(attachment))
 }
 
 impl From<&MediaType> for image::ImageFormat {
@@ -993,11 +1031,22 @@ mod tests {
         let result = resize_if_needed(&data, &MediaType::Png, MAX_DIMENSION).unwrap();
 
         let resized = image::load_from_memory(&result).unwrap();
-        assert_eq!(resized.width(), MAX_DIMENSION, "Szerokość powinna być obcięta do max_dim");
-        assert!(resized.height() < MAX_DIMENSION, "Wysokość powinna być < max_dim");
+        assert_eq!(
+            resized.width(),
+            MAX_DIMENSION,
+            "Szerokość powinna być obcięta do max_dim"
+        );
+        assert!(
+            resized.height() < MAX_DIMENSION,
+            "Wysokość powinna być < max_dim"
+        );
         // Proporcje: 1600:1000 → 1568:980
         let expected_h = (1000.0 * MAX_DIMENSION as f64 / 1600.0).round() as u32;
-        assert_eq!(resized.height(), expected_h, "Wysokość powinna być proporcjonalna");
+        assert_eq!(
+            resized.height(),
+            expected_h,
+            "Wysokość powinna być proporcjonalna"
+        );
     }
 
     #[test]
@@ -1118,6 +1167,138 @@ mod tests {
         assert_eq!(
             image::ImageFormat::from(&MediaType::WebP),
             image::ImageFormat::WebP
+        );
+    }
+
+    // ─── load_attachment ──────────────────────────────────────────────────────
+
+    /// Tworzy prawdziwy plik PNG o podanych wymiarach w katalogu tymczasowym.
+    fn write_png_file(width: u32, height: u32) -> NamedTempFile {
+        let img = image::DynamicImage::new_rgb8(width, height);
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&buf).unwrap();
+        f
+    }
+
+    #[test]
+    fn test_load_attachment_returns_image_variant() {
+        let f = write_png_file(100, 100);
+        let result = load_attachment(f.path()).expect("should succeed");
+        assert!(
+            matches!(result, Attachment::Image(_)),
+            "Wynik powinien być Attachment::Image"
+        );
+    }
+
+    #[test]
+    fn test_load_attachment_correct_media_type() {
+        let f = write_png_file(50, 50);
+        let Attachment::Image(att) = load_attachment(f.path()).unwrap();
+        assert_eq!(att.media_type, MediaType::Png, "Typ MIME powinien być PNG");
+    }
+
+    #[test]
+    fn test_load_attachment_stores_original_path() {
+        let f = write_png_file(64, 64);
+        let Attachment::Image(att) = load_attachment(f.path()).unwrap();
+        assert_eq!(
+            att.path,
+            f.path(),
+            "Ścieżka powinna wskazywać na oryginalny plik"
+        );
+    }
+
+    #[test]
+    fn test_load_attachment_original_size_bytes() {
+        let f = write_png_file(64, 64);
+        let expected_size = fs::metadata(f.path()).unwrap().len();
+        let Attachment::Image(att) = load_attachment(f.path()).unwrap();
+        assert_eq!(
+            att.original_size_bytes, expected_size,
+            "original_size_bytes powinien odpowiadać rozmiarowi pliku na dysku"
+        );
+    }
+
+    #[test]
+    fn test_load_attachment_base64_is_valid() {
+        use base64::{Engine as _, engine::general_purpose};
+        let f = write_png_file(32, 32);
+        let Attachment::Image(att) = load_attachment(f.path()).unwrap();
+        // base64 nie może być puste
+        assert!(
+            !att.base64_data.is_empty(),
+            "base64_data nie może być puste"
+        );
+        // Brak prefixu data:
+        assert!(
+            !att.base64_data.starts_with("data:"),
+            "base64_data nie powinno zawierać prefixu data:"
+        );
+        // Musi być poprawnym base64 — decode nie może się wywalić
+        general_purpose::STANDARD
+            .decode(&att.base64_data)
+            .expect("base64_data powinno być poprawnym base64");
+    }
+
+    #[test]
+    fn test_load_attachment_small_image_not_resized() {
+        // Mały obraz — base64 powinno odpowiadać oryginalnym bajtom pliku
+        use base64::{Engine as _, engine::general_purpose};
+        let f = write_png_file(100, 100);
+        let original_bytes = fs::read(f.path()).unwrap();
+        let Attachment::Image(att) = load_attachment(f.path()).unwrap();
+        let decoded = general_purpose::STANDARD.decode(&att.base64_data).unwrap();
+        assert_eq!(
+            decoded, original_bytes,
+            "Mały obraz nie powinien być modyfikowany — base64 powinno odpowiadać oryginałowi"
+        );
+    }
+
+    #[test]
+    fn test_load_attachment_large_image_is_resized() {
+        // Obraz przekraczający MAX_DIMENSION — po load_attachment wymiary powinny być <= MAX_DIMENSION
+        let f = write_png_file(3000, 2000);
+        let Attachment::Image(att) = load_attachment(f.path()).unwrap();
+        // Dekoduj base64 i sprawdź wymiary
+        use base64::{Engine as _, engine::general_purpose};
+        let bytes = general_purpose::STANDARD.decode(&att.base64_data).unwrap();
+        let img = image::load_from_memory(&bytes).expect("Obraz powinien być prawidłowy");
+        assert!(
+            img.width() <= MAX_DIMENSION,
+            "Szerokość po resize: {} > {}",
+            img.width(),
+            MAX_DIMENSION
+        );
+        assert!(
+            img.height() <= MAX_DIMENSION,
+            "Wysokość po resize: {} > {}",
+            img.height(),
+            MAX_DIMENSION
+        );
+    }
+
+    #[test]
+    fn test_load_attachment_missing_file() {
+        let path = Path::new("/tmp/__ralph_load_attachment_nonexistent.png");
+        let err = load_attachment(path).expect_err("Brakujący plik powinien dać błąd");
+        assert!(
+            matches!(err, RalphError::MissingFile(_)),
+            "Błąd powinien być MissingFile, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_load_attachment_unsupported_format() {
+        // Plik z nieprawidłowymi danymi (nie pasuje do żadnego formatu)
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"\x00\x01\x02\x03\x04\x05").unwrap();
+        let err = load_attachment(f.path()).expect_err("Nieobsługiwany format powinien dać błąd");
+        assert!(
+            matches!(err, RalphError::UnsupportedImageFormat { .. }),
+            "Błąd powinien być UnsupportedImageFormat, got: {err:?}"
         );
     }
 }
