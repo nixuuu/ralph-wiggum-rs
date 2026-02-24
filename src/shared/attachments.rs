@@ -383,47 +383,50 @@ mod tests {
     #[test]
     fn test_extract_absolute_path() {
         let img = create_temp_image("test_extract_abs.png");
-        let img_str = img.to_str().unwrap();
+        let img_str = img.to_str().unwrap().to_string();
         let text = format!("Oto mój obraz:\n{img_str}\nCo o nim myślisz?");
 
         let (cleaned, paths) = extract_image_paths(&text);
 
+        // Sprzątamy przed asercjami — plik nie zostaje na dysku przy błędzie
+        fs::remove_file(&img).ok();
+
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0], img);
-        assert!(!cleaned.contains(img_str));
+        assert!(!cleaned.contains(&img_str));
         assert!(cleaned.contains("Oto mój obraz:"));
         assert!(cleaned.contains("Co o nim myślisz?"));
-
-        fs::remove_file(img).ok();
     }
 
     #[test]
     fn test_extract_path_with_double_quotes() {
         let img = create_temp_image("test_extract_quoted_double.jpg");
-        let img_str = img.to_str().unwrap();
+        let img_str = img.to_str().unwrap().to_string();
         let text = format!("Sprawdź ten plik:\n\"{img_str}\"");
 
         let (cleaned, paths) = extract_image_paths(&text);
 
+        // Sprzątamy przed asercjami — plik nie zostaje na dysku przy błędzie
+        fs::remove_file(&img).ok();
+
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0], img);
-        assert!(!cleaned.contains(img_str));
-
-        fs::remove_file(img).ok();
+        assert!(!cleaned.contains(&img_str));
     }
 
     #[test]
     fn test_extract_path_with_single_quotes() {
         let img = create_temp_image("test_extract_quoted_single.gif");
-        let img_str = img.to_str().unwrap();
+        let img_str = img.to_str().unwrap().to_string();
         let text = format!("'{img_str}'");
 
         let (_cleaned, paths) = extract_image_paths(&text);
 
+        // Sprzątamy przed asercjami — plik nie zostaje na dysku przy błędzie
+        fs::remove_file(&img).ok();
+
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0], img);
-
-        fs::remove_file(img).ok();
     }
 
     #[test]
@@ -463,20 +466,21 @@ mod tests {
     fn test_multiple_images() {
         let img1 = create_temp_image("test_multi_1.png");
         let img2 = create_temp_image("test_multi_2.webp");
-        let img1_str = img1.to_str().unwrap();
-        let img2_str = img2.to_str().unwrap();
+        let img1_str = img1.to_str().unwrap().to_string();
+        let img2_str = img2.to_str().unwrap().to_string();
         let text = format!("Opis:\n{img1_str}\n{img2_str}\nKoniec");
 
         let (cleaned, paths) = extract_image_paths(&text);
 
+        // Sprzątamy przed asercjami — pliki nie zostają na dysku przy błędzie
+        fs::remove_file(&img1).ok();
+        fs::remove_file(&img2).ok();
+
         assert_eq!(paths.len(), 2);
-        assert!(!cleaned.contains(img1_str));
-        assert!(!cleaned.contains(img2_str));
+        assert!(!cleaned.contains(&img1_str));
+        assert!(!cleaned.contains(&img2_str));
         assert!(cleaned.contains("Opis:"));
         assert!(cleaned.contains("Koniec"));
-
-        fs::remove_file(img1).ok();
-        fs::remove_file(img2).ok();
     }
 
     #[test]
@@ -489,15 +493,57 @@ mod tests {
     #[test]
     fn test_case_insensitive_extension() {
         let img = create_temp_image("test_case_ext.PNG");
-        let img_str = img.to_str().unwrap();
-        let text = img_str.to_string();
+        let img_str = img.to_str().unwrap().to_string();
+        let text = img_str.clone();
 
         let (cleaned, paths) = extract_image_paths(&text);
 
-        assert_eq!(paths.len(), 1);
-        assert!(cleaned.is_empty() || !cleaned.contains(img_str));
+        // Sprzątamy przed asercjami — plik nie zostaje na dysku przy błędzie
+        fs::remove_file(&img).ok();
 
-        fs::remove_file(img).ok();
+        assert_eq!(paths.len(), 1);
+        assert!(cleaned.is_empty() || !cleaned.contains(&img_str));
+    }
+
+    #[test]
+    fn test_extract_relative_path() {
+        // Tworzymy plik w CWD, bo ścieżka `./foo.jpg` jest rozwiązywana względem CWD.
+        // W `cargo test` CWD to katalog główny workspace'u.
+        let filename = "test_ralph_relative_extract.jpg";
+        let cwd = std::env::current_dir().unwrap();
+        let abs_path = cwd.join(filename);
+        fs::write(&abs_path, b"fake image data").expect("Failed to create temp relative image");
+
+        let rel_path_str = format!("./{filename}");
+        let text = format!("Oto obraz z drag-and-drop:\n{rel_path_str}\nCo o nim myślisz?");
+
+        let (cleaned, paths) = extract_image_paths(&text);
+
+        // Sprzątamy przed asercjami, żeby nie zostawić pliku przy błędzie testu
+        fs::remove_file(&abs_path).ok();
+
+        assert_eq!(paths.len(), 1, "Ścieżka relatywna powinna zostać wykryta");
+        assert_eq!(paths[0], PathBuf::from(&rel_path_str));
+        assert!(!cleaned.contains(&rel_path_str));
+        assert!(cleaned.contains("Oto obraz z drag-and-drop:"));
+        assert!(cleaned.contains("Co o nim myślisz?"));
+    }
+
+    #[test]
+    fn test_ignore_txt_extension() {
+        // Plik z rozszerzeniem .txt nie powinien być wykrywany jako obraz,
+        // nawet jeśli wygląda jak ścieżka. Rozszerzenie sprawdzane jest przed
+        // weryfikacją istnienia pliku.
+        let path = "/tmp/document.txt";
+        let text = format!("Wiadomość:\n{path}\nKoniec");
+
+        let (cleaned, paths) = extract_image_paths(&text);
+
+        assert!(paths.is_empty(), ".txt nie jest formatem graficznym");
+        assert!(
+            cleaned.contains(path),
+            "Ścieżka .txt powinna pozostać w tekście"
+        );
     }
 
     // ── Istniejące testy ──────────────────────────────────────────────────────
