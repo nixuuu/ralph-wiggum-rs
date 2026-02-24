@@ -36,6 +36,32 @@ impl MediaType {
     }
 }
 
+/// Wykrywa format obrazu na podstawie magic bytes (pierwszych bajtów pliku).
+///
+/// Obsługiwane formaty:
+/// - PNG: nagłówek `\x89PNG`
+/// - JPEG: nagłówek `\xFF\xD8\xFF`
+/// - GIF: nagłówek `GIF8` (GIF87a lub GIF89a)
+/// - WebP: nagłówek `RIFF....WEBP` (RIFF container)
+///
+/// Zwraca `None` dla nieznanych formatów lub danych krótszych niż wymagany nagłówek.
+pub fn detect_media_type(data: &[u8]) -> Option<MediaType> {
+    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        return Some(MediaType::Png);
+    }
+    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some(MediaType::Jpeg);
+    }
+    if data.starts_with(b"GIF8") {
+        return Some(MediaType::Gif);
+    }
+    // WebP: bajty 0-3 to "RIFF", bajty 8-11 to "WEBP"
+    if data.len() >= 12 && data[..4] == *b"RIFF" && data[8..12] == *b"WEBP" {
+        return Some(MediaType::WebP);
+    }
+    None
+}
+
 /// Obraz zakodowany w base64, gotowy do wysłania do Claude API.
 #[derive(Debug, Clone)]
 pub struct ImageAttachment {
@@ -108,5 +134,72 @@ mod tests {
         assert_eq!(MediaType::Png, MediaType::Png);
         assert_ne!(MediaType::Png, MediaType::Jpeg);
         assert_ne!(MediaType::Gif, MediaType::WebP);
+    }
+
+    #[test]
+    fn test_detect_media_type_png() {
+        let data = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        assert_eq!(detect_media_type(&data), Some(MediaType::Png));
+    }
+
+    #[test]
+    fn test_detect_media_type_jpeg() {
+        let data = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        assert_eq!(detect_media_type(&data), Some(MediaType::Jpeg));
+    }
+
+    #[test]
+    fn test_detect_media_type_gif87a() {
+        let data = b"GIF87a\x01\x00\x01\x00";
+        assert_eq!(detect_media_type(data), Some(MediaType::Gif));
+    }
+
+    #[test]
+    fn test_detect_media_type_gif89a() {
+        let data = b"GIF89a\x01\x00\x01\x00";
+        assert_eq!(detect_media_type(data), Some(MediaType::Gif));
+    }
+
+    #[test]
+    fn test_detect_media_type_webp() {
+        let mut data = [0u8; 12];
+        data[..4].copy_from_slice(b"RIFF");
+        data[4..8].copy_from_slice(&[0x00, 0x00, 0x00, 0x00]); // rozmiar pliku
+        data[8..12].copy_from_slice(b"WEBP");
+        assert_eq!(detect_media_type(&data), Some(MediaType::WebP));
+    }
+
+    #[test]
+    fn test_detect_media_type_riff_not_webp() {
+        let mut data = [0u8; 12];
+        data[..4].copy_from_slice(b"RIFF");
+        data[8..12].copy_from_slice(b"WAVE"); // AVI/WAV — nie WebP
+        assert_eq!(detect_media_type(&data), None);
+    }
+
+    #[test]
+    fn test_detect_media_type_unknown() {
+        let data = [0x00, 0x01, 0x02, 0x03];
+        assert_eq!(detect_media_type(&data), None);
+    }
+
+    #[test]
+    fn test_detect_media_type_empty() {
+        assert_eq!(detect_media_type(&[]), None);
+    }
+
+    #[test]
+    fn test_detect_media_type_short_data() {
+        // Mniej niż 12 bajtów — nie powinno panikować
+        let data = [0x89, 0x50]; // za krótkie nawet na PNG (4 bajty)
+        assert_eq!(detect_media_type(&data), None);
+
+        // Dokładnie 3 bajty — rozpoznaje JPEG
+        let jpeg_short = [0xFF, 0xD8, 0xFF];
+        assert_eq!(detect_media_type(&jpeg_short), Some(MediaType::Jpeg));
+
+        // 11 bajtów RIFF — za krótkie na WebP (potrzeba 12)
+        let riff_short = b"RIFF\x00\x00\x00WEB";
+        assert_eq!(detect_media_type(riff_short), None);
     }
 }
