@@ -802,6 +802,14 @@ impl Default for KeybindingResolver {
 mod tests {
     use super::*;
 
+    /// Pomocniczy struct do parsowania [keybindings.*] z pełnego .ralph.toml.
+    /// Używany w testach TOML integration by symulować prawdziwy plik konfiguracyjny.
+    #[derive(serde::Deserialize)]
+    struct MockConfig {
+        #[serde(default)]
+        keybindings: KeybindingsConfig,
+    }
+
     // ── KeyCombo parser: simple keys ──
 
     #[test]
@@ -1386,11 +1394,6 @@ quit = "Super+q"
     #[test]
     fn toml_nested_keybindings_section() {
         // Symulacja [keybindings.global] z pełnego .ralph.toml
-        #[derive(Deserialize)]
-        struct MockConfig {
-            #[serde(default)]
-            keybindings: KeybindingsConfig,
-        }
         let toml_content = r#"
 [keybindings.global]
 quit = "Esc"
@@ -1953,5 +1956,172 @@ restart = "F5"
         // Home nie jest już scroll_to_top (zastąpione przez 'g')
         let home = make_event(KeyCode::Home, KeyModifiers::NONE);
         assert_eq!(resolver.resolve(&home, View::Global), None);
+    }
+
+    // ── Testy integracyjne: TOML → action routing ─────────────────────
+
+    /// Weryfikuje że domyślne keybindingi działają poprawnie we wszystkich widokach.
+    ///
+    /// Testuje pełny przepływ: default config → resolve → poprawna akcja.
+    #[test]
+    fn integration_default_keybindings_all_views() {
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Global: q → Quit we wszystkich widokach
+        let q = make_event(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(resolver.resolve(&q, View::Global), Some(KeyAction::Quit));
+        assert_eq!(
+            resolver.resolve(&q, View::Orchestrate),
+            Some(KeyAction::Quit)
+        );
+        assert_eq!(resolver.resolve(&q, View::Run), Some(KeyAction::Quit));
+        assert_eq!(resolver.resolve(&q, View::Explorer), Some(KeyAction::Quit));
+
+        // Global: Ctrl+C → ForceQuit
+        let ctrl_c = make_event(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(
+            resolver.resolve(&ctrl_c, View::Global),
+            Some(KeyAction::ForceQuit)
+        );
+
+        // Orchestrate: Tab → FocusNext (view-specific)
+        let tab = make_event(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&tab, View::Orchestrate),
+            Some(KeyAction::FocusNext)
+        );
+
+        // Run: Enter → ToggleExpand (view-specific)
+        let enter = make_event(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&enter, View::Run),
+            Some(KeyAction::ToggleExpand)
+        );
+
+        // Explorer: j/k → VimDown/VimUp (view-specific)
+        let j = make_event(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&j, View::Explorer),
+            Some(KeyAction::VimDown)
+        );
+    }
+
+    /// Weryfikuje custom override: quit = 'Q' (wielka litera) zamiast 'q'.
+    ///
+    /// TOML: `[keybindings.global] quit = "Q"`
+    /// Oczekiwane: Char('Q') → Quit, stare 'q' → None.
+    #[test]
+    fn integration_custom_quit_uppercase_q() {
+        // Symulacja: użytkownik ustawił quit = "Q" w .ralph.toml
+        let toml = r#"
+[keybindings.global]
+quit = "Q"
+"#;
+        let config: MockConfig = toml::from_str(toml).unwrap();
+        let resolver = KeybindingResolver::from_user_config(config.keybindings);
+
+        // Nowy binding: 'Q' → Quit
+        let big_q = make_event(KeyCode::Char('Q'), KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&big_q, View::Global),
+            Some(KeyAction::Quit),
+            "Uppercase Q should map to Quit after custom override"
+        );
+
+        // Stary binding: 'q' nie jest już Quit
+        let small_q = make_event(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&small_q, View::Global),
+            None,
+            "Lowercase q should no longer map to Quit after override"
+        );
+
+        // Custom binding działa w każdym widoku (global fallback)
+        assert_eq!(
+            resolver.resolve(&big_q, View::Orchestrate),
+            Some(KeyAction::Quit)
+        );
+        assert_eq!(
+            resolver.resolve(&big_q, View::Explorer),
+            Some(KeyAction::Quit)
+        );
+    }
+
+    /// Weryfikuje view-specific override: orchestrate.focus_next = 'n'.
+    ///
+    /// TOML: `[keybindings.orchestrate] focus_next = "n"`
+    /// Oczekiwane: 'n' w orchestrate view → FocusNext, inne widoki bez efektu.
+    #[test]
+    fn integration_orchestrate_focus_next_custom_n() {
+        // Symulacja: użytkownik ustawił orchestrate.focus_next = "n"
+        let toml = r#"
+[keybindings.orchestrate]
+focus_next = "n"
+"#;
+        let config: MockConfig = toml::from_str(toml).unwrap();
+        let resolver = KeybindingResolver::from_user_config(config.keybindings);
+
+        // 'n' w orchestrate view → FocusNext (custom binding)
+        let n = make_event(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(
+            resolver.resolve(&n, View::Orchestrate),
+            Some(KeyAction::FocusNext),
+            "'n' should map to FocusNext in orchestrate view after override"
+        );
+
+        // 'n' w Explorer view → brak akcji (to jest orchestrate-specific)
+        assert_eq!(
+            resolver.resolve(&n, View::Explorer),
+            None,
+            "'n' should not map to any action in explorer view"
+        );
+
+        // 'n' w Global view → brak akcji
+        assert_eq!(
+            resolver.resolve(&n, View::Global),
+            None,
+            "'n' should not map to any action in global view"
+        );
+
+        // Default Tab w orchestrate NIE jest już FocusNext (zastąpiony przez 'n')
+        let tab = make_event(KeyCode::Tab, KeyModifiers::NONE);
+        // Tab nadal może być SwitchFocus z global (jeśli focus_next = Tab było view-specific)
+        // Po overridzie, Tab w orchestrate wpadnie do global → SwitchFocus
+        assert_eq!(
+            resolver.resolve(&tab, View::Orchestrate),
+            Some(KeyAction::SwitchFocus),
+            "Tab should fall back to global SwitchFocus after focus_next override"
+        );
+    }
+
+    /// Weryfikuje że reverse lookup poprawnie formatuje hints dla każdej sekcji.
+    ///
+    /// Testuje pełny przepływ: action → key_for_action → format_key → czytelny string.
+    #[test]
+    fn integration_reverse_lookup_formats_hints() {
+        let resolver = KeybindingResolver::with_defaults();
+
+        // Global: Quit → "q"
+        let quit_combo = resolver.key_for_action(KeyAction::Quit).unwrap();
+        assert_eq!(KeybindingResolver::format_key(&quit_combo), "q");
+
+        // Global: ForceQuit → "Ctrl+c"
+        let force_quit_combo = resolver.key_for_action(KeyAction::ForceQuit).unwrap();
+        assert_eq!(KeybindingResolver::format_key(&force_quit_combo), "Ctrl+c");
+
+        // Orchestrate: Restart → "⇧+R" (Shift+R)
+        let restart_combo = resolver.key_for_action(KeyAction::Restart).unwrap();
+        assert_eq!(KeybindingResolver::format_key(&restart_combo), "⇧+R");
+
+        // Explorer: VimUp → "k"
+        let vim_up_combo = resolver.key_for_action(KeyAction::VimUp).unwrap();
+        assert_eq!(KeybindingResolver::format_key(&vim_up_combo), "k");
+
+        // Custom binding: hint odzwierciedla zmienioną konfigurację
+        let mut user_config = KeybindingsConfig::default();
+        user_config.global.quit = KeyCombo::new(KeyCode::F(1), KeyModifiers::NONE);
+        let custom_resolver = KeybindingResolver::from_user_config(user_config);
+        let custom_quit_combo = custom_resolver.key_for_action(KeyAction::Quit).unwrap();
+        assert_eq!(KeybindingResolver::format_key(&custom_quit_combo), "F1");
     }
 }

@@ -142,6 +142,87 @@ ralph-wiggum --debug --prompt "Debug this task"
 ralph-wiggum task --debug orchestrate --workers 3
 ```
 
+### `[keybindings]` — Custom keyboard shortcuts
+
+Customize keyboard shortcuts for any view. Define overrides in `[keybindings.global]`, `[keybindings.orchestrate]`, `[keybindings.run]`, or `[keybindings.explorer]` sections. Only changed values need to be specified — all others keep their defaults. View-specific bindings take priority over global ones.
+
+```toml
+[keybindings.global]
+quit = "Q"                 # Change quit from 'q' to 'Q'
+toggle_sidebar = "b"       # Change sidebar toggle from 't' to 'b'
+command_palette = "Ctrl+p" # Keep default (explicit)
+
+[keybindings.orchestrate]
+# View-specific overrides — take priority over global bindings when in orchestrate view
+command_palette = "Ctrl+k" # Different shortcut in orchestrate view
+focus_next = "n"           # Use 'n' to move to next worker — Note: replaces default cancel_restart ('n'); reassign cancel_restart if needed
+
+[keybindings.explorer]
+enter_filter = "/"         # Use '/' for filter (vim-style)
+```
+
+**Key format:** `"q"`, `"Q"`, `"Ctrl+p"`, `"Shift+Tab"`, `"Alt+x"`, `"F5"`, `"Up"`, `"Enter"`, `"Space"`, etc.
+
+- **Modifiers**: `Ctrl`, `Shift`, `Alt` (case-insensitive; `Control` also accepted)
+- **Named keys**: `Up`, `Down`, `Left`, `Right`, `Enter`, `Esc`, `Tab`, `Space`, `Backspace`, `Delete`, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`
+- **Single characters**: Any single character (`q`, `Q`, `r`, `/`, `[`, etc.)
+
+#### `[keybindings.global]` — Available in all views
+
+| Action | Default | Description |
+|--------|---------|-------------|
+| `quit` | `q` | Graceful quit |
+| `force_quit` | `Ctrl+c` | Force quit immediately |
+| `cancel` | `Esc` | Cancel / close overlay |
+| `confirm` | `Enter` | Confirm action |
+| `toggle_sidebar` | `t` | Show/hide task sidebar |
+| `scroll_up` | `Up` | Scroll output up |
+| `scroll_down` | `Down` | Scroll output down |
+| `scroll_page_up` | `PageUp` | Scroll one page up |
+| `scroll_page_down` | `PageDown` | Scroll one page down |
+| `scroll_to_top` | `Home` | Jump to oldest output |
+| `scroll_to_bottom` | `End` | Jump to newest output |
+| `switch_focus` | `Tab` | Cycle focus between panels |
+| `command_palette` | `Ctrl+p` | Open command palette |
+| `shrink_sidebar` | `[` | Make sidebar narrower |
+| `grow_sidebar` | `]` | Make sidebar wider |
+
+#### `[keybindings.orchestrate]` — Orchestration view
+
+| Action | Default | Description |
+|--------|---------|-------------|
+| `focus_next` | `Tab` | Focus next worker panel |
+| `focus_prev` | `Shift+Tab` | Focus previous worker panel |
+| `toggle_preview` | `p` | Show/hide task preview overlay |
+| `send_message` | `i` | Send message to focused worker |
+| `reload` | `r` | Reload tasks.yml from disk |
+| `restart` | `Shift+R` | Restart focused worker (requires confirmation) |
+| `confirm_restart` | `y` | Confirm restart |
+| `cancel_restart` | `n` | Cancel restart |
+| `toggle_idle_workers` | `h` | Show/hide idle workers |
+| `command_palette` | `Ctrl+p` | Open command palette (overrides global) |
+
+#### `[keybindings.run]` — Run mode view
+
+| Action | Default | Description |
+|--------|---------|-------------|
+| `toggle_expand` | `Enter` | Expand/collapse output section |
+
+#### `[keybindings.explorer]` — Task explorer view
+
+| Action | Default | Description |
+|--------|---------|-------------|
+| `cycle_sort` | `s` | Cycle sort mode (ID → Status → Component) |
+| `reload_tasks` | `r` | Reload tasks.yml from disk |
+| `enter_filter` | `f` | Enter filter mode |
+| `expand_all` | `e` | Expand all task nodes |
+| `collapse_all` | `c` | Collapse all task nodes |
+| `expand_or_enter` | `Enter` | Expand node or focus detail panel |
+| `vim_up` | `k` | Navigate up (vim-style) |
+| `vim_down` | `j` | Navigate down (vim-style) |
+| `vim_left` | `h` | Collapse node (vim-style) |
+| `vim_right` | `l` | Expand node (vim-style) |
+
 ### `[task]` — Task management
 
 ```toml
@@ -309,6 +390,18 @@ name = "frontend"
 paths = ["web/**/*.ts", "web/**/*.tsx"]
 verify_commands = ["npm test", "npm run lint"]
 setup_commands = ["npm install"]
+
+# Optional: customize keyboard shortcuts
+[keybindings.global]
+quit = "Q"              # Uppercase Q to quit (less accidental)
+toggle_sidebar = "b"    # 'b' for sidebar instead of 't'
+
+[keybindings.orchestrate]
+command_palette = "Ctrl+k"  # Ctrl+K in orchestrate view
+focus_next = "n"            # 'n' to jump to next worker — Note: replaces default cancel_restart ('n'); reassign if needed
+
+[keybindings.explorer]
+enter_filter = "/"      # '/' for filter (vim-style)
 ```
 
 ## Features
