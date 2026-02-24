@@ -2,8 +2,44 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
 use crate::commands::standalone_text_input::standalone_text_input;
+use crate::shared::attachments::Attachment;
 use crate::shared::error::{RalphError, Result};
 use crossterm::style::Stylize;
+
+/// Wynik resolucji wejścia: tekst promptu wraz z załadowanymi załącznikami.
+///
+/// Typ zwracany z `resolve_input` — zastępuje `String` i umożliwia przekazanie
+/// obrazów lub innych załączników obok tekstu.
+// TODO: remove when resolve_input is updated to return ResolvedInput
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedInput {
+    /// Tekst promptu po oczyszczeniu (bez ścieżek do plików inline).
+    pub text: String,
+    /// Lista załadowanych załączników (np. obrazy).
+    pub attachments: Vec<Attachment>,
+}
+
+#[allow(dead_code)]
+impl ResolvedInput {
+    /// Tworzy `ResolvedInput` z samym tekstem, bez załączników.
+    pub fn text_only(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Zwraca `true` jeśli lista załączników jest niepusta.
+    pub fn has_attachments(&self) -> bool {
+        !self.attachments.is_empty()
+    }
+
+    /// Zwraca liczbę załączników.
+    pub fn attachment_count(&self) -> usize {
+        self.attachments.len()
+    }
+}
 
 /// Resolve input from file, prompt, or stdin.
 /// Priority: file > prompt > stdin (piped) > interactive TUI > error
@@ -79,7 +115,65 @@ fn echo_submitted_input(input: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::attachments::{ImageAttachment, MediaType};
     use std::path::PathBuf;
+
+    // ── Testy ResolvedInput ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_resolved_input_text_only() {
+        let ri = ResolvedInput::text_only("Hello world");
+        assert_eq!(ri.text, "Hello world");
+        assert!(ri.attachments.is_empty());
+        assert!(!ri.has_attachments());
+        assert_eq!(ri.attachment_count(), 0);
+    }
+
+    #[test]
+    fn test_resolved_input_with_attachments() {
+        let img = ImageAttachment {
+            path: PathBuf::from("/tmp/test.png"),
+            media_type: MediaType::Png,
+            base64_data: "dGVzdA==".to_string(),
+            original_size_bytes: 512,
+        };
+        let ri = ResolvedInput {
+            text: "Opis obrazu".to_string(),
+            attachments: vec![Attachment::Image(img)],
+        };
+
+        assert_eq!(ri.text, "Opis obrazu");
+        assert!(ri.has_attachments());
+        assert_eq!(ri.attachment_count(), 1);
+    }
+
+    #[test]
+    fn test_resolved_input_multiple_attachments() {
+        let make_img = |path: &str| {
+            Attachment::Image(ImageAttachment {
+                path: PathBuf::from(path),
+                media_type: MediaType::Jpeg,
+                base64_data: "abc".to_string(),
+                original_size_bytes: 256,
+            })
+        };
+
+        let ri = ResolvedInput {
+            text: "Dwa obrazy".to_string(),
+            attachments: vec![make_img("/tmp/a.jpg"), make_img("/tmp/b.jpg")],
+        };
+
+        assert_eq!(ri.attachment_count(), 2);
+        assert!(ri.has_attachments());
+    }
+
+    #[test]
+    fn test_resolved_input_clone() {
+        let ri = ResolvedInput::text_only("Klonowalny");
+        let cloned = ri.clone();
+        assert_eq!(cloned.text, ri.text);
+        assert_eq!(cloned.attachment_count(), ri.attachment_count());
+    }
 
     #[test]
     fn test_resolve_input_prompt() {

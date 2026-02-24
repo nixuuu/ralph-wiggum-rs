@@ -73,7 +73,7 @@ pub fn detect_media_type(data: &[u8]) -> Option<MediaType> {
 }
 
 /// Obraz zakodowany w base64, gotowy do wysłania do Claude API.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImageAttachment {
     /// Ścieżka do oryginalnego pliku obrazu.
     pub path: PathBuf,
@@ -86,7 +86,7 @@ pub struct ImageAttachment {
 }
 
 /// Dołącznik do wiadomości — może być obrazem lub innym typem w przyszłości.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Attachment {
     Image(ImageAttachment),
 }

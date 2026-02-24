@@ -6,7 +6,7 @@ mod continue_cmd;
 #[allow(dead_code)] // Public API — będzie użyte przez task explorer command
 pub mod explorer;
 mod generate_deps_cmd;
-mod input;
+pub(crate) mod input;
 mod migrate;
 pub mod orchestrate;
 mod prd;
