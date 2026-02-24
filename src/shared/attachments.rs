@@ -541,4 +541,64 @@ mod tests {
         let encoded = encode_base64(b"hello world");
         assert!(!encoded.starts_with("data:"));
     }
+
+    /// Roundtrip z pseudolosowymi danymi (z szerokim spektrum bajt-wartości).
+    /// Weryfikuje że encode→decode daje identyczne dane dla arbitralnych bajt-wartości.
+    #[test]
+    fn test_encode_base64_roundtrip_random_data() {
+        use base64::{Engine as _, engine::general_purpose};
+
+        // Prosty LCG (Linear Congruential Generator) — brak zależności od crate `rand`
+        let mut state: u64 = 0xDEAD_BEEF_CAFE_1337;
+        let data: Vec<u8> = (0..1024)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 56) as u8
+            })
+            .collect();
+
+        let encoded = encode_base64(&data);
+
+        // Brak prefixu data:
+        assert!(!encoded.starts_with("data:"));
+
+        // Decode roundtrip
+        let decoded = general_purpose::STANDARD.decode(&encoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    /// Roundtrip dla dużych danych (1 MB) — sprawdza wydajność i poprawność dla dużych plików.
+    #[test]
+    fn test_encode_base64_large_data_roundtrip() {
+        use base64::{Engine as _, engine::general_purpose};
+
+        const ONE_MB: usize = 1024 * 1024;
+
+        // Generuj 1MB pseudolosowych danych przez LCG
+        let mut state: u64 = 0xABCD_EF01_2345_6789;
+        let data: Vec<u8> = (0..ONE_MB)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 56) as u8
+            })
+            .collect();
+
+        assert_eq!(data.len(), ONE_MB);
+
+        let encoded = encode_base64(&data);
+
+        // Brak prefixu data:
+        assert!(!encoded.starts_with("data:"));
+
+        // Base64 zwiększa rozmiar o ~4/3
+        assert!(encoded.len() > ONE_MB);
+
+        // Decode roundtrip
+        let decoded = general_purpose::STANDARD.decode(&encoded).unwrap();
+        assert_eq!(decoded, data);
+    }
 }
