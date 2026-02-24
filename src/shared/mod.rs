@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod banner;
 pub mod dag;
 pub mod diagnostics;
