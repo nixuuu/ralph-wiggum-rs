@@ -9,6 +9,9 @@
 use base64::{Engine as _, engine::general_purpose};
 use std::path::PathBuf;
 
+/// Obsługiwane rozszerzenia plików graficznych (małe litery).
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+
 /// Maksymalna liczba obrazów w jednej wiadomości.
 pub const MAX_IMAGES: usize = 10;
 
@@ -89,9 +92,308 @@ pub fn encode_base64(data: &[u8]) -> String {
     general_purpose::STANDARD.encode(data)
 }
 
+// ── Wykrywanie ścieżek graficznych w tekście ─────────────────────────────────
+
+/// Sprawdza, czy rozszerzenie stringa jest obsługiwanym formatem graficznym.
+///
+/// Porównanie jest case-insensitive (`.PNG` == `.png`).
+fn is_image_extension(s: &str) -> bool {
+    if let Some(dot_pos) = s.rfind('.') {
+        let ext = s[dot_pos + 1..].to_lowercase();
+        IMAGE_EXTENSIONS.contains(&ext.as_str())
+    } else {
+        false
+    }
+}
+
+/// Sprawdza, czy tekst wygląda jak ścieżka do pliku.
+///
+/// Kryteria: zaczyna się od `/`, `~/`, `./` lub zawiera `/`.
+fn looks_like_path(s: &str) -> bool {
+    s.starts_with('/') || s.starts_with("~/") || s.starts_with("./") || s.contains('/')
+}
+
+/// Usuwa cudzysłowy (pojedyncze i podwójne) z początku i końca stringa.
+///
+/// Cudzysłowy muszą być symetryczne — `"..."` lub `'...'`.
+fn strip_quotes(s: &str) -> &str {
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        if (bytes[0] == b'"' && bytes[s.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[s.len() - 1] == b'\'')
+        {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+/// Rozszerza `~` na katalog domowy użytkownika.
+///
+/// Jeśli `HOME` nie jest ustawione, ścieżka jest zwracana bez zmian.
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    } else if path == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home);
+    }
+    PathBuf::from(path)
+}
+
+/// Wykrywa ścieżki do plików graficznych w tekście i oddziela je od treści.
+///
+/// Drag'n'drop w terminalu wkleja pełną ścieżkę pliku jako osobną linię.
+/// Ta funkcja identyfikuje takie linie i zwraca je osobno, oczyszczając tekst.
+///
+/// # Algorytm
+///
+/// Dla każdej linii tekstu:
+/// 1. Usuń białe znaki i ewentualne cudzysłowy (`"..."` / `'...'`)
+/// 2. Sprawdź czy wygląda jak ścieżka (starts_with `/`, `~/`, `./` lub zawiera `/`)
+/// 3. Sprawdź, czy rozszerzenie jest graficzne (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`)
+/// 4. Zweryfikuj istnienie pliku na dysku (z rozwinięciem `~`)
+///
+/// Linie spełniające wszystkie kryteria są usuwane z tekstu i dodawane do wektora.
+///
+/// # Returns
+///
+/// Krotka `(oczyszczony_tekst, wykryte_ścieżki)`.
+pub fn extract_image_paths(text: &str) -> (String, Vec<PathBuf>) {
+    let mut kept_lines: Vec<&str> = Vec::new();
+    let mut image_paths: Vec<PathBuf> = Vec::new();
+
+    for line in text.lines() {
+        let candidate = strip_quotes(line.trim());
+
+        if looks_like_path(candidate) && is_image_extension(candidate) {
+            let path = expand_tilde(candidate);
+            if path.exists() {
+                image_paths.push(path);
+                continue; // Linia z wykrytą ścieżką jest pomijana w tekście wyjściowym
+            }
+        }
+
+        kept_lines.push(line);
+    }
+
+    let cleaned = kept_lines.join("\n");
+    // Zachowaj trailing newline jeśli oryginalny tekst go miał
+    let cleaned = if text.ends_with('\n') && !cleaned.is_empty() {
+        format!("{cleaned}\n")
+    } else {
+        cleaned
+    };
+
+    (cleaned, image_paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    // ── Testy funkcji pomocniczych ────────────────────────────────────────────
+
+    #[test]
+    fn test_is_image_extension() {
+        assert!(is_image_extension("/path/to/img.png"));
+        assert!(is_image_extension("/path/to/img.PNG")); // case-insensitive
+        assert!(is_image_extension("/path/to/img.jpg"));
+        assert!(is_image_extension("/path/to/img.JPEG"));
+        assert!(is_image_extension("/path/to/img.gif"));
+        assert!(is_image_extension("/path/to/img.webp"));
+        assert!(!is_image_extension("/path/to/file.txt"));
+        assert!(!is_image_extension("/path/to/noextension"));
+        assert!(!is_image_extension("/path/to/file.mp4"));
+    }
+
+    #[test]
+    fn test_looks_like_path() {
+        assert!(looks_like_path("/absolute/path"));
+        assert!(looks_like_path("~/home/path"));
+        assert!(looks_like_path("./relative/path"));
+        assert!(looks_like_path("some/nested/path"));
+        assert!(!looks_like_path("justword"));
+        assert!(!looks_like_path("hello world"));
+    }
+
+    #[test]
+    fn test_strip_quotes_double() {
+        assert_eq!(strip_quotes("\"/path/to/file.png\""), "/path/to/file.png");
+    }
+
+    #[test]
+    fn test_strip_quotes_single() {
+        assert_eq!(strip_quotes("'/path/to/file.png'"), "/path/to/file.png");
+    }
+
+    #[test]
+    fn test_strip_quotes_no_quotes() {
+        assert_eq!(strip_quotes("/path/to/file.png"), "/path/to/file.png");
+    }
+
+    #[test]
+    fn test_strip_quotes_mismatched() {
+        // Niesymetryczne cudzysłowy — zostają bez zmian
+        assert_eq!(strip_quotes("\"file.png'"), "\"file.png'");
+    }
+
+    #[test]
+    fn test_strip_quotes_single_char() {
+        // Jeden znak w cudzysłowach — nie jest prawidłową ścieżką, ale nie może panikować
+        assert_eq!(strip_quotes("\""), "\"");
+        assert_eq!(strip_quotes("'"), "'");
+    }
+
+    #[test]
+    fn test_expand_tilde_with_home() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !home.is_empty() {
+            let expanded = expand_tilde("~/Desktop/img.png");
+            assert_eq!(expanded, PathBuf::from(&home).join("Desktop/img.png"));
+        }
+    }
+
+    #[test]
+    fn test_expand_tilde_absolute_unchanged() {
+        let path = expand_tilde("/usr/local/bin/something");
+        assert_eq!(path, PathBuf::from("/usr/local/bin/something"));
+    }
+
+    // ── Testy extract_image_paths ─────────────────────────────────────────────
+
+    /// Tworzy tymczasowy plik obrazu i zwraca jego ścieżkę.
+    fn create_temp_image(filename: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(filename);
+        fs::write(&path, b"fake image data").expect("Failed to create temp image");
+        path
+    }
+
+    #[test]
+    fn test_extract_absolute_path() {
+        let img = create_temp_image("test_extract_abs.png");
+        let img_str = img.to_str().unwrap();
+        let text = format!("Oto mój obraz:\n{img_str}\nCo o nim myślisz?");
+
+        let (cleaned, paths) = extract_image_paths(&text);
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], img);
+        assert!(!cleaned.contains(img_str));
+        assert!(cleaned.contains("Oto mój obraz:"));
+        assert!(cleaned.contains("Co o nim myślisz?"));
+
+        fs::remove_file(img).ok();
+    }
+
+    #[test]
+    fn test_extract_path_with_double_quotes() {
+        let img = create_temp_image("test_extract_quoted_double.jpg");
+        let img_str = img.to_str().unwrap();
+        let text = format!("Sprawdź ten plik:\n\"{img_str}\"");
+
+        let (cleaned, paths) = extract_image_paths(&text);
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], img);
+        assert!(!cleaned.contains(img_str));
+
+        fs::remove_file(img).ok();
+    }
+
+    #[test]
+    fn test_extract_path_with_single_quotes() {
+        let img = create_temp_image("test_extract_quoted_single.gif");
+        let img_str = img.to_str().unwrap();
+        let text = format!("'{img_str}'");
+
+        let (_cleaned, paths) = extract_image_paths(&text);
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], img);
+
+        fs::remove_file(img).ok();
+    }
+
+    #[test]
+    fn test_ignore_nonexistent_path() {
+        let nonexistent = "/tmp/this_file_does_not_exist_ralph_12345.png";
+        let text = format!("Tekst\n{nonexistent}\nKoniec");
+
+        let (cleaned, paths) = extract_image_paths(text.as_str());
+
+        // Ścieżka nieistniejąca — zostawiona w tekście, nie dodana do paths
+        assert!(paths.is_empty());
+        assert!(cleaned.contains(nonexistent));
+    }
+
+    #[test]
+    fn test_ignore_non_image_extension() {
+        let path = "/tmp/document.pdf";
+        let text = format!("Tekst\n{path}\nKoniec");
+
+        let (cleaned, paths) = extract_image_paths(&text);
+
+        assert!(paths.is_empty());
+        assert!(cleaned.contains(path));
+    }
+
+    #[test]
+    fn test_ignore_plain_words() {
+        let text = "Zwykłe słowa bez ścieżek.\nNie ma tu żadnych plików.\n";
+
+        let (cleaned, paths) = extract_image_paths(text);
+
+        assert!(paths.is_empty());
+        assert_eq!(cleaned, text);
+    }
+
+    #[test]
+    fn test_multiple_images() {
+        let img1 = create_temp_image("test_multi_1.png");
+        let img2 = create_temp_image("test_multi_2.webp");
+        let img1_str = img1.to_str().unwrap();
+        let img2_str = img2.to_str().unwrap();
+        let text = format!("Opis:\n{img1_str}\n{img2_str}\nKoniec");
+
+        let (cleaned, paths) = extract_image_paths(&text);
+
+        assert_eq!(paths.len(), 2);
+        assert!(!cleaned.contains(img1_str));
+        assert!(!cleaned.contains(img2_str));
+        assert!(cleaned.contains("Opis:"));
+        assert!(cleaned.contains("Koniec"));
+
+        fs::remove_file(img1).ok();
+        fs::remove_file(img2).ok();
+    }
+
+    #[test]
+    fn test_empty_text() {
+        let (cleaned, paths) = extract_image_paths("");
+        assert!(paths.is_empty());
+        assert_eq!(cleaned, "");
+    }
+
+    #[test]
+    fn test_case_insensitive_extension() {
+        let img = create_temp_image("test_case_ext.PNG");
+        let img_str = img.to_str().unwrap();
+        let text = img_str.to_string();
+
+        let (cleaned, paths) = extract_image_paths(&text);
+
+        assert_eq!(paths.len(), 1);
+        assert!(cleaned.is_empty() || !cleaned.contains(img_str));
+
+        fs::remove_file(img).ok();
+    }
+
+    // ── Istniejące testy ──────────────────────────────────────────────────────
 
     #[test]
     fn test_media_type_mime_strings() {
