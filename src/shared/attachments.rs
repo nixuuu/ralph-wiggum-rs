@@ -7,7 +7,10 @@
 // TODO: remove when attachment loader is implemented
 #![allow(dead_code)]
 use base64::{Engine as _, engine::general_purpose};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::shared::error::{RalphError, Result};
 
 /// Obsługiwane rozszerzenia plików graficznych (małe litery).
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
@@ -191,10 +194,54 @@ pub fn extract_image_paths(text: &str) -> (String, Vec<PathBuf>) {
     (cleaned, image_paths)
 }
 
+// ── Walidacja pliku graficznego ──────────────────────────────────────────────
+
+/// Lista nazw obsługiwanych formatów obrazów — używana w komunikatach błędu.
+const SUPPORTED_FORMAT_NAMES: &[&str] = &["PNG", "JPEG", "GIF", "WebP"];
+
+/// Waliduje plik graficzny i zwraca jego surowe bajty oraz wykryty typ MIME.
+///
+/// Implementuje fail-fast: pierwszy napotkany błąd przerywa walidację
+/// i zwraca czytelny komunikat z pełną ścieżką pliku.
+///
+/// # Kroki walidacji
+/// 1. Sprawdza istnienie pliku (`path.exists()`).
+/// 2. Odczytuje bajty pliku (`fs::read`).
+/// 3. Wykrywa format na podstawie magic bytes (`detect_media_type`).
+///
+/// # Błędy
+/// - [`RalphError::MissingFile`] — plik nie istnieje (zawiera pełną ścieżkę).
+/// - [`RalphError::Io`] — brak uprawnień do odczytu lub inny błąd I/O.
+/// - [`RalphError::UnsupportedImageFormat`] — bajty nie pasują do żadnego
+///   obsługiwanego formatu; komunikat zawiera listę dozwolonych formatów.
+///
+/// # Zwraca
+/// `(bajty, MediaType)` dla poprawnych plików graficznych.
+pub fn validate_image_file(path: &Path) -> Result<(Vec<u8>, MediaType)> {
+    // Sprawdź istnienie — wcześniejszy błąd niż I/O, z pełną ścieżką.
+    if !path.exists() {
+        return Err(RalphError::MissingFile(path.display().to_string()));
+    }
+
+    // Odczytaj plik — propaguje błąd uprawnień / I/O przez RalphError::Io.
+    let data = fs::read(path)?;
+
+    // Wykryj format na podstawie magic bytes.
+    let media_type =
+        detect_media_type(&data).ok_or_else(|| RalphError::UnsupportedImageFormat {
+            path: path.display().to_string(),
+            supported: SUPPORTED_FORMAT_NAMES.join(", "),
+        })?;
+
+    Ok((data, media_type))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     // ── Testy funkcji pomocniczych ────────────────────────────────────────────
 
@@ -600,5 +647,126 @@ mod tests {
         // Decode roundtrip
         let decoded = general_purpose::STANDARD.decode(&encoded).unwrap();
         assert_eq!(decoded, data);
+    }
+
+    // --- validate_image_file ---
+
+    /// Pomocnik: tworzy tymczasowy plik z podanymi bajtami.
+    fn tmp_file_with(bytes: &[u8]) -> NamedTempFile {
+        let mut f = NamedTempFile::new().expect("tempfile");
+        f.write_all(bytes).expect("write");
+        f
+    }
+
+    #[test]
+    fn test_validate_image_file_png_ok() {
+        let header: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let f = tmp_file_with(header);
+        let (data, mt) = validate_image_file(f.path()).expect("valid PNG");
+        assert_eq!(mt, MediaType::Png);
+        assert_eq!(data, header);
+    }
+
+    #[test]
+    fn test_validate_image_file_jpeg_ok() {
+        let header: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let f = tmp_file_with(header);
+        let (_, mt) = validate_image_file(f.path()).expect("valid JPEG");
+        assert_eq!(mt, MediaType::Jpeg);
+    }
+
+    #[test]
+    fn test_validate_image_file_gif_ok() {
+        let f = tmp_file_with(b"GIF89a\x01\x00\x01\x00");
+        let (_, mt) = validate_image_file(f.path()).expect("valid GIF");
+        assert_eq!(mt, MediaType::Gif);
+    }
+
+    #[test]
+    fn test_validate_image_file_webp_ok() {
+        let mut data = [0u8; 12];
+        data[..4].copy_from_slice(b"RIFF");
+        data[8..12].copy_from_slice(b"WEBP");
+        let f = tmp_file_with(&data);
+        let (_, mt) = validate_image_file(f.path()).expect("valid WebP");
+        assert_eq!(mt, MediaType::WebP);
+    }
+
+    #[test]
+    fn test_validate_image_file_missing_path() {
+        let path = std::path::Path::new("/tmp/__ralph_nonexistent_image_xyz.png");
+        let err = validate_image_file(path).expect_err("should fail");
+        match err {
+            RalphError::MissingFile(msg) => {
+                // Komunikat zawiera pełną ścieżkę
+                assert!(
+                    msg.contains("__ralph_nonexistent_image_xyz"),
+                    "path in error: {msg}"
+                );
+            }
+            other => panic!("expected MissingFile, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_image_file_unsupported_format() {
+        // Dane losowe — żaden format nie pasuje
+        let f = tmp_file_with(&[0x00, 0x01, 0x02, 0x03, 0x04]);
+        let err = validate_image_file(f.path()).expect_err("should fail");
+        match err {
+            RalphError::UnsupportedImageFormat { path, supported } => {
+                // Ścieżka jest w komunikacie
+                assert!(!path.is_empty(), "path should not be empty");
+                // Lista formatów jest w komunikacie
+                assert!(
+                    supported.contains("PNG"),
+                    "supported should list PNG: {supported}"
+                );
+                assert!(
+                    supported.contains("JPEG"),
+                    "supported should list JPEG: {supported}"
+                );
+                assert!(
+                    supported.contains("GIF"),
+                    "supported should list GIF: {supported}"
+                );
+                assert!(
+                    supported.contains("WebP"),
+                    "supported should list WebP: {supported}"
+                );
+            }
+            other => panic!("expected UnsupportedImageFormat, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_image_file_empty_file() {
+        // Pusty plik — detect_media_type(&[]) zwraca None → UnsupportedImageFormat
+        let f = tmp_file_with(&[]);
+        let err = validate_image_file(f.path()).expect_err("empty file should fail");
+        assert!(
+            matches!(err, RalphError::UnsupportedImageFormat { .. }),
+            "expected UnsupportedImageFormat, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_image_file_error_message_readable() {
+        // Sprawdź że Display komunikatu błędu jest czytelny
+        let path = std::path::Path::new("/tmp/__ralph_test.xyz");
+        if let Err(e) = validate_image_file(path) {
+            let msg = e.to_string();
+            assert!(!msg.is_empty());
+        }
+
+        let f = tmp_file_with(b"\x00\x00\x00\x00");
+        if let Err(e) = validate_image_file(f.path()) {
+            let msg = e.to_string();
+            // Komunikat zawiera informację o obsługiwanych formatach
+            assert!(
+                msg.contains("PNG") || msg.contains("Obsługiwane"),
+                "Error should mention supported formats: {msg}"
+            );
+        }
     }
 }

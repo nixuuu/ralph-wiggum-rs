@@ -61,6 +61,12 @@ pub enum RalphError {
 
     #[error("Notification error: {0}")]
     Notification(String),
+
+    /// Plik nie jest obsługiwanym formatem obrazu.
+    ///
+    /// Zawiera ścieżkę do pliku oraz listę obsługiwanych formatów.
+    #[error("Nieobsługiwany format obrazu: '{path}'. Obsługiwane formaty: {supported}")]
+    UnsupportedImageFormat { path: String, supported: String },
 }
 
 pub type Result<T> = std::result::Result<T, RalphError>;
@@ -135,6 +141,13 @@ mod tests {
             (
                 RalphError::Mcp("connection refused".to_string()),
                 "MCP error: connection refused",
+            ),
+            (
+                RalphError::UnsupportedImageFormat {
+                    path: "/tmp/photo.bmp".to_string(),
+                    supported: "PNG, JPEG, GIF, WebP".to_string(),
+                },
+                "Nieobsługiwany format obrazu: '/tmp/photo.bmp'. Obsługiwane formaty: PNG, JPEG, GIF, WebP",
             ),
         ];
 
