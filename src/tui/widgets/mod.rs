@@ -4,6 +4,7 @@ pub mod ask_user_choice;
 pub mod ask_user_confirm;
 pub mod ask_user_multi;
 pub mod ask_user_text;
+pub mod attachment_panel;
 pub mod command_palette;
 #[allow(dead_code)]
 pub mod header;
@@ -57,5 +58,7 @@ pub use task_tree::{FlatRow, TaskTreeWidget, TreeState};
 pub use text_input_overlay::{InputAction, TextInputOverlay};
 
 pub use ask_user::{AskUserAction, AskUserQuestion, AskUserWidget, QuestionKind};
+#[allow(unused_imports)] // TUI component — will be used when attachment support is integrated
+pub use attachment_panel::{AttachmentInfo, AttachmentPanelState, AttachmentPanelWidget};
 pub use command_palette::{CommandPaletteState, CommandPaletteWidget, PaletteAction, PaletteItem};
 pub use output_view::{OutputView, OutputViewState};
