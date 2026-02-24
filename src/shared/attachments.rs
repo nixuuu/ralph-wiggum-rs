@@ -1195,6 +1195,20 @@ mod tests {
         f
     }
 
+    /// Tworzy prawdziwy plik JPEG o podanych wymiarach w katalogu tymczasowym.
+    fn write_jpeg_file(width: u32, height: u32) -> NamedTempFile {
+        let img = image::DynamicImage::new_rgb8(width, height);
+        let mut buf = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&buf).unwrap();
+        f
+    }
+
     #[test]
     fn test_load_attachment_returns_image_variant() {
         let f = write_png_file(100, 100);
@@ -1294,11 +1308,48 @@ mod tests {
 
     #[test]
     fn test_load_attachment_missing_file() {
-        let path = Path::new("/tmp/__ralph_load_attachment_nonexistent.png");
-        let err = load_attachment(path).expect_err("Brakujący plik powinien dać błąd");
+        // Utwórz tymczasowy plik, a następnie go usuń — mamy gwarancję że ścieżka nie istnieje.
+        let path = {
+            let f = NamedTempFile::new().unwrap();
+            f.path().to_path_buf()
+        }; // f jest droppowany tutaj → plik zostaje usunięty
+        let err = load_attachment(&path).expect_err("Brakujący plik powinien dać błąd");
         assert!(
             matches!(err, RalphError::MissingFile(_)),
             "Błąd powinien być MissingFile, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_load_attachment_jpeg_roundtrip() {
+        // JPEG end-to-end: mały obraz JPEG powinien zwrócić Attachment::Image
+        // z MediaType::Jpeg i poprawnym base64 (stratna kompresja JPEG → sprawdzamy
+        // tylko że zdekodowane bajty są prawidłowym obrazem, nie bajtową identyczność).
+        use base64::{Engine as _, engine::general_purpose};
+        let f = write_jpeg_file(100, 100);
+        let result = load_attachment(f.path()).expect("JPEG powinien zostać załadowany poprawnie");
+        let Attachment::Image(att) = result;
+        assert_eq!(
+            att.media_type,
+            MediaType::Jpeg,
+            "Typ MIME powinien być JPEG"
+        );
+        assert!(
+            !att.base64_data.is_empty(),
+            "base64_data nie może być puste"
+        );
+        // Dekoduj base64 i sprawdź że jest to prawidłowy obraz
+        let decoded = general_purpose::STANDARD
+            .decode(&att.base64_data)
+            .expect("base64_data powinno być poprawnym base64");
+        let img = image::load_from_memory(&decoded)
+            .expect("Zdekodowane bajty powinny być prawidłowym obrazem");
+        // Mały obraz nie powinien być resizowany
+        assert!(
+            img.width() <= 100 && img.height() <= 100,
+            "Mały obraz JPEG nie powinien być resizowany ({}x{})",
+            img.width(),
+            img.height()
         );
     }
 
